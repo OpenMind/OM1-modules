@@ -63,7 +63,7 @@ class AudioOutputStream:
         try:
             self.session = zenoh.open(zenoh.Config())
             self.pub = self.session.declare_publisher(self.topic)
-            self.session.declare_subscriber(self.topic, self.audio_message)
+            self.session.declare_subscriber(self.topic, self.zenoh_audio_message)
         except Exception as e:
             logger.error(f"Failed to declare Zenoh subscriber: {e}")
             self.session = None
@@ -79,9 +79,9 @@ class AudioOutputStream:
         self.running: bool = True
         self._last_audio_time = time.time()
 
-    def audio_message(self, data):
+    def zenoh_audio_message(self, data: str):
         """
-        Receives audio data and processes it.
+        Callback function for Zenoh audio status messages.
 
         Parameters
         ----------
