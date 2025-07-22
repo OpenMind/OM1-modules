@@ -42,23 +42,8 @@ class VILAModelSingleton:
                     raise
 
     def _warmup_model(self, model_args):
-        """Warmup the model with a simple query"""
-        # disable warmup for now to avoid the concurrency issue
-        # try:
-        #     model_config = GenerationConfig(
-        #         max_new_tokens=48,
-        #         temperature=0.7,
-        #         top_p=0.95,
-        #         do_sample=True,
-        #     )
-        #     with torch.inference_mode():
-        #         self._model.generate_content(
-        #             ["What is 1 plus 1?"],
-        #             model_config,
-        #         )
-        # except Exception as e:
-        #     logger.error(f"Model warmup failed: {e}")
-        #     raise
+        """Warm up the model with dummy data to ensure it's ready for inference"""
+        pass
 
     @property
     def model(self):

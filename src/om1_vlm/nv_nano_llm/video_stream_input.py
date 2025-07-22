@@ -1,5 +1,6 @@
 import argparse
 import base64
+import json
 import logging
 from typing import Callable, Optional
 
@@ -49,7 +50,7 @@ class VideoStreamInput:
         connection_id : str
             Unique identifier for the WebSocket connection
         message : str
-            Base64-encoded video frame data
+            JSON string containing frame data and timestamp
 
         Raises
         ------
@@ -57,8 +58,13 @@ class VideoStreamInput:
             If frame processing fails at any stage
         """
         try:
-            # Decode base64 image
-            img_bytes = base64.b64decode(message)
+            try:
+                frame_data = json.loads(message)
+                frame_base64 = frame_data.get("frame", message)
+            except json.JSONDecodeError:
+                frame_base64 = message
+
+            img_bytes = base64.b64decode(frame_base64)
             img_np = np.frombuffer(img_bytes, dtype=np.uint8)
             frame = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
 

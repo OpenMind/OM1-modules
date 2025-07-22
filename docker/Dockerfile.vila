@@ -20,6 +20,6 @@ RUN conda run -n vila pip install -U "huggingface_hub[cli]" && \
   conda run -n vila pip install -U "huggingface_hub[hf_transfer]" && \
   conda run -n vila huggingface-cli download Efficient-Large-Model/VILA1.5-3b --local-dir /app/Efficient-Large-Model/VILA1.5-3B
 
-EXPOSE 6789
+EXPOSE 6789 8888
 
 CMD ["conda", "run", "-n", "vila", "--no-capture-output", "python", "-m", "om1_vlm", "--model-name=vila", "--server-mode", "--ws-host=0.0.0.0"]

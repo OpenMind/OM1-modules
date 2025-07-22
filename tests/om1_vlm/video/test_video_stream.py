@@ -1,3 +1,4 @@
+import json
 import time
 from unittest.mock import Mock, patch
 
@@ -189,6 +190,15 @@ def test_frame_callback():
             assert len(received_frames) > 0, "No frames were received"
             assert isinstance(received_frames[0], str), "Frame data is not a string"
 
+            # Verify JSON structure with timestamp
+            frame_json = json.loads(received_frames[0])
+            assert "timestamp" in frame_json, "Timestamp missing from frame data"
+            assert "frame" in frame_json, "Frame data missing from JSON"
+            assert isinstance(
+                frame_json["timestamp"], (int, float)
+            ), "Timestamp should be numeric"
+            assert isinstance(frame_json["frame"], str), "Frame should be base64 string"
+
 
 def test_frame_callback_coroutine():
     import asyncio
@@ -291,3 +301,62 @@ def test_error_handling():
         # Verify error handling
         stream.stop()
         assert not stream._video_thread.is_alive()
+
+
+def test_frame_timestamp():
+    """Test that frames include proper timestamps."""
+    received_frames = []
+    received_timestamps = []
+
+    def callback(frame_data):
+        frame_json = json.loads(frame_data)
+        received_frames.append(frame_json["frame"])
+        received_timestamps.append(frame_json["timestamp"])
+
+    # Set up all mocks before creating VideoStream
+    mock_devices = [(0, "Mock Camera")]
+
+    with (
+        patch(
+            "om1_vlm.video.video_stream.enumerate_video_devices",
+            return_value=mock_devices,
+        ),
+        patch("platform.system", return_value="Linux"),
+    ):
+        # Create mock camera
+        mock_cap = MockVideoCapture("/dev/video0")
+
+        with (
+            patch("cv2.VideoCapture", return_value=mock_cap),
+            patch("cv2.imencode", return_value=(True, b"fake_image_data")),
+        ):
+            # Create and start the video stream
+            stream = VideoStream(frame_callback=callback)
+            stream.start()
+
+            # Wait for multiple frames
+            timeout = 2.0
+            start_time = time.time()
+            while len(received_frames) < 3 and time.time() - start_time < timeout:
+                time.sleep(0.5)
+
+            # Stop the stream
+            stream.stop()
+
+            # Verify we received multiple frames with timestamps
+            assert (
+                len(received_timestamps) >= 3
+            ), "Should have received at least 3 frames"
+
+            # Verify timestamps are increasing
+            for i in range(1, len(received_timestamps)):
+                assert (
+                    received_timestamps[i] >= received_timestamps[i - 1]
+                ), "Timestamps should be monotonically increasing"
+
+            # Verify timestamp format (should be Unix timestamp)
+            for ts in received_timestamps:
+                assert isinstance(ts, (int, float)), "Timestamp should be numeric"
+                assert (
+                    ts > 1600000000
+                ), "Timestamp should be a reasonable Unix timestamp"

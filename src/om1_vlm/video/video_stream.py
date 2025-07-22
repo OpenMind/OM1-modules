@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import inspect
+import json
 import logging
 import platform
 import threading
@@ -140,7 +141,11 @@ class VideoStream:
 
                 if elapsed <= 1.5 * frame_time and self.frame_callbacks:
                     _, buffer = cv2.imencode(".jpg", frame, self.encode_quality)
-                    frame_data = base64.b64encode(buffer).decode("utf-8")
+                    frame_base64 = base64.b64encode(buffer).decode("utf-8")
+
+                    frame_data = json.dumps(
+                        {"timestamp": time.time(), "frame": frame_base64}
+                    )
 
                     for frame_callback in self.frame_callbacks:
                         if inspect.iscoroutinefunction(frame_callback):

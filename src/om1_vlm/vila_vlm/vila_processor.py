@@ -135,6 +135,7 @@ class VILAProcessor:
 
                     # Create a copy of the buffer to process
                     images_to_process = self.image_buffer.copy()
+                    self.image_buffer.clear()
 
                 logger.info(f"Processing {len(images_to_process)} images")
                 message = {
