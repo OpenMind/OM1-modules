@@ -313,6 +313,9 @@ class AudioOutputStream:
         """
         self.running = False
 
+        if self.session:
+            self.session.close()
+
 
 def is_installed(lib_name: str) -> bool:
     return shutil.which(lib_name) is not None

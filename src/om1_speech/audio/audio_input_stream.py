@@ -445,6 +445,9 @@ class AudioInputStream:
         """
         self.running = False
 
+        if self.session:
+            self.session.close()
+
         if self._audio_stream:
             self._audio_stream.stop_stream()
             self._audio_stream.close()
