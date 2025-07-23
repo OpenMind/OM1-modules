@@ -7,7 +7,8 @@ readme = "README.md"
 packages = [
     { include = "om1_speech", from = "src" },
     { include = "om1_utils", from = "src" },
-    { include = "om1_vlm", from = "src" }
+    { include = "om1_vlm", from = "src" },
+    { include = "zenoh_idl", from = "src" }
 ]
 
 [tool.poetry.scripts]
@@ -24,6 +25,8 @@ protobuf = "^5.29.3"
 google = "^3.0.0"
 pyrealsense2 = {version = "2.55.1.6486", markers = "sys_platform == 'win32'", optional = true}
 pyrealsense2-macosx = {version = "^2.54.2", markers = "sys_platform == 'darwin'", optional = true}
+eclipse-zenoh = "^1.4.0"
+pycdr2 = "^1.0.0"
 
 [tool.poetry.extras]
 realsense = ["pyrealsense2", "pyrealsense2-macosx"]

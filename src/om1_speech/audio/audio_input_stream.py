@@ -9,6 +9,10 @@ import threading
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import pyaudio
+import zenoh
+
+from zenoh_idl.status_msgs import AudioStatus
+from zenoh_idl.std_msgs import String, prepare_header
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
@@ -90,6 +94,20 @@ class AudioInputStream:
         # Lock for thread safety
         self._lock = threading.Lock()
 
+        # Zenoh
+        self.topic = "robot/status/audio"
+        self.session = None
+        self.pub = None
+        self.audio_status = None
+
+        try:
+            self.session = zenoh.open(zenoh.Config())
+            self.pub = self.session.declare_publisher(self.topic)
+            self.session.declare_subscriber(self.topic, self.zenoh_audio_message)
+        except Exception as e:
+            logger.error(f"Failed to declare Zenoh subscriber: {e}")
+            self.session = None
+
         self.running: bool = True
 
         self.remote_input = remote_input
@@ -167,6 +185,49 @@ class AudioInputStream:
             logger.error(f"Error initializing audio input: {e}")
             self._audio_interface.terminate()
             raise
+
+    def zenoh_audio_message(self, data: str):
+        """
+        Callback function for Zenoh audio status messages.
+
+        Parameters
+        ----------
+        data : str
+            The audio data in base64 encoded string format.
+        """
+        self.audio_status = AudioStatus.deserialize(data.payload.to_bytes())
+
+        if self.audio_status.status_speaker == AudioStatus.STATUS_SPEAKER.ACTIVE.value:
+            with self._lock:
+                if not self._is_tts_active:
+                    state = AudioStatus(
+                        header=prepare_header(),
+                        status_mic=self.audio_status.status_mic,
+                        status_speaker=AudioStatus.STATUS_SPEAKER.ACTIVE.value,
+                        sentence_to_speak=String(""),
+                        sentence_counter=self.audio_status.sentence_counter,
+                    )
+
+                    if self.pub:
+                        self.pub.put(state.serialize())
+
+                    self._is_tts_active = True
+
+        if self.audio_status.status_speaker == AudioStatus.STATUS_SPEAKER.READY.value:
+            with self._lock:
+                if self._is_tts_active:
+                    state = AudioStatus(
+                        header=prepare_header(),
+                        status_mic=self.audio_status.status_mic,
+                        status_speaker=AudioStatus.STATUS_SPEAKER.READY.value,
+                        sentence_to_speak=String(""),
+                        sentence_counter=self.audio_status.sentence_counter,
+                    )
+
+                    if self.pub:
+                        self.pub.put(state.serialize())
+
+                    self._is_tts_active = False
 
     def on_tts_state_change(self, is_active: bool):
         """
@@ -381,6 +442,9 @@ class AudioInputStream:
         and ensures the audio processing thread is properly shut down.
         """
         self.running = False
+
+        if self.session:
+            self.session.close()
 
         if self._audio_stream:
             self._audio_stream.stop_stream()

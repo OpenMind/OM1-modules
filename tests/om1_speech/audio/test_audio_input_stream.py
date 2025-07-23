@@ -42,6 +42,7 @@ def audio_stream(mock_pyaudio):
 def test_initialization(mock_pyaudio):
     """Test AudioInputStream initialization with default parameters"""
     stream = AudioInputStream()
+
     assert stream._rate == 16000
     assert stream._chunk == 3200
     assert stream._device == 0
@@ -51,6 +52,8 @@ def test_initialization(mock_pyaudio):
     assert stream._audio_interface is not None
     assert stream._audio_stream is None
     assert stream._audio_thread is None
+
+    stream.stop()
 
 
 def test_start_with_default_device(audio_stream, mock_pyaudio):
@@ -74,6 +77,8 @@ def test_start_with_default_device(audio_stream, mock_pyaudio):
         stream_callback=audio_stream._fill_buffer,
     )
 
+    audio_stream.stop()
+
 
 def test_start_with_specific_device(mock_pyaudio):
     """Test starting AudioInputStream with a specific device"""
@@ -81,6 +86,7 @@ def test_start_with_specific_device(mock_pyaudio):
     stream.start()
 
     mock_pyaudio.return_value.get_device_info_by_index.assert_called_once_with(1)
+    stream.stop()
 
 
 def test_audio_data_callbacks(mock_pyaudio):
@@ -89,6 +95,8 @@ def test_audio_data_callbacks(mock_pyaudio):
     stream.register_audio_data_callback(lambda data: None)
 
     assert len(stream._audio_data_callbacks) == 1
+
+    stream.stop()
 
 
 @pytest.mark.parametrize("is_active", [True, False])
@@ -209,6 +217,8 @@ def test_error_handling(mock_pyaudio):
 
     # Verify cleanup was performed
     mock_pyaudio.return_value.terminate.assert_called_once()
+
+    stream.stop()
 
 
 def test_multiple_chunks_generation(audio_stream):

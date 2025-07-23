@@ -10,6 +10,10 @@ from queue import Queue
 from typing import Callable, Dict, Optional
 
 import requests
+import zenoh
+
+from zenoh_idl.status_msgs import AudioStatus
+from zenoh_idl.std_msgs import String, prepare_header
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
@@ -50,6 +54,20 @@ class AudioOutputStream:
         # Callback for TTS state
         self._tts_state_callback = tts_state_callback
 
+        # Zenoh
+        self.topic = "robot/status/audio"
+        self.session = None
+        self.pub = None
+        self.audio_status = None
+
+        try:
+            self.session = zenoh.open(zenoh.Config())
+            self.pub = self.session.declare_publisher(self.topic)
+            self.session.declare_subscriber(self.topic, self.zenoh_audio_message)
+        except Exception as e:
+            logger.error(f"Failed to declare Zenoh subscriber: {e}")
+            self.session = None
+
         # Pending requests queue
         self._pending_requests: Queue[Optional[str]] = Queue()
 
@@ -60,6 +78,25 @@ class AudioOutputStream:
         # Running state and last audio time
         self.running: bool = True
         self._last_audio_time = time.time()
+
+    def zenoh_audio_message(self, data: str):
+        """
+        Callback function for Zenoh audio status messages.
+
+        Parameters
+        ----------
+        data : str
+            The audio data in base64 encoded string format.
+        """
+        self.audio_status = AudioStatus.deserialize(data.payload.to_bytes())
+        if (
+            self.audio_status
+            and self.audio_status.sentence_to_speak.data
+            and self.audio_status.status_speaker
+            == AudioStatus.STATUS_SPEAKER.ACTIVE.value
+        ):
+            pending_message = json.loads(self.audio_status.sentence_to_speak.data)
+            self.add_request(pending_message)
 
     def set_tts_state_callback(self, callback: Callable):
         """
@@ -183,6 +220,23 @@ class AudioOutputStream:
         if not is_keepalive:
             self._tts_callback(True)
 
+            state = AudioStatus(
+                header=prepare_header(),
+                status_mic=(
+                    self.audio_status.status_mic
+                    if self.audio_status
+                    else AudioStatus.STATUS_MIC.UNKNOWN.value
+                ),
+                status_speaker=AudioStatus.STATUS_SPEAKER.ACTIVE.value,
+                sentence_to_speak=String(""),
+                sentence_counter=(
+                    self.audio_status.sentence_counter + 1 if self.audio_status else 0
+                ),
+            )
+
+            if self.pub:
+                self.pub.put(state.serialize())
+
         args = [
             "ffplay",
             "-autoexit",
@@ -207,6 +261,23 @@ class AudioOutputStream:
 
         if not is_keepalive:
             self._tts_callback(False)
+
+            state = AudioStatus(
+                header=prepare_header(),
+                status_mic=(
+                    self.audio_status.status_mic
+                    if self.audio_status
+                    else AudioStatus.STATUS_MIC.UNKNOWN.value
+                ),
+                status_speaker=AudioStatus.STATUS_SPEAKER.READY.value,
+                sentence_to_speak=String(""),
+                sentence_counter=(
+                    self.audio_status.sentence_counter + 1 if self.audio_status else 0
+                ),
+            )
+
+            if self.pub:
+                self.pub.put(state.serialize())
 
     def _tts_callback(self, is_active: bool):
         """
@@ -260,6 +331,9 @@ class AudioOutputStream:
         Stop the audio output stream and cleanup resources.
         """
         self.running = False
+
+        if self.session:
+            self.session.close()
 
 
 def is_installed(lib_name: str) -> bool:
