@@ -89,11 +89,14 @@ class AudioOutputStream:
             The audio data in base64 encoded string format.
         """
         self.audio_status = AudioStatus.deserialize(data.payload.to_bytes())
-        if self.audio_status and self.audio_status.sentence_to_speak.data:
-            logger.info(
-                f"Received TTS sentence: {self.audio_status.sentence_to_speak.data}"
-            )
-            self.add_request(self.audio_status.sentence_to_speak.data)
+        if (
+            self.audio_status
+            and self.audio_status.sentence_to_speak.data
+            and self.audio_status.status_speaker
+            == AudioStatus.STATUS_SPEAKER.ACTIVE.value
+        ):
+            pending_message = json.loads(self.audio_status.sentence_to_speak.data)
+            self.add_request(pending_message)
 
     def set_tts_state_callback(self, callback: Callable):
         """
@@ -217,21 +220,22 @@ class AudioOutputStream:
         if not is_keepalive:
             self._tts_callback(True)
 
-            if self.audio_status is None:
-                self.audio_status = AudioStatus(
-                    header=prepare_header(),
-                    status_speaker=AudioStatus.STATUS_SPEAKER.ACTIVE.value,
-                    status_mic=AudioStatus.STATUS_MIC.UNKOWN.value,
-                    sentence_to_speak=String(""),
-                    sentence_counter=0,
-                )
-
-            new_state = self.audio_status
-            new_state.header = prepare_header()
-            new_state.status_speaker = AudioStatus.STATUS_SPEAKER.ACTIVE.value
+            state = AudioStatus(
+                header=prepare_header(),
+                status_mic=(
+                    self.audio_status.status_mic
+                    if self.audio_status
+                    else AudioStatus.STATUS_MIC.UNKNOWN.value
+                ),
+                status_speaker=AudioStatus.STATUS_SPEAKER.ACTIVE.value,
+                sentence_to_speak=String(""),
+                sentence_counter=(
+                    self.audio_status.sentence_counter + 1 if self.audio_status else 0
+                ),
+            )
 
             if self.pub:
-                self.pub.put(new_state.serialize())
+                self.pub.put(state.serialize())
 
         args = [
             "ffplay",
@@ -258,12 +262,22 @@ class AudioOutputStream:
         if not is_keepalive:
             self._tts_callback(False)
 
-            new_state = self.audio_status
-            new_state.header = prepare_header()
-            new_state.status_speaker = AudioStatus.STATUS_SPEAKER.READY.value
+            state = AudioStatus(
+                header=prepare_header(),
+                status_mic=(
+                    self.audio_status.status_mic
+                    if self.audio_status
+                    else AudioStatus.STATUS_MIC.UNKNOWN.value
+                ),
+                status_speaker=AudioStatus.STATUS_SPEAKER.READY.value,
+                sentence_to_speak=String(""),
+                sentence_counter=(
+                    self.audio_status.sentence_counter + 1 if self.audio_status else 0
+                ),
+            )
 
             if self.pub:
-                self.pub.put(new_state.serialize())
+                self.pub.put(state.serialize())
 
     def _tts_callback(self, is_active: bool):
         """

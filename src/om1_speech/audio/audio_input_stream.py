@@ -12,7 +12,7 @@ import pyaudio
 import zenoh
 
 from zenoh_idl.status_msgs import AudioStatus
-from zenoh_idl.std_msgs import prepare_header
+from zenoh_idl.std_msgs import String, prepare_header
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
@@ -196,40 +196,38 @@ class AudioInputStream:
             The audio data in base64 encoded string format.
         """
         self.audio_status = AudioStatus.deserialize(data.payload.to_bytes())
-        logger.info(f"Received audio status: {self.audio_status}")
 
         if self.audio_status.status_speaker == AudioStatus.STATUS_SPEAKER.ACTIVE.value:
             with self._lock:
-                print(
-                    "Audio input is active, resuming audio capture", self._is_tts_active
-                )
                 if not self._is_tts_active:
-                    new_state = self.audio_status
-                    new_state.header = prepare_header()
-                    new_state.status_mic = AudioStatus.STATUS_SPEAKER.ACTIVE.value
+                    state = AudioStatus(
+                        header=prepare_header(),
+                        status_mic=self.audio_status.status_mic,
+                        status_speaker=AudioStatus.STATUS_SPEAKER.ACTIVE.value,
+                        sentence_to_speak=String(""),
+                        sentence_counter=self.audio_status.sentence_counter,
+                    )
 
                     if self.pub:
-                        self.pub.put(new_state.serialize())
+                        self.pub.put(state.serialize())
 
                     self._is_tts_active = True
-                    logger.info("Audio input enabled, resuming audio capture")
 
         if self.audio_status.status_speaker == AudioStatus.STATUS_SPEAKER.READY.value:
             with self._lock:
-                print(
-                    "Audio input is ready, suspending audio capture",
-                    self._is_tts_active,
-                )
                 if self._is_tts_active:
-                    new_state = self.audio_status
-                    new_state.header = prepare_header()
-                    new_state.status_speaker = AudioStatus.STATUS_SPEAKER.READY.value
+                    state = AudioStatus(
+                        header=prepare_header(),
+                        status_mic=self.audio_status.status_mic,
+                        status_speaker=AudioStatus.STATUS_SPEAKER.READY.value,
+                        sentence_to_speak=String(""),
+                        sentence_counter=self.audio_status.sentence_counter,
+                    )
 
                     if self.pub:
-                        self.pub.put(new_state.serialize())
+                        self.pub.put(state.serialize())
 
                     self._is_tts_active = False
-                    logger.info("Audio input disabled, suspending audio capture")
 
     def on_tts_state_change(self, is_active: bool):
         """
