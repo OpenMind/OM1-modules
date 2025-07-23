@@ -89,6 +89,11 @@ class AudioOutputStream:
             The audio data in base64 encoded string format.
         """
         self.audio_status = AudioStatus.deserialize(data.payload.to_bytes())
+        if self.audio_status and self.audio_status.sentence_to_speak.data:
+            logger.info(
+                f"Received TTS sentence: {self.audio_status.sentence_to_speak.data}"
+            )
+            self.add_request(self.audio_status.sentence_to_speak.data)
 
     def set_tts_state_callback(self, callback: Callable):
         """
