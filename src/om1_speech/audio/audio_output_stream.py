@@ -78,6 +78,10 @@ class AudioOutputStream:
         # Running state and last audio time
         self.running: bool = True
         self._last_audio_time = time.time()
+        
+        self._is_playing = False
+
+        self._keep_alive_sound = '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'
 
     def zenoh_audio_message(self, data: str):
         """
@@ -175,10 +179,13 @@ class AudioOutputStream:
         """
         while self.running:
             current_time = time.time()
-            if current_time - self._last_audio_time >= 60:
-                self._write_audio_bytes(self._silence_audio, is_keepalive=True)
+            if current_time - self._last_audio_time >= 10 and not self._is_playing:
+                
+                self._write_audio_bytes(self._keep_alive_sound, is_keepalive=True)
+                # self._write_audio_bytes(self._silence_audio, is_keepalive=True)
                 self._last_audio_time = current_time
-            time.sleep(10)
+
+            time.sleep(2)
 
     def _write_audio(self, audio_data: bytes):
         """
@@ -219,6 +226,7 @@ class AudioOutputStream:
 
         if not is_keepalive:
             self._tts_callback(True)
+            self._is_playing = True
 
             state = AudioStatus(
                 header=prepare_header(),
@@ -247,12 +255,17 @@ class AudioOutputStream:
             # "-audio_device_index",
             # str(self._device),
         ]
+
+        if not is_keepalive:
+            logging.info("Starting to play audio")
+
         proc = subprocess.Popen(
             args=args,
             stdout=subprocess.PIPE,
             stdin=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+
         proc.communicate(input=audio_bytes)
         exit_code = proc.poll()
 
@@ -260,7 +273,8 @@ class AudioOutputStream:
             logger.error(f"Error playing audio: {exit_code}")
 
         if not is_keepalive:
-            self._tts_callback(False)
+            self._delayed_tts_false_callback()
+            self._is_playing = False
 
             state = AudioStatus(
                 header=prepare_header(),
@@ -290,6 +304,23 @@ class AudioOutputStream:
         """
         if self._tts_state_callback:
             self._tts_state_callback(is_active)
+
+    def _delayed_tts_false_callback(self, delay_seconds: float = 1.0):
+        """
+        Call the TTS callback after a delay without blocking the main thread.
+        
+        Parameters
+        ----------
+        delay_seconds : float
+            The delay in seconds before calling the callback
+        """
+        def delayed_callback():
+            time.sleep(delay_seconds)
+            self._tts_callback(False)
+        
+        # Start the delayed callback in a separate thread
+        thread = threading.Thread(target=delayed_callback, daemon=True)
+        thread.start()
 
     def start(self):
         """
