@@ -8,9 +8,21 @@ import threading
 import time
 from queue import Queue
 from typing import Callable, Dict, Optional
+import struct
+import wave
+import io
 
 import requests
 import zenoh
+
+# Try to import pyaudio, with fallback to ffplay
+try:
+    import pyaudio
+    PYAUDIO_AVAILABLE = True
+except ImportError:
+    PYAUDIO_AVAILABLE = False
+    logging.warning("PyAudio not available. Install with 'pip install pyaudio' for better performance.")
+
 
 from zenoh_idl.status_msgs import AudioStatus
 from zenoh_idl.std_msgs import String, prepare_header
@@ -42,9 +54,11 @@ class AudioOutputStream:
         rate: int = 8000,
         tts_state_callback: Optional[Callable] = None,
         headers: Optional[Dict[str, str]] = None,
+        use_pyaudio: bool = True,
     ):
         self._url = url
         self._rate = rate
+        self._use_pyaudio = use_pyaudio and PYAUDIO_AVAILABLE
 
         # Process headers
         self._headers = headers or {}
@@ -53,6 +67,20 @@ class AudioOutputStream:
 
         # Callback for TTS state
         self._tts_state_callback = tts_state_callback
+
+        # Initialize PyAudio if available and requested
+        self._pyaudio = None
+        self._audio_stream = None
+        if self._use_pyaudio:
+            try:
+                self._pyaudio = pyaudio.PyAudio()
+                # Pre-initialize the audio stream for lower latency
+                self._init_audio_stream()
+                logger.info("Using PyAudio for low-latency audio playback")
+            except Exception as e:
+                logger.error(f"Failed to initialize PyAudio: {e}")
+                self._use_pyaudio = False
+                self._pyaudio = None
 
         # Zenoh
         self.topic = "robot/status/audio"
@@ -71,7 +99,7 @@ class AudioOutputStream:
         # Pending requests queue
         self._pending_requests: Queue[Optional[str]] = Queue()
 
-        # Slience audio for Bluetooth optimization
+        # Silence audio for Bluetooth optimization
         self._silence_audio = self._create_silence_audio(100)
         self._silence_prefix = self._create_silence_audio(500)
 
@@ -81,7 +109,29 @@ class AudioOutputStream:
         
         self._is_playing = False
 
+        # Keep-alive sound (base64 encoded)
         self._keep_alive_sound = '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'
+
+    def _init_audio_stream(self):
+        """Initialize PyAudio stream for low-latency playback."""
+        if not self._pyaudio:
+            return
+            
+        try:
+            # Use smaller buffer for lower latency
+            self._audio_stream = self._pyaudio.open(
+                format=pyaudio.paInt16,  # 16-bit audio
+                channels=1,  # Mono
+                rate=self._rate,
+                output=True,
+                frames_per_buffer=512,  # Smaller buffer for lower latency
+                # On macOS, you might want to specify the output device
+                # output_device_index=self._pyaudio.get_default_output_device_info()['index']
+            )
+            logger.info("PyAudio stream initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize PyAudio stream: {e}")
+            self._audio_stream = None
 
     def zenoh_audio_message(self, data: str):
         """
@@ -202,7 +252,154 @@ class AudioOutputStream:
 
         self._write_audio_bytes(base64.b64encode(audio_bytes))
 
-    def _write_audio_bytes(self, audio_data: bytes, is_keepalive: bool = False):
+    def _decode_mp3_to_pcm(self, mp3_data: bytes) -> tuple[bytes, int]:
+        """
+        Decode MP3 data to PCM using ffmpeg.
+        
+        Parameters
+        ----------
+        mp3_data : bytes
+            MP3 encoded audio data
+            
+        Returns
+        -------
+        tuple[bytes, int]
+            PCM audio data and sample rate
+        """
+        import tempfile
+        import os
+        
+        # Check if ffmpeg is available
+        if not is_installed("ffmpeg"):
+            raise Exception("ffmpeg not found, needed for MP3 decoding")
+        
+        # Create temporary files
+        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_mp3:
+            tmp_mp3.write(mp3_data)
+            tmp_mp3_path = tmp_mp3.name
+        
+        tmp_pcm_path = tmp_mp3_path.replace('.mp3', '.raw')
+        
+        try:
+            # Use ffmpeg to decode MP3 to raw PCM
+            # -ar: sample rate, -ac: channels (1=mono), -f s16le: 16-bit little-endian PCM
+            cmd = [
+                "ffmpeg",
+                "-i", tmp_mp3_path,
+                "-ar", str(self._rate),
+                "-ac", "1",
+                "-f", "s16le",
+                "-acodec", "pcm_s16le",
+                tmp_pcm_path,
+                "-y",  # Overwrite output
+                "-loglevel", "error"
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise Exception(f"ffmpeg failed: {result.stderr}")
+            
+            # Read the PCM data
+            with open(tmp_pcm_path, 'rb') as f:
+                pcm_data = f.read()
+            
+            return pcm_data, self._rate
+            
+        finally:
+            # Clean up temporary files
+            for path in [tmp_mp3_path, tmp_pcm_path]:
+                if os.path.exists(path):
+                    os.unlink(path)
+
+    def _write_audio_bytes_pyaudio(self, audio_data: bytes, is_keepalive: bool = False):
+        """
+        Write audio data using PyAudio for low-latency playback.
+
+        Parameters
+        ----------
+        audio_data : bytes
+            The base64 encoded audio data to be played
+        is_keepalive : bool
+            Whether this is a keepalive sound
+        """
+        try:
+            audio_bytes = base64.b64decode(audio_data)
+            
+            if not is_keepalive:
+                self._tts_callback(True)
+                self._is_playing = True
+                logger.info("Starting to play audio (PyAudio)")
+                
+                # Update Zenoh status
+                state = AudioStatus(
+                    header=prepare_header(),
+                    status_mic=(
+                        self.audio_status.status_mic
+                        if self.audio_status
+                        else AudioStatus.STATUS_MIC.UNKNOWN.value
+                    ),
+                    status_speaker=AudioStatus.STATUS_SPEAKER.ACTIVE.value,
+                    sentence_to_speak=String(""),
+                    sentence_counter=(
+                        self.audio_status.sentence_counter + 1 if self.audio_status else 0
+                    ),
+                )
+                if self.pub:
+                    self.pub.put(state.serialize())
+
+            # Decode MP3 to PCM
+            try:
+                pcm_data, sample_rate = self._decode_mp3_to_pcm(audio_bytes)
+            except Exception as e:
+                logger.error(f"Failed to decode MP3: {e}")
+                raise
+            
+            # Ensure stream is initialized with correct sample rate
+            if not self._audio_stream or self._audio_stream.is_stopped():
+                self._init_audio_stream()
+            
+            if self._audio_stream:
+                # Play audio in chunks for better control
+                chunk_size = 1024
+                for i in range(0, len(pcm_data), chunk_size):
+                    chunk = pcm_data[i:i + chunk_size]
+                    if len(chunk) < chunk_size:
+                        # Pad the last chunk with silence if needed
+                        chunk += b'\x00' * (chunk_size - len(chunk))
+                    self._audio_stream.write(chunk)
+            else:
+                raise Exception("PyAudio stream not available")
+                
+        except Exception as e:
+            logger.error(f"Error playing audio with PyAudio: {e}")
+            # Fallback to ffplay
+            self._write_audio_bytes_ffplay(audio_data, is_keepalive)
+            return
+        
+        finally:
+            if not is_keepalive:
+                # self._tts_callback(False)
+                self._delayed_tts_false_callback()
+                self._is_playing = False
+                
+                # Update Zenoh status
+                state = AudioStatus(
+                    header=prepare_header(),
+                    status_mic=(
+                        self.audio_status.status_mic
+                        if self.audio_status
+                        else AudioStatus.STATUS_MIC.UNKNOWN.value
+                    ),
+                    status_speaker=AudioStatus.STATUS_SPEAKER.READY.value,
+                    sentence_to_speak=String(""),
+                    sentence_counter=(
+                        self.audio_status.sentence_counter + 1 if self.audio_status else 0
+                    ),
+                )
+                if self.pub:
+                    self.pub.put(state.serialize())
+
+    def _write_audio_bytes_ffplay(self, audio_data: bytes, is_keepalive: bool = False):
         """
         Write audio data to the output stream using ffplay.
 
@@ -273,6 +470,7 @@ class AudioOutputStream:
             logger.error(f"Error playing audio: {exit_code}")
 
         if not is_keepalive:
+            # self._tts_callback(False)
             self._delayed_tts_false_callback()
             self._is_playing = False
 
@@ -293,17 +491,21 @@ class AudioOutputStream:
             if self.pub:
                 self.pub.put(state.serialize())
 
-    def _tts_callback(self, is_active: bool):
+    def _write_audio_bytes(self, audio_data: bytes, is_keepalive: bool = False):
         """
-        Invoke the TTS state callback if set.
+        Write audio data to the output stream using the best available method.
 
         Parameters
         ----------
-        is_active : bool
-            Whether TTS is currently active
+        audio_data : bytes
+            The audio data to be written to the output stream
+        is_keepalive : bool
+            Whether this is a keepalive sound (suppresses callbacks)
         """
-        if self._tts_state_callback:
-            self._tts_state_callback(is_active)
+        if self._use_pyaudio:
+            self._write_audio_bytes_pyaudio(audio_data, is_keepalive)
+        else:
+            self._write_audio_bytes_ffplay(audio_data, is_keepalive)
 
     def _delayed_tts_false_callback(self, delay_seconds: float = 1.0):
         """
@@ -321,6 +523,18 @@ class AudioOutputStream:
         # Start the delayed callback in a separate thread
         thread = threading.Thread(target=delayed_callback, daemon=True)
         thread.start()
+
+    def _tts_callback(self, is_active: bool):
+        """
+        Invoke the TTS state callback if set.
+
+        Parameters
+        ----------
+        is_active : bool
+            Whether TTS is currently active
+        """
+        if self._tts_state_callback:
+            self._tts_state_callback(is_active)
 
     def start(self):
         """
@@ -362,6 +576,20 @@ class AudioOutputStream:
         Stop the audio output stream and cleanup resources.
         """
         self.running = False
+
+        # Clean up PyAudio resources
+        if self._audio_stream:
+            try:
+                self._audio_stream.stop_stream()
+                self._audio_stream.close()
+            except:
+                pass
+        
+        if self._pyaudio:
+            try:
+                self._pyaudio.terminate()
+            except:
+                pass
 
         if self.session:
             self.session.close()

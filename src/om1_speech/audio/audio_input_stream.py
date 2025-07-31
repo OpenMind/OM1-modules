@@ -6,6 +6,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import pyaudio
@@ -93,6 +94,9 @@ class AudioInputStream:
 
         # Lock for thread safety
         self._lock = threading.Lock()
+  
+        # Event for TTS state changes - more efficient than polling
+        self._tts_state_event = threading.Event()
 
         # Zenoh
         self.topic = "robot/status/audio"
@@ -200,6 +204,18 @@ class AudioInputStream:
         if self.audio_status.status_speaker == AudioStatus.STATUS_SPEAKER.ACTIVE.value:
             with self._lock:
                 if not self._is_tts_active:
+                    # Clear the audio buffer when TTS starts to prevent processing old audio
+                    cleared_chunks = 0
+                    while not self._buff.empty():
+                        try:
+                            self._buff.get_nowait()
+                            cleared_chunks += 1
+                        except queue.Empty:
+                            break
+                    
+                    if cleared_chunks > 0:
+                        logger.info(f"TTS active - cleared {cleared_chunks} audio chunks from buffer")
+                    
                     state = AudioStatus(
                         header=prepare_header(),
                         status_mic=self.audio_status.status_mic,
@@ -212,6 +228,8 @@ class AudioInputStream:
                         self.pub.put(state.serialize())
 
                     self._is_tts_active = True
+                    self._tts_state_event.set()  # Signal state change
+
 
         if self.audio_status.status_speaker == AudioStatus.STATUS_SPEAKER.READY.value:
             with self._lock:
@@ -228,22 +246,42 @@ class AudioInputStream:
                         self.pub.put(state.serialize())
 
                     self._is_tts_active = False
+                    self._tts_state_event.set()  # Signal state change
+
 
     def on_tts_state_change(self, is_active: bool):
         """
         Updates the TTS active state to control audio capture behavior.
-
-        When TTS is active, audio capture is temporarily suspended to prevent
-        capturing the TTS output.
-
-        Parameters
-        ----------
-        is_active : bool
-            True if TTS is currently playing, False otherwise
         """
+        # 1) Flip the flag under lock, and signal waiting generators
         with self._lock:
+            was_active = self._is_tts_active
             self._is_tts_active = is_active
-            logger.info(f"TTS active state changed to: {is_active}")
+            self._tts_state_event.set()
+
+        # 2) Now pause/resume the PyAudio stream *outside* the lock
+        if self._audio_stream:
+            try:
+                if is_active and self._audio_stream.is_active():
+                    self._audio_stream.stop_stream()
+                    logger.info("Paused audio stream for TTS playback")
+                elif not is_active and not self._audio_stream.is_active():
+                    self._audio_stream.start_stream()
+                    logger.info("Resumed audio stream after TTS")
+            except Exception as e:
+                logger.error(f"Error toggling stream: {e}")
+
+        # 3) Clear any buffered audio once on the transition into TTS
+        if is_active and not was_active:
+            cleared = 0
+            while not self._buff.empty():
+                try:
+                    self._buff.get_nowait()
+                    cleared += 1
+                except queue.Empty:
+                    break
+            logger.info(f"TTS active – cleared {cleared} buffered chunks")
+
 
     def register_audio_data_callback(self, audio_callback: Callable):
         """
@@ -347,9 +385,11 @@ class AudioInputStream:
         Tuple[None, int]
             A tuple containing None and pyaudio.paContinue
         """
+        # Read the flag under lock so we never miss a flip
         with self._lock:
-            if not self._is_tts_active:
-                self._buff.put(in_data)
+            active = self._is_tts_active
+        if not active:
+            self._buff.put(in_data)
         return None, pyaudio.paContinue
 
     def fill_buffer_remote(self, data: str):
@@ -377,11 +417,11 @@ class AudioInputStream:
         rate = audio_data.get("rate", self._rate)
         language_code = audio_data.get("language_code", self._language_code)
 
-        with self._lock:
-            if not self._is_tts_active:
-                self._buff.put(in_data)
-                self._rate = rate
-                self._language_code = language_code
+        # Quick check without lock
+        if not self._is_tts_active:
+            self._buff.put(in_data)
+            self._rate = rate
+            self._language_code = language_code
 
     def generator(self) -> Generator[Dict[str, Union[bytes, int]], None, None]:
         """
@@ -393,39 +433,70 @@ class AudioInputStream:
 
         Yields
         ------
-        bytes
-            Combined audio data chunks
+        Dict containing audio data and metadata
         """
         while self.running:
-            chunk = self._buff.get()
+            # Wait for either audio data or TTS state change
+            # This is more efficient than polling
+            try:
+                # First check if TTS is active
+                if self._is_tts_active:
+                    # Wait for TTS state to change with a timeout
+                    self._tts_state_event.wait(timeout=0.1)
+                    self._tts_state_event.clear()
+                    continue
+                
+                # Try to get audio data with very short timeout
+                chunk = self._buff.get(timeout=0.01)
+                
+            except queue.Empty:
+                # No data available, check if we should continue
+                if not self.running:
+                    return
+                continue
+                
             if chunk is None:
                 return
 
-            with self._lock:
-                if self._is_tts_active:
-                    continue
+            # Quick check if TTS became active while waiting
+            if self._is_tts_active:
+                continue
 
             # Collect additional chunks that are immediately available
             data = [chunk]
-            while True:
+            
+            # Try to collect more chunks without blocking
+            while not self._is_tts_active and len(data) < 10:  # Limit chunks to avoid too much latency
                 try:
-                    chunk = self._buff.get(block=False)
+                    chunk = self._buff.get_nowait()
                     if chunk is None:
-                        assert self.running
-                    if chunk:
-                        data.append(chunk)
+                        break
+                    data.append(chunk)
                 except queue.Empty:
                     break
 
-            response = {
-                "audio": base64.b64encode(b"".join(data)).decode("utf-8"),
-                "rate": self._rate,
-                "language_code": self._language_code,
-            }
-            for audio_callback in self._audio_data_callbacks:
-                audio_callback(json.dumps(response))
+            # Final check before processing
+            if self._is_tts_active:
+                continue
 
-            yield response
+            # Process and send audio data
+            if data:
+                response = {
+                    "audio": base64.b64encode(b"".join(data)).decode("utf-8"),
+                    "rate": self._rate,
+                    "language_code": self._language_code,
+                }
+                
+                # Send to callbacks
+                for audio_callback in self._audio_data_callbacks:
+                    try:
+                        audio_callback(json.dumps(response))
+                    except Exception as e:
+                        logger.error(f"Error in audio callback: {e}")
+
+                yield response
+
+
 
     def on_audio(self):
         """Audio processing loop"""
@@ -442,6 +513,8 @@ class AudioInputStream:
         and ensures the audio processing thread is properly shut down.
         """
         self.running = False
+        self._tts_state_event.set()  # Wake up any waiting threads
+
 
         if self.session:
             self.session.close()
