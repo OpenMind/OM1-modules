@@ -271,6 +271,8 @@ class VideoStream:
         ----
         - Breaks when SENTINEL is received or `_running` is cleared.
         """
+        fps_cnt = 0
+        fps_t0 = time.perf_counter()
         frame_time = 1.0 / max(1, self.fps)
         last = time.perf_counter()
         try:
@@ -281,7 +283,12 @@ class VideoStream:
                     continue
                 if (ts, frame) == SENTINEL:
                     break
-
+                fps_cnt += 1
+                now = time.perf_counter()
+                if now - fps_t0 >= 1.0:
+                    print(f"[main] read_fps={fps_cnt}", flush=True)
+                    fps_cnt = 0
+                    fps_t0 = now
                 ok, buf = cv2.imencode(".jpg", frame, self.encode_quality)
                 if ok:
                     self._dispatch(base64.b64encode(buf).decode("utf-8"))
