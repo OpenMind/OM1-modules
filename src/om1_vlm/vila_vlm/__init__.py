@@ -9,4 +9,13 @@ from .args import VILAArgParser
 from .video_stream_input import VideoStreamInput
 from .vila_processor import VILAProcessor
 
-__all__ = ["VILAProcessor", "VILAArgParser", "VideoStreamInput"]
+# __all__ = ["VILAProcessor", "VILAArgParser", "VideoStreamInput"]
+
+# om1_vlm/__init__.py
+__all__ = ["ConnectionProcessor"]
+
+def __getattr__(name):
+    if name == "ConnectionProcessor":
+        from .processor import ConnectionProcessor
+        return ConnectionProcessor
+    raise AttributeError(name)

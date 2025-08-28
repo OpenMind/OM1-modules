@@ -1,227 +1,335 @@
-import asyncio
-import base64
-import inspect
-import json
-import logging
-import platform
+# -*- coding: utf-8 -*-
+# mp_videostream.py
+"""
+cd OM1-modules
+export PYTHONPATH="$PWD/src:$PYTHONPATH"      # Key: ensure src is on PYTHONPATH
+
+Multiprocess video pipeline for OM1:
+
+    [Process A: Capture]  camera -> raw frames  ─┐
+                                                 ├─> Queue (raw)
+    [Process B: Anonym.] raw -> SCRFD+pixelate  ─┘
+             │
+             └─> Queue (processed) -> [Main Thread: JPEG encode + callbacks]
+
+
+Design goals:
+- Isolate blocking I/O (camera) and GPU/TensorRT work in their OWN processes.
+- Keep the main app responsive (e.g., VLM and other subsystems).
+
+"""
+
+
+
+import os, cv2, time, base64, inspect, asyncio, logging, platform, multiprocessing as mp
+from queue import Full, Empty
 import threading
-import time
-from typing import Callable, List, Optional, Tuple
+from typing import Optional, Callable, List, Tuple
 
-import cv2
-
+# your imports
 from .video_utils import enumerate_video_devices
+from om1_ml.anonymizationSys.scrfd_trt_pixelate import (
+    TRTInfer, apply_pixelation, draw_dets, CONF_THRES, TOPK_PER_LEVEL, MAX_DETS,
+)
 
-root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
-logger = logging.getLogger(root_package_name)
+logger = logging.getLogger(__name__)
+SENTINEL = ("__STOP__", None)
 
+def _pick_camera() -> str:
+    devs = enumerate_video_devices()
+    if platform.system() == "Darwin":
+        return 0 if devs else 0
+    return f"/dev/video{devs[0][0]}" if devs else "/dev/video0"
 
+# ----------------------------
+# Process A: Capture
+# ----------------------------
+def proc_capture(out_q: mp.Queue, cam: str, res: Tuple[int,int], fps: int, buffer_frames: int):
+    try:
+        cap = cv2.VideoCapture(cam)
+        if not cap.isOpened():
+            logger.error(f"[cap] cannot open {cam}")
+            return
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  res[0])
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
+        cap.set(cv2.CAP_PROP_FPS,          fps)
+        try: cap.set(cv2.CAP_PROP_BUFFERSIZE, max(1, buffer_frames))
+        except Exception: pass
+        try: cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        except Exception: pass
+
+        frame_time = 1.0 / max(1, fps)
+        last = time.perf_counter()
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                time.sleep(0.05); continue
+            ts = time.time()
+            pkt = (ts, frame)
+
+            # non-blocking put with drop policy
+            try:
+                out_q.put_nowait(pkt)
+            except Full:
+                # optional: drop one stale frame to make room, then put
+                try: out_q.get_nowait()
+                except Empty: pass
+                try: out_q.put_nowait(pkt)
+                except Full: pass
+
+            # pace
+            elapsed = time.perf_counter() - last
+            if elapsed < frame_time:
+                time.sleep(frame_time - elapsed)
+            last = time.perf_counter()
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try: cap.release()
+        except Exception: pass
+        # signal downstream to stop
+        try: out_q.put_nowait(SENTINEL)
+        except Full: pass
+        logger.info("[cap] exit.")
+
+# ----------------------------
+# Process B: Anonymize (SCRFD+pixelation)
+# ----------------------------
+def proc_anonymize(in_q: mp.Queue, out_q: mp.Queue,
+                   scrfd_cfg: dict, blur_enabled: bool,
+                   draw_boxes: bool):
+    # IMPORTANT: build TRTInfer in THIS process
+    anonymizer = None
+    if blur_enabled and scrfd_cfg.get("engine_path"):
+        anonymizer = _build_anonymizer(scrfd_cfg)
+
+    try:
+        while True:
+            try:
+                ts, frame = in_q.get(timeout=1.0)
+            except Empty:
+                continue
+            if (ts, frame) == SENTINEL:
+                break
+
+            if blur_enabled and anonymizer is not None:
+                frame, dets, _gpu_ms = anonymizer(frame)
+                if draw_boxes:
+                    draw_dets(frame, dets)
+
+            # pass along processed frame
+            try:
+                out_q.put_nowait((ts, frame))
+            except Full:
+                # drop policy
+                try: out_q.get_nowait()
+                except Empty: pass
+                try: out_q.put_nowait((ts, frame))
+                except Full: pass
+    finally:
+        # cascade stop
+        try: out_q.put_nowait(SENTINEL)
+        except Full: pass
+        logger.info("[anon] exit.")
+
+def _build_anonymizer(cfg: dict):
+    class _Anon:
+        def __init__(self, cfg):
+            self.inf = TRTInfer(engine_path=cfg["engine_path"],
+                                input_name=cfg.get("input_name","input.1"),
+                                size=cfg.get("size",640),
+                                verbose=cfg.get("verbose",False))
+            self.blocks = cfg.get("pixel_blocks", 8)
+            self.margin = cfg.get("pixel_margin", 0.25)
+            self.max_faces = cfg.get("pixel_max_faces", 32)
+            self.noise = cfg.get("pixel_noise", 0.0)
+            self.conf = float(cfg.get("conf", CONF_THRES))
+            self.topk = int(cfg.get("topk", TOPK_PER_LEVEL))
+            self.max_dets = int(cfg.get("max_dets", MAX_DETS))
+
+        def __call__(self, frame_bgr):
+            self.inf.conf_thres = self.conf
+            self.inf.topk_per_level = self.topk
+            self.inf.max_dets = self.max_dets
+            dets, gpu_ms = self.inf.infer(frame_bgr)
+            if dets is not None and len(dets) > 0:
+                apply_pixelation(frame_bgr, dets,
+                                 margin=self.margin, blocks=self.blocks,
+                                 max_faces=self.max_faces, noise_sigma=self.noise)
+            return frame_bgr, dets, gpu_ms
+    return _Anon(cfg)
+
+# ----------------------------
+# Main-side wrapper
+# ----------------------------
 class VideoStream:
-    """
-    Manages video capture and streaming from a camera device.
-
-    Provides functionality to capture video frames from a camera device,
-    process them, and stream them through a callback function. Supports
-    both macOS and Linux camera devices.
-
-    Parameters
-    ----------
-    frame_callback : Optional[Callable[[str], None]], optional
-    frame_callbacks : Optional[List[Callable[[str], None]]], optional
-        List of callback functions to be called with base64 encoded frame data,
-        by default None
-    fps : Optional[int], optional
-        Frames per second to capture.
-        By default 30
-    resolution : Optional[Tuple[int, int]], optional
-        Resolution of the captured video frames.
-        By default (640, 480)
-    jpeg_quality : int, optional
-        JPEG quality for encoding frames, by default 70
-    """
-
-    def __init__(
-        self,
-        frame_callback: Optional[Callable[[str], None]] = None,
-        frame_callbacks: Optional[List[Callable[[str], None]]] = None,
-        fps: Optional[int] = 30,
-        resolution: Optional[Tuple[int, int]] = (640, 480),
-        jpeg_quality: int = 70,
-    ):
-        self._video_thread: Optional[threading.Thread] = None
-
-        # Callbacks for video frame data
-        self.frame_callbacks = frame_callbacks or []
-        self.register_frame_callback(frame_callback)
-
-        # Video capture device
-        self._cap = None
-
-        self.running: bool = True
-
+    def __init__(self,
+                 frame_callbacks: Optional[List[Callable[[str], None]]] = None,
+                 fps: int = 30,
+                 resolution: Tuple[int,int] = (640,480),
+                 jpeg_quality: int = 70,
+                 blur_enabled: bool = True,
+                 blur_conf: float = 0.5,
+                 scrfd_engine: Optional[str] = None,
+                 scrfd_size: int = 640,
+                 scrfd_input: str = "input.1",
+                 pixel_blocks: int = 8,
+                 pixel_margin: float = 0.25,
+                 pixel_max_faces: int = 32,
+                 pixel_noise: float = 0.0,
+                 draw_boxes: bool = False,
+                 queue_size_raw: int = 4,
+                 queue_size_proc: int = 4,
+                 buffer_frames: int = 1):
         self.fps = fps
-        self.frame_delay = 1.0 / fps  # Calculate delay between frames
         self.resolution = resolution
-        self.encode_quality = [
-            cv2.IMWRITE_JPEG_QUALITY,
-            jpeg_quality,
-        ]
+        self.encode_quality = [cv2.IMWRITE_JPEG_QUALITY, int(jpeg_quality)]
 
-        # Create a dedicated event loop for async tasks
+        self.frame_callbacks = frame_callbacks or []
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(target=self._start_loop, daemon=True)
         self.loop_thread.start()
 
+        self.cam = _pick_camera()
+        self.q_raw  = mp.Queue(maxsize=queue_size_raw)
+        self.q_proc = mp.Queue(maxsize=queue_size_proc)
+
+        self.scrfd_cfg = dict(
+            engine_path=scrfd_engine,
+            size=scrfd_size,
+            input_name=scrfd_input,
+            conf=float(blur_conf) if blur_conf is not None else CONF_THRES,
+            topk=TOPK_PER_LEVEL,
+            max_dets=MAX_DETS,
+            pixel_blocks=pixel_blocks,
+            pixel_margin=pixel_margin,
+            pixel_max_faces=pixel_max_faces,
+            pixel_noise=pixel_noise,
+            verbose=False,
+        )
+        self.blur_enabled = bool(blur_enabled)
+        self.draw_boxes = draw_boxes
+        self.buffer_frames = buffer_frames
+
+        self.p_cap: Optional[mp.Process] = None
+        self.p_anon: Optional[mp.Process] = None
+        self._drain_thread: Optional[threading.Thread] = None
+        self._running = mp.Value('b', False)
+
     def _start_loop(self):
-        """Set and run the event loop forever in a dedicated thread."""
         asyncio.set_event_loop(self.loop)
-        logger.debug("Starting background event loop for video streaming.")
         self.loop.run_forever()
 
-    def on_video(self):
-        """
-        Main video capture and processing loop.
-
-        Captures frames from the camera, encodes them to base64,
-        and sends them through the callback if registered.
-
-        Raises
-        ------
-        Exception
-            If video streaming encounters an error
-        """
-
-        devices = enumerate_video_devices()
-        if platform.system() == "Darwin":
-            camindex = 0 if devices else 0
-        else:
-            camindex = "/dev/video" + str(devices[0][0]) if devices else "/dev/video0"
-        logger.info(f"Using camera: {camindex}")
-
-        self._cap = cv2.VideoCapture(camindex)
-        if not self._cap.isOpened():
-            logger.error(f"Error opening video stream from {camindex}")
+    def start(self):
+        if self._running.value:
             return
-
-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
-        self._cap.set(cv2.CAP_PROP_FPS, self.fps)
-
-        actual_width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        if actual_width != self.resolution[0] or actual_height != self.resolution[1]:
-            logger.warning(
-                f"Camera doesn't support resolution {self.resolution}. Using {(actual_width, actual_height)} instead."
-            )
-            self.resolution = (actual_width, actual_height)
-
+        self._running.value = True
+        # IMPORTANT for macOS/Windows:
         try:
-            self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
+            mp.set_start_method("spawn", force=False)
+        except RuntimeError:
             pass
 
+        self.p_cap = mp.Process(
+            target=proc_capture,
+            args=(self.q_raw, self.cam, self.resolution, self.fps, self.buffer_frames),
+            daemon=True
+        )
+        self.p_anon = mp.Process(
+            target=proc_anonymize,
+            args=(self.q_raw, self.q_proc, self.scrfd_cfg, self.blur_enabled, self.draw_boxes),
+            daemon=True
+        )
+        self.p_cap.start()
+        self.p_anon.start()
+
+        # main-side consumer: encode & callback
+        self._drain_thread = threading.Thread(target=self._drain_loop, daemon=True)
+        self._drain_thread.start()
+        logger.info("[main] VideoStream started.")
+
+    def _dispatch(self, b64_jpeg: str):
+        for cb in self.frame_callbacks:
+            if inspect.iscoroutinefunction(cb):
+                asyncio.run_coroutine_threadsafe(cb(b64_jpeg), self.loop)
+            else:
+                cb(b64_jpeg)
+
+    def _drain_loop(self):
+        """
+        Main-process drain loop.
+
+        Responsibilities
+        ----------------
+        - Pull (timestamp, processed_frame) from q_proc.
+        - Encode each frame to JPEG (OpenCV).
+        - Base64-encode and dispatch via registered callbacks.
+        - Pace to ~fps to avoid flooding downstream.
+
+        Exit
+        ----
+        - Breaks when SENTINEL is received or `_running` is cleared.
+        """
+        frame_time = 1.0 / max(1, self.fps)
+        last = time.perf_counter()
         try:
-            self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        except Exception:
-            pass
-
-        frame_time = 1.0 / self.fps
-        last_frame_time = time.perf_counter()
-
-        try:
-            while self.running:
-                current_time = time.perf_counter()
-                elapsed = current_time - last_frame_time
-
-                ret, frame = self._cap.read()
-                if not ret:
-                    logger.error("Error reading frame from video stream")
-                    time.sleep(0.1)
+            while self._running.value:
+                try:
+                    ts, frame = self.q_proc.get(timeout=0.5)
+                except Empty:
                     continue
+                if (ts, frame) == SENTINEL:
+                    break
 
-                if elapsed <= 1.5 * frame_time and self.frame_callbacks:
-                    _, buffer = cv2.imencode(".jpg", frame, self.encode_quality)
-                    frame_base64 = base64.b64encode(buffer).decode("utf-8")
+                ok, buf = cv2.imencode(".jpg", frame, self.encode_quality)
+                if ok:
+                    self._dispatch(base64.b64encode(buf).decode("utf-8"))
 
-                    frame_data = json.dumps(
-                        {"timestamp": time.time(), "frame": frame_base64}
-                    )
-
-                    for frame_callback in self.frame_callbacks:
-                        if inspect.iscoroutinefunction(frame_callback):
-                            asyncio.run_coroutine_threadsafe(
-                                frame_callback(frame_data), self.loop
-                            )
-                        else:
-                            frame_callback(frame_data)
-
-                elapsed_time = time.perf_counter() - last_frame_time
-                if elapsed_time < frame_time:
-                    time.sleep(frame_time - elapsed_time)
-                last_frame_time = time.perf_counter()
-
-        except Exception as e:
-            logger.error(f"Error streaming video: {e}")
+                elapsed = time.perf_counter() - last
+                if elapsed < frame_time:
+                    time.sleep(frame_time - elapsed)
+                last = time.perf_counter()
         finally:
-            if self._cap:
-                self._cap.release()
-                logger.info("Released video capture device")
+            logger.info("[main] drain exit.")
 
-    def _start_video_thread(self):
+    def stop(self, join_timeout: float = 1.0):
         """
-        Initialize and start the video processing thread.
+        Stop the entire pipeline and release resources.
 
-        Creates a new daemon thread for video processing if one isn't
-        already running.
-        """
-        if self._video_thread is None or not self._video_thread.is_alive():
-            self._video_thread = threading.Thread(target=self.on_video, daemon=True)
-            self._video_thread.start()
-            logger.info("Started video processing thread")
-
-    def register_frame_callback(self, frame_callback: Callable[[str], None]):
-        """
-        Register a callback function for processed frames.
+        Steps
+        -----
+        1) Clear `_running` flag.
+        2) Push SENTINEL to both queues to unblock any pending gets.
+        3) Join child processes with a small timeout; terminate if still alive.
+        4) Join the drain thread.
+        5) Stop the asyncio loop thread.
 
         Parameters
         ----------
-        frame_callback : Callable[[str], None]
-            Function to be called with base64 encoded frame data
+        join_timeout : float
+            Seconds to wait for processes/threads to join before forcing termination.
         """
-        if frame_callback is None:
-            logger.warning("Frame callback is None, not registering")
+        if not self._running.value:
             return
+        self._running.value = False
+        # cascade stop
+        try: self.q_raw.put_nowait(SENTINEL)
+        except Full: pass
+        try: self.q_proc.put_nowait(SENTINEL)
+        except Full: pass
 
-        if frame_callback not in self.frame_callbacks:
-            self.frame_callbacks.append(frame_callback)
-            logger.info("Registered new frame callback")
-            return
+        if self.p_cap and self.p_cap.is_alive():
+            self.p_cap.join(timeout=join_timeout)
+            if self.p_cap.is_alive(): self.p_cap.terminate()
+        if self.p_anon and self.p_anon.is_alive():
+            self.p_anon.join(timeout=join_timeout)
+            if self.p_anon.is_alive(): self.p_anon.terminate()
+        if self._drain_thread and self._drain_thread.is_alive():
+            self._drain_thread.join(timeout=join_timeout)
 
-        logger.warning("Frame callback already registered")
-        return
-
-    def start(self):
-        """
-        Start video capture and processing.
-
-        Initializes the video processing thread and begins
-        capturing frames.
-        """
-        self._start_video_thread()
-
-    def stop(self):
-        """
-        Stop video capture and clean up resources.
-
-        Stops the video processing loop and waits for the
-        processing thread to finish.
-        """
-        self.running = False
-
-        if self._cap:
-            self._cap.release()
-
-        if self._video_thread and self._video_thread.is_alive():
-            self._video_thread.join(timeout=1.0)
-
-        logger.info("Stopped video processing thread")
+        try:
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        except Exception:
+            pass
+        logger.info("[main] VideoStream stopped.")
