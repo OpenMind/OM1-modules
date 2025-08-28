@@ -161,7 +161,7 @@ def _build_anonymizer(cfg: dict):
     return _Anon(cfg)
 
 # ----------------------------
-# Main-side wrapper
+# Main-side Wrapper
 # ----------------------------
 class VideoStream:
     def __init__(self,
