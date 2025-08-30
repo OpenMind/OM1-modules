@@ -46,10 +46,10 @@ def proc_capture(
     verbose: bool = False,
 ):
     try:
-        # 强制 V4L2，避免 GStreamer 报警
+        # enforce V4L2，avoid GStreamer error
         cap = cv2.VideoCapture(cam, cv2.CAP_V4L2)
         if not cap.isOpened():
-            # 兜底试几个常见设备
+            # try some of the common devices
             for dev in ("/dev/video0", "/dev/video1", "/dev/video2"):
                 cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
                 if cap.isOpened():
@@ -63,7 +63,7 @@ def proc_capture(
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
         cap.set(cv2.CAP_PROP_FPS, fps)
         try:
-            # MJPG 能大幅减轻 CPU 压力
+            # MJPG can largely reduce CPU pressure
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         except Exception:
             pass
@@ -84,7 +84,7 @@ def proc_capture(
         frame_time = 1.0 / max(1, fps)
         last = time.perf_counter()
 
-        # 每秒统计一次采集 FPS
+        # print out fps for every second
         cap_cnt, cap_t0 = 0, time.perf_counter()
 
         while True:
@@ -94,11 +94,11 @@ def proc_capture(
                 continue
             ts = time.time()
             pkt = (ts, frame)
-
+            # non-blocking put with drop policy
             try:
                 out_q.put_nowait(pkt)
             except Full:
-                # 丢弃一个旧帧让位
+                # optional: drop one stale frame to make room, then put
                 try:
                     out_q.get_nowait()
                 except Empty:
@@ -108,13 +108,13 @@ def proc_capture(
                 except Full:
                     pass
 
-            # 采集节流
+            
             elapsed = time.perf_counter() - last
             if elapsed < frame_time:
                 time.sleep(frame_time - elapsed)
             last = time.perf_counter()
 
-            # 打点
+            
             cap_cnt += 1
             if verbose and (time.perf_counter() - cap_t0) >= 1.0:
                 print(f"[cap] fps={cap_cnt}", flush=True)
@@ -136,7 +136,7 @@ def proc_capture(
 
 
 # ----------------------------
-# Process B: Anonymize (TRT + pixelate)
+# optional: drop one stale frame to make room, then put
 # ----------------------------
 def proc_anonymize(
     in_q: mp.Queue,
@@ -151,29 +151,29 @@ def proc_anonymize(
     from queue import Empty, Full
 
     anonymizer = None
-    cuda_ctx = None  # ⬅️ 记录当前进程的 CUDA 上下文
+    cuda_ctx = None  
 
     try:
-        # 只有需要匿名化、且提供了 TensorRT engine 时，才初始化 CUDA 上下文
+
         if blur_enabled and scrfd_cfg.get("engine_path"):
-            import pycuda.driver as cuda  # ⬅️ 放在这里避免无 GPU 时顶层导入失败
+            import pycuda.driver as cuda 
 
             cuda.init()
             dev_id = int(os.environ.get("OM1_CUDA_DEVICE", "0"))
-            cuda_ctx = cuda.Device(dev_id).make_context()  # ⬅️ 激活到当前线程
+            cuda_ctx = cuda.Device(dev_id).make_context()  
             try:
                 anonymizer = _build_anonymizer(
                     scrfd_cfg
-                )  # ⬅️ 这里面会用到 pycuda / tensorrt
+                )  
             except Exception:
-                # 构建失败时把上下文弹栈释放再抛出
+                
                 try:
                     cuda_ctx.pop()
                 except Exception:
                     pass
                 raise
 
-        # 统计
+
         anon_cnt, t0 = 0, time.perf_counter()
         sum_gpu_ms, sum_pix_ms = 0.0, 0.0
 
@@ -187,7 +187,7 @@ def proc_anonymize(
 
             if blur_enabled and anonymizer is not None:
                 t_pix0 = time.perf_counter()
-                frame, dets, gpu_ms = anonymizer(frame)  # gpu_ms: TRT 推理时间
+                frame, dets, gpu_ms = anonymizer(frame)  
                 pix_ms = (time.perf_counter() - t_pix0) * 1000.0 - (gpu_ms or 0.0)
                 if pix_ms < 0:
                     pix_ms = 0.0
@@ -198,7 +198,7 @@ def proc_anonymize(
                 sum_gpu_ms += gpu_ms or 0.0
                 sum_pix_ms += pix_ms
 
-            # 输出
+            #pass along processed frame
             try:
                 out_q.put_nowait((ts, frame))
             except Full:
@@ -211,7 +211,7 @@ def proc_anonymize(
                 except Full:
                     pass
 
-            # 打点
+            
             anon_cnt += 1
             if verbose and (time.perf_counter() - t0) >= 1.0:
                 avg_gpu = (sum_gpu_ms / anon_cnt) if anon_cnt else 0.0
@@ -223,12 +223,11 @@ def proc_anonymize(
                 anon_cnt, t0 = 0, time.perf_counter()
                 sum_gpu_ms, sum_pix_ms = 0.0, 0.0
     finally:
-        # 通知下游退出
+        # cascade stop
         try:
             out_q.put_nowait(SENTINEL)
         except Full:
             pass
-        # 释放 CUDA 上下文（必须在创建它的同一进程/线程里 pop）
         if cuda_ctx is not None:
             try:
                 cuda_ctx.pop()
@@ -259,7 +258,7 @@ def _build_anonymizer(cfg: dict):
             self.inf.conf_thres = self.conf
             self.inf.topk_per_level = self.topk
             self.inf.max_dets = self.max_dets
-            dets, gpu_ms = self.inf.infer(frame_bgr)  # gpu_ms: 推理耗时(ms)
+            dets, gpu_ms = self.inf.infer(frame_bgr)  
             if dets is not None and len(dets) > 0:
                 apply_pixelation(
                     frame_bgr,
@@ -429,7 +428,7 @@ class VideoStream:
         frame_time = 1.0 / max(1, self.fps)
         last = time.perf_counter()
 
-        # 打点
+    
         read_cnt, read_t0 = 0, time.perf_counter()
         sum_enc_ms, sum_b64_ms = 0.0, 0.0
 
@@ -453,13 +452,12 @@ class VideoStream:
                     sum_enc_ms += enc_ms
                     sum_b64_ms += b64_ms
 
-                # 统一节流
                 elapsed = time.perf_counter() - last
                 if elapsed < frame_time:
                     time.sleep(frame_time - elapsed)
                 last = time.perf_counter()
 
-                # 打点
+
                 read_cnt += 1
                 if self.verbose and (time.perf_counter() - read_t0) >= 1.0:
                     avg_enc = (sum_enc_ms / read_cnt) if read_cnt else 0.0
