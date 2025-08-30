@@ -15,11 +15,18 @@ import time
 
 import cv2
 import numpy as np
-import pycuda.driver as cuda
+
+try:
+    import pycuda.driver as cuda
+except ImportError:
+    print("PyCUDA not found, make sure to install it for GPU support.")
 
 sys.path.append("/usr/lib/python3/dist-packages")
 
-import tensorrt as trt
+try:
+    import tensorrt as trt
+except ImportError:
+    print("TensorRT not found, make sure to install it.")
 
 # import pycuda.autoinit  # noqa
 
@@ -581,47 +588,47 @@ if __name__ == "__main__":
     main()
 
 
-""" USAGE 
+""" USAGE
 1. Using Orin builtin GPU supported GStreamer to decode video faster!
-python scrfd_trt_pixelate.py   
+python scrfd_trt_pixelate.py
     --engine "$HOME/anon-orin/models/scrfd_2.5g_640.engine"   \
-    --input  "filesrc location=/home/openmind/Desktop/wenjinf-OM-workspace/videos/my_video.mp4 ! qtdemux ! h264parse ! nvv4l2decoder enable-max-performance=1 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1 sync=false"   
-    --out    "$HOME/anon-orin/results/out_nvenc_mask.mp4"   
-    --nvenc   
-    -conf 0.5 
-    --topk 100 
-    --max_dets 50   
-    --pixelate 
-    --pixel_blocks 8 
+    --input  "filesrc location=/home/openmind/Desktop/wenjinf-OM-workspace/videos/my_video.mp4 ! qtdemux ! h264parse ! nvv4l2decoder enable-max-performance=1 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1 sync=false"
+    --out    "$HOME/anon-orin/results/out_nvenc_mask.mp4"
+    --nvenc
+    -conf 0.5
+    --topk 100
+    --max_dets 50
+    --pixelate
+    --pixel_blocks 8
     --pixel_margin 0.25
 
 2. Using default ffmpeg CV2 to decode video on CPU much slower!
-python scrfd_trt_pixelate.py   
+python scrfd_trt_pixelate.py
     --engine "$HOME/anon-orin/models/scrfd_2.5g_640.engine"   \
-    --input  "/home/openmind/Desktop/wenjinf-OM-workspace/videos/my_video.mp4"   
-    --out    "$HOME/anon-orin/results/out_nvenc_mask.mp4"    
-    -conf 0.5 
-    --topk 100 
-    --max_dets 50   
-    --pixelate 
-    --pixel_blocks 8 
+    --input  "/home/openmind/Desktop/wenjinf-OM-workspace/videos/my_video.mp4"
+    --out    "$HOME/anon-orin/results/out_nvenc_mask.mp4"
+    -conf 0.5
+    --topk 100
+    --max_dets 50
+    --pixelate
+    --pixel_blocks 8
     --pixel_margin 0.25
 """
 
-""" Example outputs AVG FPS: 32 
-Opening in BLOCKING MODE 
-NvMMLiteOpen : Block : BlockType = 261 
-NvMMLiteBlockCreate : Block : BlockType = 261 
+""" Example outputs AVG FPS: 32
+Opening in BLOCKING MODE
+NvMMLiteOpen : Block : BlockType = 261
+NvMMLiteBlockCreate : Block : BlockType = 261
 [ WARN:0] global ./modules/videoio/src/cap_gstreamer.cpp (1063) open OpenCV | GStreamer warning: unable to query duration of stream
 [ WARN:0] global ./modules/videoio/src/cap_gstreamer.cpp (1100) open OpenCV | GStreamer warning: Cannot query video position: status=1, value=1, duration=-1
-Opening in BLOCKING MODE 
+Opening in BLOCKING MODE
 [nvenc] using pipeline: appsrc caps=video/x-raw,format=BGR,width=1920,height=1080,framerate=10/1 ! queue leaky=downstream max-size-buffers=1 ! videoconvert ! nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! nvv4l2h264enc insert-sps-pps=true maxperf-enable=1 control-rate=1 bitrate=4000000 ! h264parse ! mp4mux ! filesink location=/home/openmind/anon-orin/results/out_nvenc_mask.mp4 sync=false
-NvMMLiteOpen : Block : BlockType = 4 
+NvMMLiteOpen : Block : BlockType = 4
 ===== NvVideo: NVENC =====
-NvMMLiteBlockCreate : Block : BlockType = 4 
+NvMMLiteBlockCreate : Block : BlockType = 4
 [08/25/2025-15:15:56] [TRT] [W] Using an engine plan file across different models of devices is not recommended and is likely to affect performance or even cause errors.
-H264: Profile = 66 Level = 0 
-NVMEDIA: Need to set EMC bandwidth : 282000 
+H264: Profile = 66 Level = 0
+NVMEDIA: Need to set EMC bandwidth : 282000
 [00010] GPU=7.81 ms  EMA=8.26 ms  FPS=33.6  faces=1
 [00020] GPU=7.74 ms  EMA=8.31 ms  FPS=33.9  faces=0
 done. frames=28 avg_fps=32.07 avg_gpu_ms≈8.57
