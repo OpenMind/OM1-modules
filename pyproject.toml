@@ -8,20 +8,19 @@ packages = [
     { include = "om1_speech", from = "src" },
     { include = "om1_utils", from = "src" },
     { include = "om1_vlm", from = "src" },
-    { include = "om1_ml", from = "src"},
     { include = "zenoh_idl", from = "src" }
 ]
-
 
 [tool.poetry.scripts]
 om1_tts = "om1_speech.audio.audio_output_stream:main"
 
 [tool.poetry.dependencies]
 pycuda = { version = "2024.1.2", optional = true }
-python = ">=3.10,<3.11"
+python = ">=3.9,<4.0"
 pyaudio = "^0.2.13"
-numpy = "2.1.0"
+numpy = "^2.0.2"
 websockets = "^13.0"
+opencv-python = "^4.5.0"
 requests = "^2.32.3"
 protobuf = "^5.29.3"
 google = "^3.0.0"
@@ -30,8 +29,6 @@ pyrealsense2-macosx = {version = "^2.54.2", markers = "sys_platform == 'darwin'"
 eclipse-zenoh = "^1.4.0"
 pycdr2 = "^1.0.0"
 torch = { url = "https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl", optional = true }
-
-
 
 [tool.poetry.extras]
 realsense = ["pyrealsense2", "pyrealsense2-macosx"]

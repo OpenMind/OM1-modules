@@ -194,9 +194,9 @@ def test_frame_callback():
             frame_json = json.loads(received_frames[0])
             assert "timestamp" in frame_json, "Timestamp missing from frame data"
             assert "frame" in frame_json, "Frame data missing from JSON"
-            assert isinstance(frame_json["timestamp"], (int, float)), (
-                "Timestamp should be numeric"
-            )
+            assert isinstance(
+                frame_json["timestamp"], (int, float)
+            ), "Timestamp should be numeric"
             assert isinstance(frame_json["frame"], str), "Frame should be base64 string"
 
 
@@ -344,19 +344,19 @@ def test_frame_timestamp():
             stream.stop()
 
             # Verify we received multiple frames with timestamps
-            assert len(received_timestamps) >= 3, (
-                "Should have received at least 3 frames"
-            )
+            assert (
+                len(received_timestamps) >= 3
+            ), "Should have received at least 3 frames"
 
             # Verify timestamps are increasing
             for i in range(1, len(received_timestamps)):
-                assert received_timestamps[i] >= received_timestamps[i - 1], (
-                    "Timestamps should be monotonically increasing"
-                )
+                assert (
+                    received_timestamps[i] >= received_timestamps[i - 1]
+                ), "Timestamps should be monotonically increasing"
 
             # Verify timestamp format (should be Unix timestamp)
             for ts in received_timestamps:
                 assert isinstance(ts, (int, float)), "Timestamp should be numeric"
-                assert ts > 1600000000, (
-                    "Timestamp should be a reasonable Unix timestamp"
-                )
+                assert (
+                    ts > 1600000000
+                ), "Timestamp should be a reasonable Unix timestamp"
