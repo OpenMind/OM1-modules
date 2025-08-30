@@ -402,7 +402,7 @@ i18n = ["Babel (>=2.7)"]
 name = "mako"
 version = "1.3.10"
 description = "A super-fast templating language that borrows the best ideas from the existing templating languages."
-optional = false
+optional = true
 python-versions = ">=3.8"
 files = [
     {file = "mako-1.3.10-py3-none-any.whl", hash = "sha256:baef24a52fc4fc514a0887ac600f9f1cff3d82c61d4d700a1fa84d597b88db59"},
@@ -421,7 +421,7 @@ testing = ["pytest"]
 name = "markupsafe"
 version = "3.0.2"
 description = "Safely add untrusted strings to HTML/XML markup."
-optional = false
+optional = true
 python-versions = ">=3.9"
 files = [
     {file = "MarkupSafe-3.0.2-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:7e94c425039cde14257288fd61dcfb01963e658efbc0ff54f5306b06054700f8"},
@@ -737,7 +737,7 @@ files = [
 name = "pycuda"
 version = "2024.1.2"
 description = "Python wrapper for Nvidia CUDA"
-optional = false
+optional = true
 python-versions = "~=3.8"
 files = [
     {file = "pycuda-2024.1.2.tar.gz", hash = "sha256:d110b727cbea859da4b63e91b6fa1e9fc32c5bade02d89ff449975996e9ccfab"},
@@ -828,7 +828,7 @@ testing = ["coverage (>=6.2)", "flaky (>=3.5.0)", "hypothesis (>=5.7.1)", "mypy 
 name = "pytools"
 version = "2025.2.3"
 description = "A collection of tools for Python"
-optional = false
+optional = true
 python-versions = ">=3.10"
 files = [
     {file = "pytools-2025.2.3-py3-none-any.whl", hash = "sha256:12fe39422465ecc2fa2c3b9d5d0cd260d7c9af613a20edcb8fb0410053faa1dd"},
@@ -958,7 +958,7 @@ files = [
 name = "siphash24"
 version = "1.7"
 description = "Streaming-capable SipHash-1-3 and SipHash-2-4 Implementation"
-optional = false
+optional = true
 python-versions = ">=3.7"
 files = [
     {file = "siphash24-1.7-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:ac574867427640d531e7d034e974986ca3ab612699d7c989757e411ef75ec13a"},
@@ -1238,10 +1238,11 @@ files = [
 ]
 
 [extras]
+gpu = ["pycuda"]
 jetson61 = ["torch"]
 realsense = ["pyrealsense2", "pyrealsense2-macosx"]
 
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10,<3.11"
-content-hash = "4c79029f17989fb95dc8cf6ee8f8d0c73034d969395cd1bbafae9f1c462eb227"
+content-hash = "546209d587f3087cbe3c945ee2f73c4d44e0a9401e9dfaf9224188d787719090"
