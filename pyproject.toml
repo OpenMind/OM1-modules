@@ -20,7 +20,7 @@ om1_tts = "om1_speech.audio.audio_output_stream:main"
 pycuda = { version = "^2024.1"}
 python = ">=3.10,<3.11"
 pyaudio = "^0.2.13"
-numpy = "^2.0.2"
+numpy = "1.26.4"
 websockets = "^13.0"
 requests = "^2.32.3"
 protobuf = "^5.29.3"
