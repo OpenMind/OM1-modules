@@ -17,7 +17,7 @@ packages = [
 om1_tts = "om1_speech.audio.audio_output_stream:main"
 
 [tool.poetry.dependencies]
-pycuda = { version = "^2024.1"}
+pycuda = { version = "2024.1.2", optional = true }
 python = ">=3.10,<3.11"
 pyaudio = "^0.2.13"
 numpy = "2.1.0"
@@ -36,6 +36,7 @@ torch = { url = "https://developer.download.nvidia.com/compute/redist/jp/v61/pyt
 [tool.poetry.extras]
 realsense = ["pyrealsense2", "pyrealsense2-macosx"]
 jetson61 = ["torch"]
+gpu = ["pycuda"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.0"
