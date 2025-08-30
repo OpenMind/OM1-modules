@@ -28,17 +28,17 @@ jobs:
           sudo apt-get install -y portaudio19-dev python3-pyaudio
 
       - name: Install Poetry
-        id: install-poetry                 # ← 加 id，方便取输出路径
+        id: install-poetry
         uses: snok/install-poetry@v1
         with:
-          version: 1.8.3                   # ← 改成 1.8.3，更稳
+          version: 2.0.1            # ← 改成 2.0.1
           virtualenvs-create: true
           virtualenvs-in-project: true
-          installer: pipx                  # ← 明确用 pipx 安装
+          installer: pipx
 
       - name: Put Poetry on PATH
         run: echo "${{ steps.install-poetry.outputs.poetry-path }}" >> $GITHUB_PATH
-        # ↑↑ 关键：把 poetry 可执行文件所在目录加入 PATH，跨步可见
+
 
       - name: Check Poetry
         run: poetry --version              # ← 确认能找到 poetry
