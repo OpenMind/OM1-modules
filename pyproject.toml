@@ -15,7 +15,8 @@ packages = [
 om1_tts = "om1_speech.audio.audio_output_stream:main"
 
 [tool.poetry.dependencies]
-python = ">=3.9"
+pycuda = { version = "2024.1.2", optional = true }
+python = ">=3.9,<4.0"
 pyaudio = "^0.2.13"
 numpy = "^2.0.2"
 websockets = "^13.0"
