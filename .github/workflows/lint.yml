@@ -2,26 +2,28 @@ name: Run Lint
 
 on:
   push:
-    branches: ['main']
+    branches:
+      - 'main'
   pull_request:
-    branches: ['**']
+    branches:
+      - '**'
 
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.10']   
+        python-version: ['3.10']
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4   
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}  
-          cache: 'poetry'                                
+          cache: 'poetry'
 
       - name: Install system dependencies
         run: |
@@ -31,12 +33,17 @@ jobs:
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
-          version: 2.0.1
+          version: 1.8.3
           virtualenvs-create: true
           virtualenvs-in-project: true
+      - name: Put Poetry on PATH
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Check Poetry
+        run: poetry --version
 
       - name: Force Poetry to use runner Python
-        run: poetry env use "$(which python)"            
+        run: poetry env use "$(which python)"          
 
       - name: Install dependencies
         run: poetry install --no-interaction --with dev
