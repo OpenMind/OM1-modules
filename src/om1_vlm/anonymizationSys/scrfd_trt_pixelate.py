@@ -10,12 +10,13 @@ SCRFD TensorRT on Jetson Orin + Pixelation anonymization
 
 import argparse
 import os
+import sys
 import time
 
 import cv2
 import numpy as np
 import pycuda.driver as cuda
-import sys
+
 sys.path.append("/usr/lib/python3/dist-packages")
 
 import tensorrt as trt
