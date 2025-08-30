@@ -108,13 +108,11 @@ def proc_capture(
                 except Full:
                     pass
 
-            
             elapsed = time.perf_counter() - last
             if elapsed < frame_time:
                 time.sleep(frame_time - elapsed)
             last = time.perf_counter()
 
-            
             cap_cnt += 1
             if verbose and (time.perf_counter() - cap_t0) >= 1.0:
                 print(f"[cap] fps={cap_cnt}", flush=True)
@@ -151,28 +149,23 @@ def proc_anonymize(
     from queue import Empty, Full
 
     anonymizer = None
-    cuda_ctx = None  
+    cuda_ctx = None
 
     try:
-
         if blur_enabled and scrfd_cfg.get("engine_path"):
-            import pycuda.driver as cuda 
+            import pycuda.driver as cuda
 
             cuda.init()
             dev_id = int(os.environ.get("OM1_CUDA_DEVICE", "0"))
-            cuda_ctx = cuda.Device(dev_id).make_context()  
+            cuda_ctx = cuda.Device(dev_id).make_context()
             try:
-                anonymizer = _build_anonymizer(
-                    scrfd_cfg
-                )  
+                anonymizer = _build_anonymizer(scrfd_cfg)
             except Exception:
-                
                 try:
                     cuda_ctx.pop()
                 except Exception:
                     pass
                 raise
-
 
         anon_cnt, t0 = 0, time.perf_counter()
         sum_gpu_ms, sum_pix_ms = 0.0, 0.0
@@ -187,7 +180,7 @@ def proc_anonymize(
 
             if blur_enabled and anonymizer is not None:
                 t_pix0 = time.perf_counter()
-                frame, dets, gpu_ms = anonymizer(frame)  
+                frame, dets, gpu_ms = anonymizer(frame)
                 pix_ms = (time.perf_counter() - t_pix0) * 1000.0 - (gpu_ms or 0.0)
                 if pix_ms < 0:
                     pix_ms = 0.0
@@ -198,7 +191,7 @@ def proc_anonymize(
                 sum_gpu_ms += gpu_ms or 0.0
                 sum_pix_ms += pix_ms
 
-            #pass along processed frame
+            # pass along processed frame
             try:
                 out_q.put_nowait((ts, frame))
             except Full:
@@ -211,7 +204,6 @@ def proc_anonymize(
                 except Full:
                     pass
 
-            
             anon_cnt += 1
             if verbose and (time.perf_counter() - t0) >= 1.0:
                 avg_gpu = (sum_gpu_ms / anon_cnt) if anon_cnt else 0.0
@@ -258,7 +250,7 @@ def _build_anonymizer(cfg: dict):
             self.inf.conf_thres = self.conf
             self.inf.topk_per_level = self.topk
             self.inf.max_dets = self.max_dets
-            dets, gpu_ms = self.inf.infer(frame_bgr)  
+            dets, gpu_ms = self.inf.infer(frame_bgr)
             if dets is not None and len(dets) > 0:
                 apply_pixelation(
                     frame_bgr,
@@ -428,7 +420,6 @@ class VideoStream:
         frame_time = 1.0 / max(1, self.fps)
         last = time.perf_counter()
 
-    
         read_cnt, read_t0 = 0, time.perf_counter()
         sum_enc_ms, sum_b64_ms = 0.0, 0.0
 
@@ -456,7 +447,6 @@ class VideoStream:
                 if elapsed < frame_time:
                     time.sleep(frame_time - elapsed)
                 last = time.perf_counter()
-
 
                 read_cnt += 1
                 if self.verbose and (time.perf_counter() - read_t0) >= 1.0:
