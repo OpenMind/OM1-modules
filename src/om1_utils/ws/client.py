@@ -8,6 +8,7 @@ Design goals
 - Maintain a message queue and two loops (send/receive) so the app thread never blocks.
 - Auto-reconnect unless there was a policy violation.
 """
+
 import logging
 import threading
 from queue import Empty, Queue
@@ -16,12 +17,12 @@ from typing import Callable, Optional, Union
 # ---- websockets 版本兼容：优先使用同步 API；否则回退到 asyncio API ----
 try:
     # websockets 12+ 同步客户端
-    from websockets.sync.client import connect as ws_connect  # type: ignore
     from websockets.sync.client import ClientConnection as WSConnSync  # type: ignore
+    from websockets.sync.client import connect as ws_connect  # type: ignore
+
     SYNC_WS = True
 except Exception:
     SYNC_WS = False
-    import websockets  # asyncio 版整包
     try:
         # websockets 12+ asyncio 客户端
         from websockets.asyncio.client import connect as ws_connect  # type: ignore
@@ -36,12 +37,21 @@ except Exception:
 # 统一异常类型（不同版本在 exceptions 命名空间）
 try:
     if SYNC_WS:
-        from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError  # type: ignore
+        from websockets.exceptions import (  # type: ignore
+            ConnectionClosedError,
+            ConnectionClosedOK,
+        )
     else:
-        from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError  # type: ignore
+        from websockets.exceptions import (  # type: ignore
+            ConnectionClosedError,
+            ConnectionClosedOK,
+        )
 except Exception:  # 极端兜底
+
     class ConnectionClosedOK(Exception): ...
+
     class ConnectionClosedError(Exception): ...
+
 
 # asyncio 仅在需要时导入，避免无谓依赖
 if not SYNC_WS:
@@ -225,12 +235,17 @@ class Client:
                 if self._loop is None:
                     self._loop = asyncio.new_event_loop()
                     t = threading.Thread(
-                        target=lambda: (asyncio.set_event_loop(self._loop), self._loop.run_forever()),
+                        target=lambda: (
+                            asyncio.set_event_loop(self._loop),
+                            self._loop.run_forever(),
+                        ),
                         daemon=True,
                     )
                     t.start()
 
-                fut = asyncio.run_coroutine_threadsafe(self._async_connect(), self._loop)
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._async_connect(), self._loop
+                )
                 fut.result(timeout=10)
 
                 # 启动异步收发任务
@@ -316,7 +331,15 @@ class Client:
             The formatted message string
         """
         try:
-            s = msg if isinstance(msg, str) else (msg.decode("utf-8", "ignore") if isinstance(msg, (bytes, bytearray)) else str(msg))
+            s = (
+                msg
+                if isinstance(msg, str)
+                else (
+                    msg.decode("utf-8", "ignore")
+                    if isinstance(msg, (bytes, bytearray))
+                    else str(msg)
+                )
+            )
             if len(s) <= max_length:
                 return s
             preview_size = max_length // 2 - 20
@@ -350,7 +373,9 @@ class Client:
                     self.websocket.close()  # type: ignore
                 else:
                     if self._loop and not self._loop.is_closed():
-                        asyncio.run_coroutine_threadsafe(self.websocket.close(), self._loop)  # type: ignore
+                        asyncio.run_coroutine_threadsafe(
+                            self.websocket.close(), self._loop
+                        )  # type: ignore
         except Exception:
             pass
 
@@ -366,8 +391,10 @@ class Client:
 
         # 关闭事件循环（async 回退）
         if not SYNC_WS and self._loop and not self._loop.is_closed():
+
             def _stop_loop(loop):
                 loop.stop()
+
             self._loop.call_soon_threadsafe(_stop_loop, self._loop)
 
         logger.info("WebSocket client stopped")

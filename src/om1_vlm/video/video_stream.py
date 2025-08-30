@@ -1,14 +1,27 @@
 # -*- coding: utf-8 -*-
 # om1_vlm/video/video_stream.py
-import os, cv2, time, base64, inspect, asyncio, logging, platform, multiprocessing as mp
-from queue import Full, Empty
+import asyncio
+import base64
+import inspect
+import logging
+import multiprocessing as mp
+import platform
 import threading
-from typing import Optional, Callable, List, Tuple
+import time
+from queue import Empty, Full
+from typing import Callable, List, Optional, Tuple
 
-from .video_utils import enumerate_video_devices
-from om1_ml.anonymizationSys.scrfd_trt_pixelate import (
-    TRTInfer, apply_pixelation, draw_dets, CONF_THRES, TOPK_PER_LEVEL, MAX_DETS,
+import cv2
+
+from ..anonymizationSys.scrfd_trt_pixelate import (
+    CONF_THRES,
+    MAX_DETS,
+    TOPK_PER_LEVEL,
+    TRTInfer,
+    apply_pixelation,
+    draw_dets,
 )
+from .video_utils import enumerate_video_devices
 
 logger = logging.getLogger(__name__)
 SENTINEL = ("__STOP__", None)
@@ -21,11 +34,17 @@ def _pick_camera() -> str:
     return f"/dev/video{devs[0][0]}" if devs else "/dev/video0"
 
 
-# ----------------------------
+# ---------------------.-------
 # Process A: Capture
 # ----------------------------
-def proc_capture(out_q: mp.Queue, cam: str, res: Tuple[int, int], fps: int,
-                 buffer_frames: int, verbose: bool = False):
+def proc_capture(
+    out_q: mp.Queue,
+    cam: str,
+    res: Tuple[int, int],
+    fps: int,
+    buffer_frames: int,
+    verbose: bool = False,
+):
     try:
         # 强制 V4L2，避免 GStreamer 报警
         cap = cv2.VideoCapture(cam, cv2.CAP_V4L2)
@@ -40,9 +59,9 @@ def proc_capture(out_q: mp.Queue, cam: str, res: Tuple[int, int], fps: int,
             logger.error(f"[cap] cannot open {cam}")
             return
 
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  res[0])
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, res[0])
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
-        cap.set(cv2.CAP_PROP_FPS,          fps)
+        cap.set(cv2.CAP_PROP_FPS, fps)
         try:
             # MJPG 能大幅减轻 CPU 压力
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
@@ -57,7 +76,10 @@ def proc_capture(out_q: mp.Queue, cam: str, res: Tuple[int, int], fps: int,
             fourcc_i = int(cap.get(cv2.CAP_PROP_FOURCC))
             fourcc = "".join([chr((fourcc_i >> 8 * i) & 0xFF) for i in range(4)])
             rep = cap.get(cv2.CAP_PROP_FPS)
-            print(f"[cap] using {cam} fourcc={fourcc} target_fps={fps} cap_prop_fps={rep:.1f}", flush=True)
+            print(
+                f"[cap] using {cam} fourcc={fourcc} target_fps={fps} cap_prop_fps={rep:.1f}",
+                flush=True,
+            )
 
         frame_time = 1.0 / max(1, fps)
         last = time.perf_counter()
@@ -116,18 +138,45 @@ def proc_capture(out_q: mp.Queue, cam: str, res: Tuple[int, int], fps: int,
 # ----------------------------
 # Process B: Anonymize (TRT + pixelate)
 # ----------------------------
-def proc_anonymize(in_q: mp.Queue, out_q: mp.Queue,
-                   scrfd_cfg: dict, blur_enabled: bool,
-                   draw_boxes: bool, verbose: bool = False):
-    anonymizer = None
-    if blur_enabled and scrfd_cfg.get("engine_path"):
-        anonymizer = _build_anonymizer(scrfd_cfg)
+def proc_anonymize(
+    in_q: mp.Queue,
+    out_q: mp.Queue,
+    scrfd_cfg: dict,
+    blur_enabled: bool,
+    draw_boxes: bool,
+    verbose: bool = False,
+):
+    import os
+    import time
+    from queue import Empty, Full
 
-    # 统计
-    anon_cnt, t0 = 0, time.perf_counter()
-    sum_gpu_ms, sum_pix_ms = 0.0, 0.0
+    anonymizer = None
+    cuda_ctx = None  # ⬅️ 记录当前进程的 CUDA 上下文
 
     try:
+        # 只有需要匿名化、且提供了 TensorRT engine 时，才初始化 CUDA 上下文
+        if blur_enabled and scrfd_cfg.get("engine_path"):
+            import pycuda.driver as cuda  # ⬅️ 放在这里避免无 GPU 时顶层导入失败
+
+            cuda.init()
+            dev_id = int(os.environ.get("OM1_CUDA_DEVICE", "0"))
+            cuda_ctx = cuda.Device(dev_id).make_context()  # ⬅️ 激活到当前线程
+            try:
+                anonymizer = _build_anonymizer(
+                    scrfd_cfg
+                )  # ⬅️ 这里面会用到 pycuda / tensorrt
+            except Exception:
+                # 构建失败时把上下文弹栈释放再抛出
+                try:
+                    cuda_ctx.pop()
+                except Exception:
+                    pass
+                raise
+
+        # 统计
+        anon_cnt, t0 = 0, time.perf_counter()
+        sum_gpu_ms, sum_pix_ms = 0.0, 0.0
+
         while True:
             try:
                 ts, frame = in_q.get(timeout=1.0)
@@ -139,7 +188,6 @@ def proc_anonymize(in_q: mp.Queue, out_q: mp.Queue,
             if blur_enabled and anonymizer is not None:
                 t_pix0 = time.perf_counter()
                 frame, dets, gpu_ms = anonymizer(frame)  # gpu_ms: TRT 推理时间
-                # 像素化=总耗时-推理耗时
                 pix_ms = (time.perf_counter() - t_pix0) * 1000.0 - (gpu_ms or 0.0)
                 if pix_ms < 0:
                     pix_ms = 0.0
@@ -147,7 +195,7 @@ def proc_anonymize(in_q: mp.Queue, out_q: mp.Queue,
                 if draw_boxes and dets is not None:
                     draw_dets(frame, dets)
 
-                sum_gpu_ms += (gpu_ms or 0.0)
+                sum_gpu_ms += gpu_ms or 0.0
                 sum_pix_ms += pix_ms
 
             # 输出
@@ -168,14 +216,24 @@ def proc_anonymize(in_q: mp.Queue, out_q: mp.Queue,
             if verbose and (time.perf_counter() - t0) >= 1.0:
                 avg_gpu = (sum_gpu_ms / anon_cnt) if anon_cnt else 0.0
                 avg_pix = (sum_pix_ms / anon_cnt) if anon_cnt else 0.0
-                print(f"[anon] fps={anon_cnt} avg_gpu_ms={avg_gpu:.1f} avg_pixelate_ms={avg_pix:.1f}", flush=True)
+                print(
+                    f"[anon] fps={anon_cnt} avg_gpu_ms={avg_gpu:.1f} avg_pixelate_ms={avg_pix:.1f}",
+                    flush=True,
+                )
                 anon_cnt, t0 = 0, time.perf_counter()
                 sum_gpu_ms, sum_pix_ms = 0.0, 0.0
     finally:
+        # 通知下游退出
         try:
             out_q.put_nowait(SENTINEL)
         except Full:
             pass
+        # 释放 CUDA 上下文（必须在创建它的同一进程/线程里 pop）
+        if cuda_ctx is not None:
+            try:
+                cuda_ctx.pop()
+            except Exception:
+                pass
         if verbose:
             print("[anon] exit.", flush=True)
 
@@ -286,7 +344,6 @@ class VideoStream:
         self.p_anon: Optional[mp.Process] = None
         self._drain_thread: Optional[threading.Thread] = None
         self._running = mp.Value("b", False)
-    
 
     def register_frame_callback(self, cb: Callable[[str], None]) -> None:
         """Register an additional per-frame callback (receives base64 JPEG)."""
@@ -304,7 +361,6 @@ class VideoStream:
             except ValueError:
                 pass
 
-
     def _start_loop(self):
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
@@ -320,12 +376,26 @@ class VideoStream:
 
         self.p_cap = mp.Process(
             target=proc_capture,
-            args=(self.q_raw, self.cam, self.resolution, self.fps, self.buffer_frames, self.verbose),
+            args=(
+                self.q_raw,
+                self.cam,
+                self.resolution,
+                self.fps,
+                self.buffer_frames,
+                self.verbose,
+            ),
             daemon=True,
         )
         self.p_anon = mp.Process(
             target=proc_anonymize,
-            args=(self.q_raw, self.q_proc, self.scrfd_cfg, self.blur_enabled, self.draw_boxes, self.verbose),
+            args=(
+                self.q_raw,
+                self.q_proc,
+                self.scrfd_cfg,
+                self.blur_enabled,
+                self.draw_boxes,
+                self.verbose,
+            ),
             daemon=True,
         )
         self.p_cap.start()
@@ -337,13 +407,16 @@ class VideoStream:
 
     def _dispatch(self, b64_jpeg: str):
         with self._cb_lock:
-            callbacks = tuple(self.frame_callbacks)  # snapshot to avoid mutation during iteration
-        for cb in callbacks:
-            if inspect.iscoroutinefunction(cb):
-                asyncio.run_coroutine_threadsafe(cb(b64_jpeg), self.loop)
-            else:
-                cb(b64_jpeg)
+            callbacks = tuple(self.frame_callbacks)
 
+        for cb in callbacks:
+            try:
+                result = cb(b64_jpeg)  # call it
+                # If it's an async function, result will be a coroutine -> schedule it
+                if inspect.isawaitable(result):
+                    asyncio.run_coroutine_threadsafe(result, self.loop)
+            except Exception as e:
+                logger.error("Frame callback raised: %s", e)
 
     def _drain_loop(self):
         """
@@ -391,7 +464,10 @@ class VideoStream:
                 if self.verbose and (time.perf_counter() - read_t0) >= 1.0:
                     avg_enc = (sum_enc_ms / read_cnt) if read_cnt else 0.0
                     avg_b64 = (sum_b64_ms / read_cnt) if read_cnt else 0.0
-                    print(f"[main] read_fps={read_cnt} avg_jpeg_ms={avg_enc:.1f} avg_b64_cb_ms={avg_b64:.1f}", flush=True)
+                    print(
+                        f"[main] read_fps={read_cnt} avg_jpeg_ms={avg_enc:.1f} avg_b64_cb_ms={avg_b64:.1f}",
+                        flush=True,
+                    )
                     read_cnt, read_t0 = 0, time.perf_counter()
                     sum_enc_ms, sum_b64_ms = 0.0, 0.0
         finally:
