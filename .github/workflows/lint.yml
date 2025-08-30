@@ -28,20 +28,17 @@ jobs:
           sudo apt-get install -y portaudio19-dev python3-pyaudio
 
       - name: Install Poetry
-        id: install-poetry
         uses: snok/install-poetry@v1
         with:
-          version: 2.0.1            # ← 改成 2.0.1
+          version: 1.8.3
           virtualenvs-create: true
           virtualenvs-in-project: true
-          installer: pipx
 
       - name: Put Poetry on PATH
         run: echo "${{ steps.install-poetry.outputs.poetry-path }}" >> $GITHUB_PATH
 
-
       - name: Check Poetry
-        run: poetry --version              # ← 确认能找到 poetry
+        run: poetry --version
 
       - name: Force Poetry to use runner Python
         run: poetry env use "$(which python)"   # ← 绑定到刚装的 3.10
