@@ -21,14 +21,13 @@ ython scrfd_trt_pixelate.py  \
     --pixel_margin 0.25 
 --nvenc->use nvenv or not not include it if using cpu
 """
+
 import argparse
 import os
+import shlex
 import sys
 import time
-import shlex
-from typing import Tuple, Dict, Any, Optional
-import pycuda.autoinit  # creates and keeps a CUDA context current on this thread
-
+from typing import Any, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -56,7 +55,9 @@ MAX_DETS = 100
 # ---------------------------------------------------------------
 
 
-def letterbox_bgr(img: np.ndarray, new: Tuple[int, int] = (640, 640), color=(114, 114, 114)) -> Tuple[np.ndarray, float, Tuple[int, int], Tuple[int, int]]:
+def letterbox_bgr(
+    img: np.ndarray, new: Tuple[int, int] = (640, 640), color=(114, 114, 114)
+) -> Tuple[np.ndarray, float, Tuple[int, int], Tuple[int, int]]:
     """
     Resize with unchanged aspect ratio using padding (letterbox).
 
@@ -77,7 +78,11 @@ def letterbox_bgr(img: np.ndarray, new: Tuple[int, int] = (640, 640), color=(114
     h, w = img.shape[:2]
     r = min(new[0] / h, new[1] / w)
     nh, nw = int(round(h * r)), int(round(w * r))
-    img_r = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR) if (h, w) != (nh, nw) else img
+    img_r = (
+        cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        if (h, w) != (nh, nw)
+        else img
+    )
     canvas = np.full((new[0], new[1], 3), color, dtype=np.uint8)
     top = (new[0] - nh) // 2
     left = (new[1] - nw) // 2
@@ -125,7 +130,14 @@ def nms_numpy(dets: Optional[np.ndarray], iou: float = 0.5) -> Optional[np.ndarr
     return dets[keep]
 
 
-def draw_dets(img: np.ndarray, dets: np.ndarray, color=(0, 255, 0), thickness: int = 2, put_fps: Optional[str] = None, draw_boxes: bool = True) -> np.ndarray:
+def draw_dets(
+    img: np.ndarray,
+    dets: np.ndarray,
+    color=(0, 255, 0),
+    thickness: int = 2,
+    put_fps: Optional[str] = None,
+    draw_boxes: bool = True,
+) -> np.ndarray:
     """
     Draw detection rectangles and optional FPS/latency overlay.
 
@@ -216,7 +228,9 @@ def distance2bbox(points: np.ndarray, distances: np.ndarray) -> np.ndarray:
     return np.stack([x1, y1, x2, y2], axis=1)
 
 
-def expand_clip(x1: int, y1: int, x2: int, y2: int, margin: float, W: int, H: int) -> Tuple[int, int, int, int]:
+def expand_clip(
+    x1: int, y1: int, x2: int, y2: int, margin: float, W: int, H: int
+) -> Tuple[int, int, int, int]:
     """
     Expand a box by margin and clip to image boundaries.
 
@@ -245,7 +259,15 @@ def expand_clip(x1: int, y1: int, x2: int, y2: int, margin: float, W: int, H: in
     return x1n, y1n, x2n, y2n
 
 
-def pixelate_roi(img: np.ndarray, x1: int, y1: int, x2: int, y2: int, blocks_on_short: int = 8, noise_sigma: float = 0.0) -> None:
+def pixelate_roi(
+    img: np.ndarray,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    blocks_on_short: int = 8,
+    noise_sigma: float = 0.0,
+) -> None:
     """
     Pixelate an ROI in-place, with optional noise.
 
@@ -285,7 +307,14 @@ def pixelate_roi(img: np.ndarray, x1: int, y1: int, x2: int, y2: int, blocks_on_
     img[y1:y2, x1:x2] = big
 
 
-def apply_pixelation(img: np.ndarray, dets: Optional[np.ndarray], margin: float = 0.25, blocks: int = 8, max_faces: int = 32, noise_sigma: float = 0.0) -> None:
+def apply_pixelation(
+    img: np.ndarray,
+    dets: Optional[np.ndarray],
+    margin: float = 0.25,
+    blocks: int = 8,
+    max_faces: int = 32,
+    noise_sigma: float = 0.0,
+) -> None:
     """
     Pixelate multiple faces by score order up to a maximum.
 
@@ -312,9 +341,13 @@ def apply_pixelation(img: np.ndarray, dets: Optional[np.ndarray], margin: float 
         return
     H, W = img.shape[:2]
     dets_sorted = dets[dets[:, 4].argsort()[::-1]]
-    for (x1, y1, x2, y2, _sc) in dets_sorted[:max_faces]:
-        x1e, y1e, x2e, y2e = expand_clip(int(x1), int(y1), int(x2), int(y2), margin, W, H)
-        pixelate_roi(img, x1e, y1e, x2e, y2e, blocks_on_short=blocks, noise_sigma=noise_sigma)
+    for x1, y1, x2, y2, _sc in dets_sorted[:max_faces]:
+        x1e, y1e, x2e, y2e = expand_clip(
+            int(x1), int(y1), int(x2), int(y2), margin, W, H
+        )
+        pixelate_roi(
+            img, x1e, y1e, x2e, y2e, blocks_on_short=blocks, noise_sigma=noise_sigma
+        )
 
 
 class TRTInfer:
@@ -332,7 +365,14 @@ class TRTInfer:
     verbose : bool, optional
         Print tensor metadata, by default False.
     """
-    def __init__(self, engine_path: str, input_name: str = "input.1", size: int = 640, verbose: bool = False):
+
+    def __init__(
+        self,
+        engine_path: str,
+        input_name: str = "input.1",
+        size: int = 640,
+        verbose: bool = False,
+    ):
         self.size = size
         self.verbose = verbose
         import pycuda.driver as cuda
@@ -341,13 +381,20 @@ class TRTInfer:
         self.stream = cuda.Stream()
 
         logger = trt.Logger(trt.Logger.WARNING)
-        with open(os.path.expanduser(engine_path), "rb") as f, trt.Runtime(logger) as rt:
+        with (
+            open(os.path.expanduser(engine_path), "rb") as f,
+            trt.Runtime(logger) as rt,
+        ):
             self.engine = rt.deserialize_cuda_engine(f.read())
         self.ctx = self.engine.create_execution_context()
 
-        self.names = [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
+        self.names = [
+            self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)
+        ]
         self.modes = {n: self.engine.get_tensor_mode(n) for n in self.names}
-        self.dtypes = {n: trt.nptype(self.engine.get_tensor_dtype(n)) for n in self.names}
+        self.dtypes = {
+            n: trt.nptype(self.engine.get_tensor_dtype(n)) for n in self.names
+        }
 
         self.in_name = input_name
         assert self.in_name in self.names, f"input '{self.in_name}' not in {self.names}"
@@ -357,10 +404,13 @@ class TRTInfer:
         self.shapes = {n: tuple(self.ctx.get_tensor_shape(n)) for n in self.names}
         if self.verbose:
             for n in self.names:
-                print(f"[tensor] {n:20s} mode={self.modes[n].name} shape={self.shapes[n]} dtype={self.dtypes[n]}")
+                print(
+                    f"[tensor] {n:20s} mode={self.modes[n].name} shape={self.shapes[n]} dtype={self.dtypes[n]}"
+                )
 
         # device alloc + address binding
         import pycuda.driver as cuda2
+
         self.alloc: Dict[str, Any] = {}
         for n in self.names:
             nbytes = int(np.prod(self.shapes[n])) * np.dtype(self.dtypes[n]).itemsize
@@ -371,10 +421,19 @@ class TRTInfer:
             self.ctx.set_tensor_address(n, int(mem))
 
         # pinned host buffers
-        self.h_in = cuda2.pagelocked_empty((1, 3, self.size, self.size), dtype=self.dtypes[self.in_name])
-        self.out_names = [n for n in self.names if self.modes[n] == trt.TensorIOMode.OUTPUT]
-        self.h_out = {n: cuda2.pagelocked_empty(int(np.prod(self.shapes[n])), dtype=self.dtypes[n])
-                      for n in self.out_names if int(np.prod(self.shapes[n])) > 0}
+        self.h_in = cuda2.pagelocked_empty(
+            (1, 3, self.size, self.size), dtype=self.dtypes[self.in_name]
+        )
+        self.out_names = [
+            n for n in self.names if self.modes[n] == trt.TensorIOMode.OUTPUT
+        ]
+        self.h_out = {
+            n: cuda2.pagelocked_empty(
+                int(np.prod(self.shapes[n])), dtype=self.dtypes[n]
+            )
+            for n in self.out_names
+            if int(np.prod(self.shapes[n])) > 0
+        }
 
         # timing events
         self.ev_start = cuda2.Event()
@@ -440,7 +499,9 @@ class TRTInfer:
         dets = self._postproc_scrfd(outs, left, top, r, W, H)
         return dets, gpu_ms
 
-    def _postproc_scrfd(self, outs: Dict[str, np.ndarray], left: int, top: int, r: float, W: int, H: int) -> np.ndarray:
+    def _postproc_scrfd(
+        self, outs: Dict[str, np.ndarray], left: int, top: int, r: float, W: int, H: int
+    ) -> np.ndarray:
         """
         Convert SCRFD raw outputs to filtered XYXY detections.
 
@@ -460,8 +521,16 @@ class TRTInfer:
         np.ndarray
             Detections (N,5) as (x1,y1,x2,y2,score).
         """
-        scores_map = {arr.shape[0]: arr.reshape(-1) for arr in outs.values() if arr.ndim == 2 and arr.shape[-1] == 1}
-        bboxes_map = {arr.shape[0]: arr.reshape(-1, 4) for arr in outs.values() if arr.ndim == 2 and arr.shape[-1] == 4}
+        scores_map = {
+            arr.shape[0]: arr.reshape(-1)
+            for arr in outs.values()
+            if arr.ndim == 2 and arr.shape[-1] == 1
+        }
+        bboxes_map = {
+            arr.shape[0]: arr.reshape(-1, 4)
+            for arr in outs.values()
+            if arr.ndim == 2 and arr.shape[-1] == 4
+        }
         if not scores_map or not bboxes_map:
             return np.zeros((0, 5), dtype=np.float32)
 
@@ -514,8 +583,10 @@ class TRTInfer:
         scores = np.concatenate(all_scores, axis=0)
         boxes = np.concatenate(all_boxes, axis=0)
 
-        gtopk = max(int(getattr(self, "topk_per_level", TOPK_PER_LEVEL)) * len(STRIDES),
-                    int(getattr(self, "max_dets", MAX_DETS)) * 4)
+        gtopk = max(
+            int(getattr(self, "topk_per_level", TOPK_PER_LEVEL)) * len(STRIDES),
+            int(getattr(self, "max_dets", MAX_DETS)) * 4,
+        )
         if scores.size > gtopk:
             idg = np.argpartition(scores, -gtopk)[-gtopk:]
             scores = scores[idg]
@@ -546,7 +617,9 @@ class TRTInfer:
         return dets
 
 
-def open_nvenc_writer(out_path: str, width: int, height: int, fps_in: float) -> Optional[cv2.VideoWriter]:
+def open_nvenc_writer(
+    out_path: str, width: int, height: int, fps_in: float
+) -> Optional[cv2.VideoWriter]:
     """
     Create a GStreamer NVENC writer for OpenCV.
 
@@ -680,26 +753,50 @@ def main() -> None:
     ap = argparse.ArgumentParser()
 
     # Detection knobs
-    ap.add_argument("--conf", type=float, default=None, help="Confidence threshold override")
+    ap.add_argument(
+        "--conf", type=float, default=None, help="Confidence threshold override"
+    )
     ap.add_argument("--topk", type=int, default=None, help="Top-K per level override")
-    ap.add_argument("--max_dets", type=int, default=None, help="Global max detections override")
+    ap.add_argument(
+        "--max_dets", type=int, default=None, help="Global max detections override"
+    )
 
     # IO / engine
     ap.add_argument("--engine", required=True, help="Path to TensorRT engine (.plan)")
-    ap.add_argument("--input", required=True, help="Input file path or GStreamer pipeline")
+    ap.add_argument(
+        "--input", required=True, help="Input file path or GStreamer pipeline"
+    )
     ap.add_argument("--out", default="", help="Optional output file path")
     ap.add_argument("--size", type=int, default=640, help="Model input size (square)")
     ap.add_argument("--input_name", default="input.1", help="Engine input tensor name")
     ap.add_argument("--print_every", type=int, default=10, help="Log interval (frames)")
-    ap.add_argument("--nvenc", action="store_true", help="Use NVENC via GStreamer for output")
+    ap.add_argument(
+        "--nvenc", action="store_true", help="Use NVENC via GStreamer for output"
+    )
     ap.add_argument("--verbose", action="store_true", help="Verbose tensor metadata")
 
     # Pixelation knobs
-    ap.add_argument("--pixelate", action="store_true", help="Enable pixelation anonymization")
-    ap.add_argument("--pixel_blocks", type=int, default=8, help="Short-side blocks (smaller = stronger)")
-    ap.add_argument("--pixel_margin", type=float, default=0.25, help="Expand bbox by this ratio")
-    ap.add_argument("--pixel_max_faces", type=int, default=32, help="Max faces pixelated per frame")
-    ap.add_argument("--pixel_noise", type=float, default=0.0, help="Gaussian noise sigma after pixelation")
+    ap.add_argument(
+        "--pixelate", action="store_true", help="Enable pixelation anonymization"
+    )
+    ap.add_argument(
+        "--pixel_blocks",
+        type=int,
+        default=8,
+        help="Short-side blocks (smaller = stronger)",
+    )
+    ap.add_argument(
+        "--pixel_margin", type=float, default=0.25, help="Expand bbox by this ratio"
+    )
+    ap.add_argument(
+        "--pixel_max_faces", type=int, default=32, help="Max faces pixelated per frame"
+    )
+    ap.add_argument(
+        "--pixel_noise",
+        type=float,
+        default=0.0,
+        help="Gaussian noise sigma after pixelation",
+    )
     ap.add_argument("--no_boxes", action="store_true", help="Do not draw rectangles")
 
     args = ap.parse_args()
@@ -723,11 +820,18 @@ def main() -> None:
                 print("[warn] NVENC pipeline failed to open, falling back to CPU mp4v")
         if writer is None:
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(out_path, fourcc, fps_in if fps_in > 0 else 25.0, (W, H))
+            writer = cv2.VideoWriter(
+                out_path, fourcc, fps_in if fps_in > 0 else 25.0, (W, H)
+            )
             if not writer.isOpened():
                 raise RuntimeError("CPU VideoWriter failed to open")
 
-    infer = TRTInfer(engine_path=eng, input_name=args.input_name, size=args.size, verbose=args.verbose)
+    infer = TRTInfer(
+        engine_path=eng,
+        input_name=args.input_name,
+        size=args.size,
+        verbose=args.verbose,
+    )
     if args.conf is not None:
         infer.conf_thres = args.conf
     if args.topk is not None:
@@ -771,13 +875,17 @@ def main() -> None:
             elapsed = time.perf_counter() - t0
             fps_now = total_frames / elapsed if elapsed > 0 else 0.0
             overlay = f"GPU {gpu_ms:.2f} ms | EMA {ema_ms:.2f} ms | FPS {fps_now:.1f} | faces {len(dets)}"
-            out_frame = draw_dets(frame, dets, put_fps=overlay, draw_boxes=(not args.no_boxes))
+            out_frame = draw_dets(
+                frame, dets, put_fps=overlay, draw_boxes=(not args.no_boxes)
+            )
             writer.write(out_frame)
 
         if total_frames % args.print_every == 0:
             elapsed = time.perf_counter() - t0
             fps_now = total_frames / elapsed if elapsed > 0 else 0.0
-            print(f"[{total_frames:05d}] GPU={gpu_ms:.2f} ms  EMA={ema_ms:.2f} ms  FPS={fps_now:.1f}  faces={len(dets)}")
+            print(
+                f"[{total_frames:05d}] GPU={gpu_ms:.2f} ms  EMA={ema_ms:.2f} ms  FPS={fps_now:.1f}  faces={len(dets)}"
+            )
 
     cap.release()
     if writer is not None:
@@ -785,7 +893,9 @@ def main() -> None:
 
     if total_frames:
         total_time = time.perf_counter() - t0
-        print(f"done. frames={total_frames} avg_fps={total_frames / total_time:.2f} avg_gpu_ms≈{ema_ms:.2f}")
+        print(
+            f"done. frames={total_frames} avg_fps={total_frames / total_time:.2f} avg_gpu_ms≈{ema_ms:.2f}"
+        )
 
 
 if __name__ == "__main__":

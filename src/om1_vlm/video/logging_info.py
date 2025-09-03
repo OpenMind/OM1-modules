@@ -1,9 +1,9 @@
 import logging
+import multiprocessing as mp
 import os
 import time
 from dataclasses import dataclass
-from logging.handlers import QueueListener, QueueHandler
-import multiprocessing as mp
+from logging.handlers import QueueHandler, QueueListener
 
 
 @dataclass
@@ -68,7 +68,6 @@ def setup_logging(
     handlers = [console_handler]
 
     if log_to_file:
-
         os.makedirs("logs", exist_ok=True)
 
         file_handler = logging.FileHandler(
@@ -98,7 +97,6 @@ def get_logging_config() -> LoggingConfig:
             for handler in logging.getLogger().handlers
         ),
     )
-
 
 
 def setup_logging_mp_main(
@@ -158,5 +156,6 @@ def setup_logging_mp_child(log_queue: mp.Queue, *, level: str | int | None = Non
     elif isinstance(level, int):
         root.setLevel(level)
 
-    logging.getLogger(__name__).debug("Child process logging configured (QueueHandler).")
-
+    logging.getLogger(__name__).debug(
+        "Child process logging configured (QueueHandler)."
+    )

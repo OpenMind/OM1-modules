@@ -19,7 +19,7 @@ import platform
 import threading
 import time
 from queue import Empty, Full
-from typing import Iterable, Callable, List, Optional, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple
 
 import cv2
 
@@ -31,13 +31,8 @@ from ..anonymizationSys.scrfd_trt_pixelate import (
     apply_pixelation,
     draw_dets,
 )
+from .logging_info import get_logging_config, setup_logging_mp_child
 from .video_utils import enumerate_video_devices
-
-from .logging_info import (
-    get_logging_config,
-    setup_logging_mp_child,
-    LoggingConfig,
-)
 
 # Keep logger naming consistent with your other modules
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
@@ -224,6 +219,7 @@ def proc_anonymize(
     try:
         if blur_enabled and scrfd_cfg.get("engine_path"):
             import os
+
             import pycuda.driver as cuda
 
             cuda.init()
@@ -256,8 +252,8 @@ def proc_anonymize(
             if blur_enabled and anonymizer is not None:
                 # t0 = time.perf_counter() #For logging info
                 frame, dets, gpu_ms = anonymizer(frame)
-                #For logging info
-                # t1 = time.perf_counter() 
+                # For logging info
+                # t1 = time.perf_counter()
                 # pix_ms = (t1 - t0) * 1000.0 - (gpu_ms or 0.0)
                 # if pix_ms < 0:
                 #     pix_ms = 0.0
@@ -265,7 +261,7 @@ def proc_anonymize(
                 if draw_boxes and dets is not None:
                     draw_dets(frame, dets)
 
-                #For logging info
+                # For logging info
                 # n_frames_anon += 1
                 # sum_gpu_ms += (gpu_ms or 0.0)
                 # sum_pix_ms += pix_ms
@@ -327,6 +323,7 @@ def _build_anonymizer(cfg: dict):
     Callable[[any], Tuple[any, Optional[list], Optional[float]]]
         A callable(frame_bgr) -> (frame_bgr, dets, gpu_ms)
     """
+
     class _Anon:
         def __init__(self, cfg):
             self.inf = TRTInfer(
@@ -566,7 +563,9 @@ class VideoStreamBlurFace:
         self.p_anon.start()
         logger.info("[main] Anonymize process started (pid=%s).", self.p_anon.pid)
 
-        self._drain_thread = threading.Thread(target=self._drain_loop, daemon=True, name="DrainThread")
+        self._drain_thread = threading.Thread(
+            target=self._drain_loop, daemon=True, name="DrainThread"
+        )
         self._drain_thread.start()
         logger.info("[main] Drain thread started. VideoStream running.")
 
