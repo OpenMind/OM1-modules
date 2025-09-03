@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# om1_vlm/video/video_stream.py
+# om1_vlm/video/video_stream_blur_face.py
 
 """
 Video capture + optional face anonymization (pixelation) pipeline.
