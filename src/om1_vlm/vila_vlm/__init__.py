@@ -10,5 +10,3 @@ from .video_stream_input import VideoStreamInput
 from .vila_processor import VILAProcessor
 
 __all__ = ["VILAProcessor", "VILAArgParser", "VideoStreamInput"]
-
-# om1_vlm/__init__.py

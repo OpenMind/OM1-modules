@@ -97,11 +97,6 @@ def proc_capture(
         cap = cv2.VideoCapture(cam, cv2.CAP_V4L2)
         if not cap.isOpened():
             log.warning(f"[cap] failed to open {cam}, trying common fallbacks.")
-            for dev in ("/dev/video0", "/dev/video1", "/dev/video2"):
-                cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
-                if cap.isOpened():
-                    cam = dev
-                    break
 
         if not cap or not cap.isOpened():
             log.error(f"[cap] cannot open camera {cam}")
