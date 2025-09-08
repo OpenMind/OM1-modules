@@ -38,6 +38,8 @@ class VideoStream:
         By default (640, 480)
     jpeg_quality : int, optional
         JPEG quality for encoding frames, by default 70
+    device_index : int, optional
+        Index of the camera device to use, by default 0
     """
 
     def __init__(
@@ -47,6 +49,7 @@ class VideoStream:
         fps: Optional[int] = 30,
         resolution: Optional[Tuple[int, int]] = (640, 480),
         jpeg_quality: int = 70,
+        device_index: int = 0,
     ):
         self._video_thread: Optional[threading.Thread] = None
 
@@ -55,6 +58,7 @@ class VideoStream:
         self.register_frame_callback(frame_callback)
 
         # Video capture device
+        self.device_index = device_index
         self._cap = None
 
         self.running: bool = True
@@ -96,6 +100,13 @@ class VideoStream:
             camindex = 0 if devices else 0
         else:
             camindex = "/dev/video" + str(devices[0][0]) if devices else "/dev/video0"
+
+        if self.device_index != 0:
+            if platform.system() == "Darwin":
+                camindex = self.device_index
+            else:
+                camindex = f"/dev/video{self.device_index}"
+
         logger.info(f"Using camera: {camindex}")
 
         self._cap = cv2.VideoCapture(camindex)
