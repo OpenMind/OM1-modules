@@ -15,6 +15,7 @@ import base64
 import inspect
 import logging
 import multiprocessing as mp
+import os
 import platform
 import threading
 import time
@@ -213,8 +214,6 @@ def proc_anonymize(
 
     try:
         if blur_enabled and scrfd_cfg.get("engine_path"):
-            import os
-
             import pycuda.driver as cuda
 
             cuda.init()
@@ -369,6 +368,8 @@ class VideoStreamBlurFace:
         Desired frame resolution (width, height), by default (640, 480).
     jpeg_quality : int, optional
         JPEG quality (0–100), by default 70.
+    device_index : int, optional
+        Camera device index (0 = default), by default 0.
     blur_enabled : bool, optional
         If True and an engine path is supplied, apply face anonymization.
     blur_conf : float, optional
@@ -395,8 +396,6 @@ class VideoStreamBlurFace:
         Max size for the processed frames queue (anon→main), by default 4.
     buffer_frames : int, optional
         Desired capture driver buffer size, by default 1.
-    camera : Optional[str], optional
-        Explicit camera index/path; if None, auto-pick as in the reference style.
     log_queue : Optional[mp.Queue], optional
         Logging queue from runtime.logging.setup_logging_mp_main(). If provided,
         child processes forward logs to the main process.
@@ -408,6 +407,7 @@ class VideoStreamBlurFace:
         fps: int = 30,
         resolution: Tuple[int, int] = (640, 480),
         jpeg_quality: int = 70,
+        device_index: int = 0,
         blur_enabled: bool = True,
         blur_conf: float = 0.5,
         scrfd_engine: Optional[str] = None,
@@ -421,7 +421,6 @@ class VideoStreamBlurFace:
         queue_size_raw: int = 4,
         queue_size_proc: int = 4,
         buffer_frames: int = 1,
-        camera: Optional[str] = None,
         log_queue: Optional[mp.Queue] = None,
     ):
         self.fps = int(fps)
@@ -443,8 +442,19 @@ class VideoStreamBlurFace:
         self.loop_thread.start()
         logger.debug("Starting background event loop for video streaming.")
 
-        # Camera + Queues
-        self.cam = camera if camera is not None else _pick_camera()
+        devices = enumerate_video_devices()
+        if platform.system() == "Darwin":
+            camindex = 0 if devices else 0
+        else:
+            camindex = f"/dev/video{devices[0][0]}" if devices else "/dev/video0"
+
+        if device_index != 0:
+            if platform.system() == "Darwin":
+                camindex = self.device_index
+            else:
+                camindex = f"/dev/video{self.device_index}"
+
+        self.cam = camindex
         self.q_raw = mp.Queue(maxsize=int(queue_size_raw))
         self.q_proc = mp.Queue(maxsize=int(queue_size_proc))
 
