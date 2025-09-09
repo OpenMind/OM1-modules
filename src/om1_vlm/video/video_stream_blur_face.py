@@ -450,9 +450,9 @@ class VideoStreamBlurFace:
 
         if device_index != 0:
             if platform.system() == "Darwin":
-                camindex = self.device_index
+                camindex = device_index
             else:
-                camindex = f"/dev/video{self.device_index}"
+                camindex = f"/dev/video{device_index}"
 
         self.cam = camindex
         self.q_raw = mp.Queue(maxsize=int(queue_size_raw))
