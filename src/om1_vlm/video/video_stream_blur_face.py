@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 # om1_vlm/video/video_stream_blur_face.py
-
 """
 Video capture + optional face anonymization (pixelation) pipeline.
 
-This module launches a two-process pipeline:
-- Capture process (V4L2 on Linux) that reads frames and pushes them into a queue
-- Anonymization process (optional, TensorRT SCRFD) that pixelates faces
-A main-thread drain loop encodes frames to JPEG (base64) and dispatches to callbacks.
+- Capture process (V4L2 on Linux) reads frames and pushes to a queue
+- Anonymization process (optional, TensorRT SCRFD) pixelates faces
+- Main-thread drain loop encodes frames to JPEG (base64) and dispatches callbacks
+  with a latest-frame-wins policy to keep latency low.
 """
 
 import asyncio
@@ -23,6 +22,7 @@ from queue import Empty, Full
 from typing import Callable, Iterable, List, Optional, Tuple
 
 import cv2
+import numpy as np  # NEW: for buffer conversions
 
 from om1_utils.logging import LoggingConfig, get_logging_config, setup_logging
 
@@ -35,6 +35,13 @@ from ..anonymizationSys.scrfd_trt_pixelate import (
     draw_dets,
 )
 from .video_utils import enumerate_video_devices
+
+# --- TurboJPEG (fast JPEG) ---
+try:
+    from turbojpeg import TurboJPEG, TJPF, TJSAMP
+    _HAVE_TURBOJPEG = True
+except Exception:
+    _HAVE_TURBOJPEG = False
 
 try:
     import pycuda.driver as cuda
@@ -59,21 +66,6 @@ def proc_capture(
 ) -> None:
     """
     Capture frames from a camera in a dedicated process and push them to a queue.
-
-    Parameters
-    ----------
-    out_q : mp.Queue
-        Output queue for (timestamp, frame) tuples.
-    cam : str
-        Camera index/path, e.g. 0 (macOS) or '/dev/video0' (Linux).
-    res : Tuple[int, int]
-        Requested (width, height).
-    fps : int
-        Requested FPS.
-    buffer_frames : int
-        Desired driver-side capture buffer size (best effort).
-    logging_config : Optional[LoggingConfig], optional
-        logging configuration for this process.
     """
     setup_logging("odom_processor", logging_config=logging_config)
     cap = None
@@ -94,7 +86,7 @@ def proc_capture(
         cap.set(cv2.CAP_PROP_FPS, fps)
 
         try:
-            # MJPG can reduce CPU usage
+            # MJPG can reduce CPU usage (toggle off to compare latency)
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         except Exception:
             pass
@@ -103,13 +95,15 @@ def proc_capture(
         except Exception:
             pass
 
-        # Warn if camera doesn't honor the requested resolution
+        # Warn if camera doesn't honor the requested resolution/fps
         actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
         if (actual_w, actual_h) != (res[0], res[1]):
             logging.warning(
                 f"[cap] Camera doesn't support resolution {res}. Using {(actual_w, actual_h)} instead."
             )
+        logging.info(f"[cap] camera reports FPS={actual_fps:.2f}")
 
         frame_time = 1.0 / max(1, fps)
         last = time.perf_counter()
@@ -171,21 +165,6 @@ def proc_anonymize(
 ) -> None:
     """
     Optional anonymizer process: applies face detection & pixelation, then forwards frames.
-
-    Parameters
-    ----------
-    in_q : mp.Queue
-        Input queue receiving (timestamp, frame) tuples from capture process.
-    out_q : mp.Queue
-        Output queue to send processed (timestamp, frame) tuples to main process.
-    scrfd_cfg : dict
-        Configuration for the TensorRT SCRFD inferencer and pixelation parameters.
-    blur_enabled : bool
-        If True and engine_path is provided, apply anonymization.
-    draw_boxes : bool
-        If True, draw detection boxes for debug.
-    logging_config : Optional[LoggingConfig], optional
-        logging configuration for this process.
     """
     setup_logging("odom_processor", logging_config=logging_config)
 
@@ -229,9 +208,8 @@ def proc_anonymize(
                 break
 
             if blur_enabled and anonymizer is not None:
-                t0 = time.perf_counter()  # For logging info
+                t0 = time.perf_counter()
                 frame, dets, gpu_ms = anonymizer(frame)
-                # For logging info
                 t1 = time.perf_counter()
                 pix_ms = (t1 - t0) * 1000.0 - (gpu_ms or 0.0)
                 if pix_ms < 0:
@@ -240,12 +218,11 @@ def proc_anonymize(
                 if draw_boxes and dets is not None:
                     draw_dets(frame, dets)
 
-                # For logging info
                 n_frames_anon += 1
                 sum_gpu_ms += gpu_ms or 0.0
                 sum_pix_ms += pix_ms
 
-                if n_frames_anon % 120 == 0:  # ~4s @30FPS
+                if n_frames_anon % 120 == 0:
                     avg_gpu = sum_gpu_ms / max(1, n_frames_anon)
                     avg_pix = sum_pix_ms / max(1, n_frames_anon)
                     logging.info(
@@ -290,19 +267,7 @@ def _build_anonymizer(cfg: dict):
     """
     Build an anonymizer callable that runs SCRFD TensorRT inference
     and applies pixelation to detected faces.
-
-    Parameters
-    ----------
-    cfg : dict
-        Keys include engine_path, input_name, size, conf, topk, max_dets,
-        pixel_blocks, pixel_margin, pixel_max_faces, pixel_noise.
-
-    Returns
-    -------
-    Callable[[any], Tuple[any, Optional[list], Optional[float]]]
-        A callable(frame_bgr) -> (frame_bgr, dets, gpu_ms)
     """
-
     class _Anon:
         def __init__(self, cfg):
             self.inf = TRTInfer(
@@ -341,46 +306,7 @@ class VideoStreamBlurFace:
     """
     Video pipeline that captures frames in one process, optionally anonymizes
     faces in another process (via SCRFD TensorRT + pixelation), then encodes
-    frames as base64 JPEG and dispatches them to registered callbacks.
-
-    Parameters
-    ----------
-    frame_callbacks : Optional[Iterable[Callable[[str], None]]], optional
-        List (or single callable) receiving base64-encoded JPEG strings.
-    fps : int, optional
-        Target output frames per second, by default 30.
-    resolution : Tuple[int, int], optional
-        Desired frame resolution (width, height), by default (640, 480).
-    jpeg_quality : int, optional
-        JPEG quality (0–100), by default 70.
-    device_index : int, optional
-        Camera device index (0 = default), by default 0.
-    blur_enabled : bool, optional
-        If True and an engine path is supplied, apply face anonymization.
-    blur_conf : float, optional
-        Detection confidence threshold, by default 0.5.
-    scrfd_engine : Optional[str], optional
-        Path to a TensorRT engine file. If None, anonymization is disabled.
-    scrfd_size : int, optional
-        Model input size (square), by default 640.
-    scrfd_input : str, optional
-        Engine input name, by default "input.1".
-    pixel_blocks : int, optional
-        Pixelation block size parameter, by default 8.
-    pixel_margin : float, optional
-        Margin multiplier around detected boxes, by default 0.25.
-    pixel_max_faces : int, optional
-        Max number of faces to pixelate, by default 32.
-    pixel_noise : float, optional
-        Gaussian noise sigma added to pixelated regions, by default 0.0.
-    draw_boxes : bool, optional
-        Draw detection boxes (debug), by default False.
-    queue_size_raw : int, optional
-        Max size for the raw frames queue (capture→anon), by default 4.
-    queue_size_proc : int, optional
-        Max size for the processed frames queue (anon→main), by default 4.
-    buffer_frames : int, optional
-        Desired capture driver buffer size, by default 1.
+    frames as base64 JPEG and dispatches to registered callbacks.
     """
 
     def __init__(
@@ -400,9 +326,11 @@ class VideoStreamBlurFace:
         pixel_max_faces: int = 32,
         pixel_noise: float = 0.0,
         draw_boxes: bool = False,
-        queue_size_raw: int = 4,
-        queue_size_proc: int = 4,
+        queue_size_raw: int = 1,
+        queue_size_proc: int = 1,
         buffer_frames: int = 1,
+        use_turbojpeg: bool = True,         # NEW: allow disabling at runtime
+        raw_frame_callbacks: Optional[Iterable[Callable[[np.ndarray], None]]] = None,  # NEW
     ):
         self.fps = int(fps)
         self.resolution = (int(resolution[0]), int(resolution[1]))
@@ -416,6 +344,14 @@ class VideoStreamBlurFace:
             self.frame_callbacks = [frame_callbacks]  # type: ignore[list-item]
         else:
             self.frame_callbacks = list(frame_callbacks)
+
+        # NEW: raw callbacks (receive numpy frames, no JPEG/base64)
+        if raw_frame_callbacks is None:
+            self.raw_callbacks: List[Callable[[np.ndarray], None]] = []
+        elif callable(raw_frame_callbacks):
+            self.raw_callbacks = [raw_frame_callbacks]  # type: ignore[list-item]
+        else:
+            self.raw_callbacks = list(raw_frame_callbacks)
 
         # Async loop for scheduling async callbacks (if any)
         self.loop = asyncio.new_event_loop()
@@ -456,6 +392,17 @@ class VideoStreamBlurFace:
         self.draw_boxes = bool(draw_boxes)
         self.buffer_frames = int(buffer_frames)
 
+        # JPEG encoder (TurboJPEG preferred)
+        self._jpeg_quality = int(jpeg_quality)
+        self._use_turbojpeg = _HAVE_TURBOJPEG and bool(use_turbojpeg)
+        self._jpeg = None
+        if self._use_turbojpeg:
+            try:
+                self._jpeg = TurboJPEG()
+            except Exception:
+                logger.warning("TurboJPEG load failed, falling back to cv2.imencode")
+                self._use_turbojpeg = False
+
         # Processes and control
         self.p_cap: Optional[mp.Process] = None
         self.p_anon: Optional[mp.Process] = None
@@ -466,14 +413,7 @@ class VideoStreamBlurFace:
     # Public API
     # ----------------------------
     def register_frame_callback(self, cb: Callable[[str], None]) -> None:
-        """
-        Register a per-frame callback.
-
-        Parameters
-        ----------
-        cb : Callable[[str], None]
-            Callback receiving a base64-encoded JPEG string.
-        """
+        """Register a per-frame (base64 JPEG) callback."""
         if cb is None:
             logger.warning("Frame callback is None, not registering")
             return
@@ -484,15 +424,21 @@ class VideoStreamBlurFace:
             else:
                 logger.warning("Frame callback already registered")
 
-    def unregister_frame_callback(self, cb: Callable[[str], None]) -> None:
-        """
-        Unregister a previously added callback.
+    # NEW: raw callback API
+    def register_raw_frame_callback(self, cb: Callable[[np.ndarray], None]) -> None:
+        """Register a per-frame raw (numpy BGR) callback."""
+        if cb is None:
+            logger.warning("Raw frame callback is None, not registering")
+            return
+        with self._cb_lock:
+            if cb not in self.raw_callbacks:
+                self.raw_callbacks.append(cb)
+                logger.info("Registered new raw frame callback")
+            else:
+                logger.warning("Raw frame callback already registered")
 
-        Parameters
-        ----------
-        cb : Callable[[str], None]
-            Callback to remove. No-op if not present.
-        """
+    def unregister_frame_callback(self, cb: Callable[[str], None]) -> None:
+        """Unregister a previously added base64 JPEG callback."""
         with self._cb_lock:
             try:
                 self.frame_callbacks.remove(cb)
@@ -500,10 +446,17 @@ class VideoStreamBlurFace:
             except ValueError:
                 logger.warning("Attempted to unregister a non-registered callback")
 
+    def unregister_raw_frame_callback(self, cb: Callable[[np.ndarray], None]) -> None:
+        """Unregister a previously added raw frame callback."""
+        with self._cb_lock:
+            try:
+                self.raw_callbacks.remove(cb)
+                logger.info("Unregistered raw frame callback")
+            except ValueError:
+                logger.warning("Attempted to unregister a non-registered callback")
+
     def start(self) -> None:
-        """
-        Start capture/anonymize worker processes and the drain thread.
-        """
+        """Start capture/anonymize worker processes and the drain thread."""
         if self._running.value:
             logger.warning("[main] start() called but already running.")
             return
@@ -553,14 +506,7 @@ class VideoStreamBlurFace:
         logger.info("[main] Drain thread started. VideoStream running.")
 
     def stop(self, join_timeout: float = 1.0) -> None:
-        """
-        Stop workers and drain thread, and release resources.
-
-        Parameters
-        ----------
-        join_timeout : float, optional
-            Time (seconds) to wait for processes/threads to join before terminate, by default 1.0
-        """
+        """Stop workers and drain thread, and release resources."""
         if not self._running.value:
             logger.warning("[main] stop() called but not running.")
             return
@@ -609,17 +555,9 @@ class VideoStreamBlurFace:
         self.loop.run_forever()
 
     def _dispatch(self, b64_jpeg: str) -> None:
-        """
-        Dispatch a base64-encoded JPEG frame to all registered callbacks.
-
-        Parameters
-        ----------
-        b64_jpeg : str
-            Base64-encoded JPEG bytes.
-        """
+        """Dispatch a base64-encoded JPEG frame to all registered callbacks."""
         with self._cb_lock:
             callbacks = tuple(self.frame_callbacks)
-
         for cb in callbacks:
             try:
                 result = cb(b64_jpeg)
@@ -628,21 +566,57 @@ class VideoStreamBlurFace:
             except Exception as e:
                 logger.error("Frame callback raised: %s", e, exc_info=True)
 
+    def _dispatch_raw(self, frame_bgr: np.ndarray) -> None:
+        """Dispatch a raw numpy frame to raw callbacks (no encode/base64)."""
+        with self._cb_lock:
+            raw_cbs = tuple(self.raw_callbacks)
+        for cb in raw_cbs:
+            try:
+                cb(frame_bgr)
+            except Exception as e:
+                logger.error("Raw frame callback raised: %s", e, exc_info=True)
+
+    # --- JPEG encoding helper (TurboJPEG preferred) ---
+    def _encode_jpeg(self, frame_bgr) -> Optional[bytes]:
+        """
+        Encode BGR frame to JPEG bytes using TurboJPEG if available,
+        else cv2.imencode fallback. Returns None on failure.
+        """
+        try:
+            if self._use_turbojpeg and self._jpeg is not None:
+                return self._jpeg.encode(
+                    frame_bgr,
+                    quality=self._jpeg_quality,
+                    pixel_format=TJPF.BGR,
+                    jpeg_subsample=TJSAMP.SAMP_420,
+                )
+            else:
+                ok, buf = cv2.imencode(
+                    ".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality]
+                )
+                if not ok:
+                    return None
+                return buf.tobytes()
+        except Exception:
+            logger.exception("[main] JPEG encode failed")
+            return None
+
     def _drain_loop(self) -> None:
         """
-        Main-process drain loop.
-        - Pull processed frames
-        - JPEG encode + base64
-        - Dispatch to callbacks
-        - Pace to ~fps
+        Main-process drain loop with latest-frame-wins:
+        - Pull processed frames, drain queue to newest
+        - Dispatch raw frame (no encoding) for local preview (optional)
+        - JPEG encode + base64 for standard callbacks
+        - Pace only when ahead (avoid extra delay when behind)
         """
         frame_time = 1.0 / max(1, self.fps)
         last = time.perf_counter()
 
         logger.info("[main] drain loop starting at ~%d FPS.", self.fps)
         while self._running.value:
+            # Pull at least one frame
             try:
-                ts, frame = self.q_proc.get(timeout=0.5)
+                ts, frame = self.q_proc.get(timeout=0.05)
             except Empty:
                 continue
 
@@ -650,13 +624,35 @@ class VideoStreamBlurFace:
                 logger.info("[main] drain loop received sentinel; exiting.")
                 break
 
-            ok, buf = cv2.imencode(".jpg", frame, self.encode_quality)
-            if ok:
-                self._dispatch(base64.b64encode(buf).decode("utf-8"))
+            # Drain queue: keep the most recent frame, drop stale
+            while True:
+                try:
+                    ts2, frame2 = self.q_proc.get_nowait()
+                    if (ts2, frame2) == SENTINEL:
+                        logger.info("[main] drain got sentinel during drain; exiting.")
+                        ts, frame = ts2, frame2
+                        break
+                    ts, frame = ts2, frame2
+                except Empty:
+                    break
+            if (ts, frame) == SENTINEL:
+                break
+
+            # Dispatch raw frame first (fast local preview, no encode)
+            self._dispatch_raw(frame)
+
+            # Encode & dispatch base64 JPEG for normal callbacks / WS
+            jpeg_bytes = self._encode_jpeg(frame)
+            if jpeg_bytes is not None:
+                self._dispatch(base64.b64encode(jpeg_bytes).decode("utf-8"))
             else:
                 logger.error("[main] JPEG encode failed; dropping frame.")
+                continue
 
-            elapsed = time.perf_counter() - last
-            if elapsed < frame_time:
+            # Pace only if we're ahead (frame is fresh & loop was faster than frame_time)
+            now = time.perf_counter()
+            elapsed = now - last
+            # If frame age is small and loop was faster than target, sleep a bit
+            if (now - ts) < frame_time and elapsed < frame_time:
                 time.sleep(frame_time - elapsed)
             last = time.perf_counter()
