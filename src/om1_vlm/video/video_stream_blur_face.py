@@ -24,6 +24,8 @@ from typing import Callable, Iterable, List, Optional, Tuple
 
 import cv2
 
+from om1_utils.logging import LoggingConfig, get_logging_config, setup_logging
+
 from ..anonymizationSys.scrfd_trt_pixelate import (
     CONF_THRES,
     MAX_DETS,
@@ -32,8 +34,13 @@ from ..anonymizationSys.scrfd_trt_pixelate import (
     apply_pixelation,
     draw_dets,
 )
-from .logging_info import get_logging_config, setup_logging_mp_child
 from .video_utils import enumerate_video_devices
+
+try:
+    import pycuda.driver as cuda
+except ImportError:
+    print("pycuda not found, face anonymization will be disabled.")
+    cuda = None
 
 # Keep logger naming consistent with your other modules
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
@@ -42,32 +49,13 @@ logger = logging.getLogger(root_package_name)
 SENTINEL = ("__STOP__", None)
 
 
-def _pick_camera() -> str:
-    """
-    Pick a camera device in a cross-platform manner (macOS/Linux),
-    mirroring the style from your reference VideoStream implementation.
-
-    Returns
-    -------
-    str
-        Camera index (macOS) or device path (Linux).
-    """
-    devices = enumerate_video_devices()
-    if platform.system() == "Darwin":
-        camindex = 0 if devices else 0
-    else:
-        camindex = f"/dev/video{devices[0][0]}" if devices else "/dev/video0"
-    logger.info(f"Using camera: {camindex}")
-    return camindex
-
-
 def proc_capture(
     out_q: mp.Queue,
     cam: str,
     res: Tuple[int, int],
     fps: int,
     buffer_frames: int,
-    log_queue: Optional[mp.Queue] = None,
+    logging_config: Optional[LoggingConfig] = None,
 ) -> None:
     """
     Capture frames from a camera in a dedicated process and push them to a queue.
@@ -84,23 +72,20 @@ def proc_capture(
         Requested FPS.
     buffer_frames : int
         Desired driver-side capture buffer size (best effort).
-    log_queue : Optional[mp.Queue], optional
-        If provided, child process logs are routed to the main process.
+    logging_config : Optional[LoggingConfig], optional
+        logging configuration for this process.
     """
-    if log_queue is not None:
-        setup_logging_mp_child(log_queue, level=get_logging_config().log_level)
-
-    log = logging.getLogger(root_package_name)
+    setup_logging("odom_processor", logging_config=logging_config)
     cap = None
 
     try:
         # Prefer V4L2 on Linux; macOS ignores this backend id.
         cap = cv2.VideoCapture(cam, cv2.CAP_V4L2)
         if not cap.isOpened():
-            log.warning(f"[cap] failed to open {cam}, trying common fallbacks.")
+            logging.warning(f"[cap] failed to open {cam}, trying common fallbacks.")
 
         if not cap or not cap.isOpened():
-            log.error(f"[cap] cannot open camera {cam}")
+            logging.error(f"[cap] cannot open camera {cam}")
             return
 
         # Apply settings (best-effort)
@@ -122,18 +107,18 @@ def proc_capture(
         actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         if (actual_w, actual_h) != (res[0], res[1]):
-            log.warning(
+            logging.warning(
                 f"[cap] Camera doesn't support resolution {res}. Using {(actual_w, actual_h)} instead."
             )
 
         frame_time = 1.0 / max(1, fps)
         last = time.perf_counter()
 
-        log.info(f"[cap] capture loop starting at ~{fps} FPS, device={cam}")
+        logging.info(f"[cap] capture loop starting at ~{fps} FPS, device={cam}")
         while True:
             ok, frame = cap.read()
             if not ok:
-                log.error("[cap] error reading frame; retrying shortly.")
+                logging.error("[cap] error reading frame; retrying shortly.")
                 time.sleep(0.02)
                 continue
 
@@ -159,21 +144,21 @@ def proc_capture(
             last = time.perf_counter()
 
     except KeyboardInterrupt:
-        log.info("[cap] received KeyboardInterrupt; shutting down.")
+        logging.info("[cap] received KeyboardInterrupt; shutting down.")
     except Exception as e:
-        log.exception(f"[cap] unexpected error: {e}")
+        logging.exception(f"[cap] unexpected error: {e}")
     finally:
         try:
             if cap is not None:
                 cap.release()
-                log.info("[cap] released video capture device")
+                logging.info("[cap] released video capture device")
         except Exception:
             pass
         try:
             out_q.put_nowait(SENTINEL)
         except Full:
             pass
-        log.info("[cap] exit.")
+        logging.info("[cap] exit.")
 
 
 def proc_anonymize(
@@ -182,7 +167,7 @@ def proc_anonymize(
     scrfd_cfg: dict,
     blur_enabled: bool,
     draw_boxes: bool,
-    log_queue: Optional[mp.Queue] = None,
+    logging_config: Optional[LoggingConfig] = None,
 ) -> None:
     """
     Optional anonymizer process: applies face detection & pixelation, then forwards frames.
@@ -199,40 +184,40 @@ def proc_anonymize(
         If True and engine_path is provided, apply anonymization.
     draw_boxes : bool
         If True, draw detection boxes for debug.
-    log_queue : Optional[mp.Queue], optional
-        If provided, child process logs are routed to the main process.
+    logging_config : Optional[LoggingConfig], optional
+        logging configuration for this process.
     """
-    if log_queue is not None:
-        setup_logging_mp_child(log_queue, level=get_logging_config().log_level)
-    log = logging.getLogger(root_package_name)
+    setup_logging("odom_processor", logging_config=logging_config)
 
     anonymizer = None
     cuda_ctx = None
-    # sum_gpu_ms = 0.0
-    # sum_pix_ms = 0.0
-    # n_frames_anon = 0
+    sum_gpu_ms = 0.0
+    sum_pix_ms = 0.0
+    n_frames_anon = 0
+
+    if cuda is None:
+        blur_enabled = False
+        logging.error("[anon] pycuda not found, disabling anonymization.")
 
     try:
         if blur_enabled and scrfd_cfg.get("engine_path"):
-            import pycuda.driver as cuda
-
             cuda.init()
             dev_id = int(os.environ.get("OM1_CUDA_DEVICE", "0"))
             cuda_ctx = cuda.Device(dev_id).make_context()
-            log.info(f"[anon] CUDA context created on device {dev_id}")
+            logging.info(f"[anon] CUDA context created on device {dev_id}")
 
             try:
                 anonymizer = _build_anonymizer(scrfd_cfg)
-                log.info("[anon] anonymizer initialized.")
+                logging.info("[anon] anonymizer initialized.")
             except Exception:
                 try:
                     cuda_ctx.pop()
                 except Exception:
                     pass
-                log.exception("[anon] failed to initialize anonymizer.")
+                logging.exception("[anon] failed to initialize anonymizer.")
                 raise
 
-        log.info("[anon] anonymize loop starting (enabled=%s).", bool(anonymizer))
+        logging.info("[anon] anonymize loop starting (enabled=%s).", bool(anonymizer))
         while True:
             try:
                 ts, frame = in_q.get(timeout=1.0)
@@ -240,35 +225,35 @@ def proc_anonymize(
                 continue
 
             if (ts, frame) == SENTINEL:
-                log.info("[anon] received sentinel; exiting loop.")
+                logging.info("[anon] received sentinel; exiting loop.")
                 break
 
             if blur_enabled and anonymizer is not None:
-                # t0 = time.perf_counter() #For logging info
+                t0 = time.perf_counter()  # For logging info
                 frame, dets, gpu_ms = anonymizer(frame)
                 # For logging info
-                # t1 = time.perf_counter()
-                # pix_ms = (t1 - t0) * 1000.0 - (gpu_ms or 0.0)
-                # if pix_ms < 0:
-                #     pix_ms = 0.0
+                t1 = time.perf_counter()
+                pix_ms = (t1 - t0) * 1000.0 - (gpu_ms or 0.0)
+                if pix_ms < 0:
+                    pix_ms = 0.0
 
                 if draw_boxes and dets is not None:
                     draw_dets(frame, dets)
 
                 # For logging info
-                # n_frames_anon += 1
-                # sum_gpu_ms += (gpu_ms or 0.0)
-                # sum_pix_ms += pix_ms
+                n_frames_anon += 1
+                sum_gpu_ms += gpu_ms or 0.0
+                sum_pix_ms += pix_ms
 
-                # if n_frames_anon % 120 == 0:  # ~4s @30FPS
-                #     avg_gpu = sum_gpu_ms / max(1, n_frames_anon)
-                #     avg_pix = sum_pix_ms / max(1, n_frames_anon)
-                #     log.info(
-                #         "[anon] avg gpu_ms=%.2f avg pix_ms=%.2f (n=%d)",
-                #         avg_gpu,
-                #         avg_pix,
-                #         n_frames_anon,
-                #     )
+                if n_frames_anon % 120 == 0:  # ~4s @30FPS
+                    avg_gpu = sum_gpu_ms / max(1, n_frames_anon)
+                    avg_pix = sum_pix_ms / max(1, n_frames_anon)
+                    logging.info(
+                        "[anon] avg gpu_ms=%.2f avg pix_ms=%.2f (n=%d)",
+                        avg_gpu,
+                        avg_pix,
+                        n_frames_anon,
+                    )
 
             # pass along processed frame
             try:
@@ -284,9 +269,9 @@ def proc_anonymize(
                     pass
 
     except KeyboardInterrupt:
-        log.info("[anon] received KeyboardInterrupt; shutting down.")
+        logging.info("[anon] received KeyboardInterrupt; shutting down.")
     except Exception as e:
-        log.exception(f"[anon] unexpected error: {e}")
+        logging.exception(f"[anon] unexpected error: {e}")
     finally:
         try:
             out_q.put_nowait(SENTINEL)
@@ -295,10 +280,10 @@ def proc_anonymize(
         if cuda_ctx is not None:
             try:
                 cuda_ctx.pop()
-                log.info("[anon] CUDA context released.")
+                logging.info("[anon] CUDA context released.")
             except Exception:
                 pass
-        log.info("[anon] exit.")
+        logging.info("[anon] exit.")
 
 
 def _build_anonymizer(cfg: dict):
@@ -396,9 +381,6 @@ class VideoStreamBlurFace:
         Max size for the processed frames queue (anon→main), by default 4.
     buffer_frames : int, optional
         Desired capture driver buffer size, by default 1.
-    log_queue : Optional[mp.Queue], optional
-        Logging queue from runtime.logging.setup_logging_mp_main(). If provided,
-        child processes forward logs to the main process.
     """
 
     def __init__(
@@ -421,7 +403,6 @@ class VideoStreamBlurFace:
         queue_size_raw: int = 4,
         queue_size_proc: int = 4,
         buffer_frames: int = 1,
-        log_queue: Optional[mp.Queue] = None,
     ):
         self.fps = int(fps)
         self.resolution = (int(resolution[0]), int(resolution[1]))
@@ -480,9 +461,6 @@ class VideoStreamBlurFace:
         self.p_anon: Optional[mp.Process] = None
         self._drain_thread: Optional[threading.Thread] = None
         self._running = mp.Value("b", False)
-
-        # Logging queue for children
-        self.log_queue = log_queue
 
     # ----------------------------
     # Public API
@@ -544,7 +522,7 @@ class VideoStreamBlurFace:
                 self.resolution,
                 self.fps,
                 self.buffer_frames,
-                self.log_queue,  # pass logging queue to child
+                get_logging_config(),
             ),
             daemon=True,
             name="CaptureProc",
@@ -557,7 +535,7 @@ class VideoStreamBlurFace:
                 self.scrfd_cfg,
                 self.blur_enabled,
                 self.draw_boxes,
-                self.log_queue,  # pass logging queue to child
+                get_logging_config(),
             ),
             daemon=True,
             name="AnonProc",

@@ -1,9 +1,7 @@
 import logging
-import multiprocessing as mp
 import os
 import time
 from dataclasses import dataclass
-from logging.handlers import QueueHandler, QueueListener
 
 
 @dataclass
@@ -96,66 +94,4 @@ def get_logging_config() -> LoggingConfig:
             isinstance(handler, logging.FileHandler)
             for handler in logging.getLogger().handlers
         ),
-    )
-
-
-def setup_logging_mp_main(
-    *,
-    config_name: str,
-    log_level: str = "INFO",
-    log_to_file: bool = False,
-    logging_config: LoggingConfig | None = None,
-):
-    """
-    Configure logging via setup_logging(), then start a QueueListener so child
-    processes can forward logs to the same handlers.
-
-    Returns
-    -------
-    (listener, log_queue)
-        listener : logging.handlers.QueueListener  (call .stop() on shutdown)
-        log_queue : multiprocessing.Queue           (pass to child processes)
-    """
-    setup_logging(
-        config_name=config_name,
-        log_level=log_level,
-        log_to_file=log_to_file,
-        logging_config=logging_config,
-    )
-
-    root = logging.getLogger()
-    handlers = list(root.handlers)
-    log_queue: mp.Queue = mp.Queue(-1)
-    listener = QueueListener(log_queue, *handlers, respect_handler_level=True)
-    listener.start()
-    logging.getLogger(__name__).info("QueueListener started for multiprocessing logs.")
-    return listener, log_queue
-
-
-def setup_logging_mp_child(log_queue: mp.Queue, *, level: str | int | None = None):
-    """
-    In a child process, route all logs to the main process using QueueHandler.
-
-    Parameters
-    ----------
-    log_queue : multiprocessing.Queue
-        The queue returned by setup_logging_mp_main().
-    level : str | int, optional
-        Optional override for root logger level in the child.
-    """
-    root = logging.getLogger()
-    # Avoid duplicate/competing handlers in children
-    for h in list(root.handlers):
-        root.removeHandler(h)
-
-    qh = QueueHandler(log_queue)
-    root.addHandler(qh)
-
-    if isinstance(level, str):
-        root.setLevel(getattr(logging, level.upper(), logging.INFO))
-    elif isinstance(level, int):
-        root.setLevel(level)
-
-    logging.getLogger(__name__).debug(
-        "Child process logging configured (QueueHandler)."
     )
