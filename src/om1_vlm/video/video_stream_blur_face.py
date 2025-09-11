@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # om1_vlm/video/video_stream_blur_face.py
+
 """
 Video capture + optional face anonymization (pixelation) pipeline.
 
@@ -62,6 +63,8 @@ logger = logging.getLogger(root_package_name)
 
 SENTINEL = ("__STOP__", None)
 
+RUN_ID = f"run{int(time.time()) & 0xFFFF:X}"  # <<< ADDED (optional tag for logs)
+
 
 # ---------------------------------------------------------------------
 # Combined worker process: Camera + (optional) anonymization
@@ -98,7 +101,7 @@ def proc_cam_ml(
         # Open camera (prefer V4L2 on Linux; ignored on macOS)
         cap = cv2.VideoCapture(cam, cv2.CAP_V4L2)
         if not cap or not cap.isOpened():
-            logging.error(f"[camml] cannot open camera {cam}")
+            logging.error(f"[{RUN_ID}][camml] cannot open camera {cam}")
             return
 
         # Best-effort camera settings
@@ -116,7 +119,7 @@ def proc_cam_ml(
         actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = cap.get(cv2.CAP_PROP_FPS)
-        logging.info(f"[camml] camera opened {cam} -> {(actual_w, actual_h)} fps={actual_fps:.2f}")
+        logging.info(f"[{RUN_ID}][camml] camera opened {cam} -> {(actual_w, actual_h)} fps={actual_fps:.2f}")
 
         # Init anonymizer (same process; keeps one CUDA context)
         if blur_enabled and scrfd_cfg.get("engine_path") and cuda is not None:
@@ -125,42 +128,46 @@ def proc_cam_ml(
                 dev_id = int(os.environ.get("OM1_CUDA_DEVICE", "0"))
                 cuda_ctx = cuda.Device(dev_id).make_context()
                 anonymizer = _build_anonymizer(scrfd_cfg)
-                logging.info(f"[camml] anonymizer ready on CUDA device {dev_id}")
+                logging.info(f"[{RUN_ID}][camml] anonymizer ready on CUDA device {dev_id}")
             except Exception:
-                logging.exception("[camml] anonymizer init failed; running without blur")
+                logging.exception(f"[{RUN_ID}][camml] anonymizer init failed; running without blur")
                 anonymizer = None
         elif blur_enabled and cuda is None:
-            logging.error("[camml] pycuda not found; blur disabled")
+            logging.error(f"[{RUN_ID}][camml] pycuda not found; blur disabled")
 
-        # Telemetry
+        # --- telemetry accumulators ---                     # <<< ADDED
         n = 0
         sum_gpu_ms = 0.0
         sum_pix_ms = 0.0
+        frames_cam = 0
+        sum_pub_delay_ms = 0.0
 
-        logging.info("[camml] loop start")
+        logging.info(f"[{RUN_ID}][camml] loop start")
         while True:
+            t_cap0 = time.perf_counter()                      # <<< ADDED
             ok, frame = cap.read()
             if not ok:
-                logging.error("[camml] cap.read() failed; retry shortly")
+                logging.error(f"[{RUN_ID}][camml] cap.read() failed; retry shortly")
                 # time.sleep(0.02)
                 continue
 
-            ts = time.time()
+            ts = time.time()  # capture timestamp (seconds)   # <<< ADDED
 
+            gpu_ms = 0.0                                      # <<< ADDED
+            pix_ms = 0.0                                      # <<< ADDED
             if blur_enabled and anonymizer is not None:
                 t0 = time.perf_counter()
-                frame, dets, gpu_ms = anonymizer(frame)
+                frame, dets, gpu_ms_ret = anonymizer(frame)
                 t1 = time.perf_counter()
-                pix_ms = (t1 - t0) * 1000.0 - (gpu_ms or 0.0)
-                if pix_ms < 0:
-                    pix_ms = 0.0
+                gpu_ms = float(gpu_ms_ret or 0.0)
+                pix_ms = max(0.0, (t1 - t0) * 1000.0 - gpu_ms)
 
                 n += 1
-                sum_gpu_ms += (gpu_ms or 0.0)
+                sum_gpu_ms += gpu_ms
                 sum_pix_ms += pix_ms
                 if n % 120 == 0:
                     logging.info(
-                        "[camml] avg gpu_ms=%.2f avg pix_ms=%.2f (n=%d)",
+                        f"[{RUN_ID}][camml] avg gpu_ms=%.2f avg pix_ms=%.2f (n=%d)",
                         sum_gpu_ms / max(1, n),
                         sum_pix_ms / max(1, n),
                         n,
@@ -181,12 +188,28 @@ def proc_cam_ml(
                 except Full:
                     pass
 
-            # IMPORTANT: no throttling here; let drain control pacing
+            # --- publish latency telemetry ------------------ # <<< ADDED
+            pub_delay_ms = (time.perf_counter() - t_cap0) * 1000.0
+            frames_cam += 1
+            sum_pub_delay_ms += pub_delay_ms
+            if frames_cam % 60 == 0:
+                qsize = 0
+                try:
+                    qsize = out_q.qsize()
+                except Exception:
+                    pass
+                logging.info(
+                    f"[{RUN_ID}][camml] avg_pub_delay_ms=%.1f last_gpu_ms=%.1f last_pix_ms=%.1f qsize=%d",
+                    sum_pub_delay_ms / max(1, frames_cam),
+                    gpu_ms,
+                    pix_ms,
+                    qsize,
+                )
 
     except KeyboardInterrupt:
-        logging.info("[camml] KeyboardInterrupt; exit")
+        logging.info(f"[{RUN_ID}][camml] KeyboardInterrupt; exit")
     except Exception as e:
-        logging.exception(f"[camml] unexpected error: {e}")
+        logging.exception(f"[{RUN_ID}][camml] unexpected error: {e}")
     finally:
         try:
             out_q.put_nowait(SENTINEL)
@@ -202,7 +225,7 @@ def proc_cam_ml(
                 cuda_ctx.pop()
             except Exception:
                 pass
-        logging.info("[camml] exit.")
+        logging.info(f"[{RUN_ID}][camml] exit.")
 
 
 def _build_anonymizer(cfg: dict):
@@ -429,16 +452,16 @@ class VideoStreamBlurFace:
                 get_logging_config(),
             ),
             daemon=True,
-            name="CamMLProc",
+            name=f"CamMLProc-{RUN_ID}",
         )
         self.p_camml.start()
-        logger.info("[main] CamML process started (pid=%s).", self.p_camml.pid)
+        logger.info(f"[{RUN_ID}][main] CamML process started (pid={self.p_camml.pid}).")
 
         self._drain_thread = threading.Thread(
-            target=self._drain_loop, daemon=True, name="DrainThread"
+            target=self._drain_loop, daemon=True, name=f"DrainThread-{RUN_ID}"
         )
         self._drain_thread.start()
-        logger.info("[main] Drain thread started. VideoStream running.")
+        logger.info(f"[{RUN_ID}][main] Drain thread started. VideoStream running.")
 
     def stop(self, join_timeout: float = 1.0) -> None:
         """Stop worker and drain thread, and release resources."""
@@ -458,7 +481,7 @@ class VideoStreamBlurFace:
         if self.p_camml and self.p_camml.is_alive():
             self.p_camml.join(timeout=join_timeout)
             if self.p_camml.is_alive():
-                logger.warning("[main] CamMLProc did not exit in time; terminating.")
+                logger.warning(f"[{RUN_ID}][main] CamMLProc did not exit in time; terminating.")
                 self.p_camml.terminate()
 
         # Join drain thread
@@ -471,7 +494,7 @@ class VideoStreamBlurFace:
         except Exception:
             pass
 
-        logger.info("[main] VideoStream stopped.")
+        logger.info(f"[{RUN_ID}][main] VideoStream stopped.")
 
     # ----------------------------
     # Internals
@@ -486,29 +509,40 @@ class VideoStreamBlurFace:
         """Dispatch base64 JPEG to all registered callbacks."""
         with self._cb_lock:
             callbacks = tuple(self.frame_callbacks)
+
+        # --- per-callback telemetry --------------------- # <<< ADDED
         for cb in callbacks:
+            t_cb0 = time.perf_counter()                   # <<< ADDED
             try:
                 result = cb(b64_jpeg)
                 if inspect.isawaitable(result):
                     asyncio.run_coroutine_threadsafe(result, self.loop)
             except Exception as e:
                 logger.error("Frame callback raised: %s", e, exc_info=True)
+            finally:
+                cb_ms = (time.perf_counter() - t_cb0) * 1000.0
+                logger.debug(f"[{RUN_ID}][main] callback={getattr(cb,'__name__',str(cb))} took {cb_ms:.2f} ms")  # <<< ADDED
 
     def _dispatch_raw(self, frame_bgr: np.ndarray) -> None:
         """Dispatch raw numpy frame (no encode/base64) to raw callbacks."""
         with self._cb_lock:
             raw_cbs = tuple(self.raw_callbacks)
         for cb in raw_cbs:
+            t_cb0 = time.perf_counter()                   # <<< ADDED
             try:
                 cb(frame_bgr)
             except Exception as e:
                 logger.error("Raw frame callback raised: %s", e, exc_info=True)
+            finally:
+                cb_ms = (time.perf_counter() - t_cb0) * 1000.0
+                logger.debug(f"[{RUN_ID}][main] raw-callback={getattr(cb,'__name__',str(cb))} took {cb_ms:.2f} ms")  # <<< ADDED
 
     def _encode_jpeg(self, frame_bgr) -> Optional[bytes]:
         """Encode BGR frame to JPEG bytes (TurboJPEG if available, else cv2)."""
+        t_enc0 = time.perf_counter()                      # <<< ADDED
         try:
             if self._use_turbojpeg and self._jpeg is not None:
-                return self._jpeg.encode(
+                out = self._jpeg.encode(
                     frame_bgr,
                     quality=self._jpeg_quality,
                     pixel_format=TJPF.BGR,
@@ -520,10 +554,14 @@ class VideoStreamBlurFace:
                 )
                 if not ok:
                     return None
-                return buf.tobytes()
+                out = buf.tobytes()
         except Exception:
             logger.exception("[main] JPEG encode failed")
             return None
+        finally:
+            enc_ms = (time.perf_counter() - t_enc0) * 1000.0
+            logger.debug(f"[{RUN_ID}][main] encode_ms={enc_ms:.2f} (turbo={self._use_turbojpeg})")  # <<< ADDED
+        return out
 
     def _drain_loop(self) -> None:
         """
@@ -531,13 +569,19 @@ class VideoStreamBlurFace:
         - Pull frames, drain queue to newest (latest-frame-wins)
         - Dispatch raw frame first (for local preview)
         - Encode to JPEG and dispatch base64
-        - Only sleep when we're ahead of target FPS
+        - Only sleep when we're ahead of target FPS (disabled by default)
         """
         frame_time = 1.0 / max(1, self.fps)
-        last = time.perf_counter()
 
-        logger.info("[main] drain loop starting at ~%d FPS.", self.fps)
+        # telemetry accumulators                           # <<< ADDED
+        frames_drain = 0
+        sum_e2e_ms = 0.0
+        sum_stale_ms = 0.0
+
+        logger.info(f"[{RUN_ID}][main] drain loop starting at ~{self.fps} FPS.")
         while self._running.value:
+            t_loop0 = time.perf_counter()                 # <<< ADDED
+
             # Pull at least one frame
             try:
                 ts, frame = self.q_proc.get(timeout=0.05)
@@ -545,15 +589,17 @@ class VideoStreamBlurFace:
                 continue
 
             if (ts, frame) == SENTINEL:
-                logger.info("[main] drain loop received sentinel; exiting.")
+                logger.info(f"[{RUN_ID}][main] drain loop received sentinel; exiting.")
                 break
 
             # Drain queue: keep the most recent frame, drop stale
+            drained = 0                                   # <<< ADDED
             while True:
                 try:
                     ts2, frame2 = self.q_proc.get_nowait()
+                    drained += 1                          # <<< ADDED
                     if (ts2, frame2) == SENTINEL:
-                        logger.info("[main] drain got sentinel during drain; exiting.")
+                        logger.info(f"[{RUN_ID}][main] drain got sentinel during drain; exiting.")
                         ts, frame = ts2, frame2
                         break
                     ts, frame = ts2, frame2
@@ -562,20 +608,45 @@ class VideoStreamBlurFace:
             if (ts, frame) == SENTINEL:
                 break
 
+            # queue staleness: age when we begin handling this frame
+            staleness_ms = (time.perf_counter() - ts) * 1000.0   # <<< ADDED
+
             # Raw dispatch first (no encode)
             self._dispatch_raw(frame)
 
             # JPEG encode + base64 dispatch
             jpeg_bytes = self._encode_jpeg(frame)
             if jpeg_bytes is not None:
+                t_cb_all0 = time.perf_counter()           # <<< ADDED
                 self._dispatch(base64.b64encode(jpeg_bytes).decode("utf-8"))
+                cb_all_ms = (time.perf_counter() - t_cb_all0) * 1000.0  # <<< ADDED
             else:
                 logger.error("[main] JPEG encode failed; dropping frame.")
                 continue
 
-            # Pace only if we're ahead (frame is fresh & loop faster than target)
+            # End-to-end latency (capture ts -> after callbacks now)
+            e2e_ms = (time.perf_counter() - ts) * 1000.0  # <<< ADDED
+
+            # accumulate + sample log
+            frames_drain += 1                              # <<< ADDED
+            sum_e2e_ms += e2e_ms                           # <<< ADDED
+            sum_stale_ms += staleness_ms                   # <<< ADDED
+            if frames_drain % 60 == 0:                     # <<< ADDED
+                try:
+                    qsize = self.q_proc.qsize()
+                except Exception:
+                    qsize = -1
+                logger.info(                                 # <<< ADDED
+                    f"[{RUN_ID}][main] e2e_avg_ms=%.1f stale_avg_ms=%.1f drained=%d qsize=%d last_cb_ms=%.1f",
+                    sum_e2e_ms / max(1, frames_drain),
+                    sum_stale_ms / max(1, frames_drain),
+                    drained,
+                    qsize,
+                    cb_all_ms,
+                )
+
+            # Optional pacing if you want upper-FPS cap and you're ahead:
             # now = time.perf_counter()
-            # elapsed = now - last
-            # if (now - ts) < frame_time and elapsed < frame_time:
+            # elapsed = now - t_loop0
+            # if elapsed < frame_time and (now - ts) < frame_time:
             #     time.sleep(frame_time - elapsed)
-            # last = time.perf_counter()
