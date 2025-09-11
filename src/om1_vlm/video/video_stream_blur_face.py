@@ -574,8 +574,8 @@ class VideoStreamBlurFace:
                 continue
 
             # Pace only if we're ahead (frame is fresh & loop faster than target)
-            now = time.perf_counter()
-            elapsed = now - last
-            if (now - ts) < frame_time and elapsed < frame_time:
-                time.sleep(frame_time - elapsed)
-            last = time.perf_counter()
+            # now = time.perf_counter()
+            # elapsed = now - last
+            # if (now - ts) < frame_time and elapsed < frame_time:
+            #     time.sleep(frame_time - elapsed)
+            # last = time.perf_counter()
