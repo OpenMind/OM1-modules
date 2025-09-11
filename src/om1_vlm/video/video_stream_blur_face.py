@@ -142,7 +142,7 @@ def proc_cam_ml(
             ok, frame = cap.read()
             if not ok:
                 logging.error("[camml] cap.read() failed; retry shortly")
-                time.sleep(0.02)
+                # time.sleep(0.02)
                 continue
 
             ts = time.time()
