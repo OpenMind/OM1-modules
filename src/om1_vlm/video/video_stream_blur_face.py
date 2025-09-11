@@ -573,9 +573,9 @@ class VideoStreamBlurFace:
         """
         frame_time = 1.0 / max(1, self.fps)
 
-        # fps counters (show delivered/output fps)            # <<< FPS
-        fps_frames = 0                                        # <<< FPS
-        fps_t0 = time.time()                                  # <<< FPS
+        # fps counters (show delivered/output fps)
+        fps_frames = 0
+        fps_t0 = time.time()
 
         # telemetry accumulators
         frames_drain = 0
@@ -613,7 +613,7 @@ class VideoStreamBlurFace:
                 break
 
             # queue staleness: age when we begin handling this frame
-            staleness_ms = (time.perf_counter() - ts) * 1000.0
+            staleness_ms = (time.time() - ts) * 1000.0         # <<< FIX: use time.time() to match ts
 
             # Raw dispatch first (no encode)
             self._dispatch_raw(frame)
@@ -628,17 +628,17 @@ class VideoStreamBlurFace:
                 logger.error("[main] JPEG encode failed; dropping frame.")
                 continue
 
-            # --- FPS: delivered/output fps ------------------ # <<< FPS
-            fps_frames += 1                                   # <<< FPS
-            now = time.time()                                 # <<< FPS
-            if now - fps_t0 >= 1.0:                           # <<< FPS
-                out_fps = fps_frames / (now - fps_t0)         # <<< FPS
-                logger.info(f"[{RUN_ID}][main] output_fps={out_fps:.1f}")  # <<< FPS
-                fps_frames = 0                                # <<< FPS
-                fps_t0 = now                                  # <<< FPS
+            # --- FPS: delivered/output fps ---
+            fps_frames += 1
+            now = time.time()
+            if now - fps_t0 >= 1.0:
+                out_fps = fps_frames / (now - fps_t0)
+                logger.info(f"[{RUN_ID}][main] output_fps={out_fps:.1f}")
+                fps_frames = 0
+                fps_t0 = now
 
             # End-to-end latency (capture ts -> after callbacks now)
-            e2e_ms = (time.perf_counter() - ts) * 1000.0
+            e2e_ms = (time.time() - ts) * 1000.0               # <<< FIX: call time.time() and match clock
 
             # accumulate + sample log
             frames_drain += 1
@@ -657,7 +657,6 @@ class VideoStreamBlurFace:
                     qsize,
                     cb_all_ms,
                 )
-
             # Optional pacing if you want upper-FPS cap and you're ahead:
             # now_perf = time.perf_counter()
             # elapsed = now_perf - t_loop0
