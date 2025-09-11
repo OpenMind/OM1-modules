@@ -280,7 +280,7 @@ class VideoStreamBlurFace:
         frame_callbacks: Optional[Iterable[Callable[[str], None]]] = None,
         fps: int = 30,
         resolution: Tuple[int, int] = (640, 480),
-        jpeg_quality: int = 70,
+        jpeg_quality: int = 50,
         device_index: int = 0,
         blur_enabled: bool = True,
         blur_conf: float = 0.5,
@@ -563,90 +563,106 @@ class VideoStreamBlurFace:
             logger.debug(f"[{RUN_ID}][main] encode_ms={enc_ms:.2f} (turbo={self._use_turbojpeg})")  # <<< ADDED
         return out
 
-    def _drain_loop(self) -> None:
-        """
-        Drain loop (main process):
-        - Pull frames, drain queue to newest (latest-frame-wins)
-        - Dispatch raw frame first (for local preview)
-        - Encode to JPEG and dispatch base64
-        - Only sleep when we're ahead of target FPS (disabled by default)
-        """
-        frame_time = 1.0 / max(1, self.fps)
+def _drain_loop(self) -> None:
+    """
+    Drain loop (main process):
+    - Pull frames, drain queue to newest (latest-frame-wins)
+    - Dispatch raw frame first (for local preview)
+    - Encode to JPEG and dispatch base64
+    - Only sleep when we're ahead of target FPS (disabled by default)
+    """
+    frame_time = 1.0 / max(1, self.fps)
 
-        # telemetry accumulators                           # <<< ADDED
-        frames_drain = 0
-        sum_e2e_ms = 0.0
-        sum_stale_ms = 0.0
+    # fps counters (show delivered/output fps)            # <<< FPS
+    fps_frames = 0                                        # <<< FPS
+    fps_t0 = time.time()                                  # <<< FPS
 
-        logger.info(f"[{RUN_ID}][main] drain loop starting at ~{self.fps} FPS.")
-        while self._running.value:
-            t_loop0 = time.perf_counter()                 # <<< ADDED
+    # telemetry accumulators
+    frames_drain = 0
+    sum_e2e_ms = 0.0
+    sum_stale_ms = 0.0
 
-            # Pull at least one frame
+    logger.info(f"[{RUN_ID}][main] drain loop starting at ~{self.fps} FPS.")
+    while self._running.value:
+        t_loop0 = time.perf_counter()
+
+        # Pull at least one frame
+        try:
+            ts, frame = self.q_proc.get(timeout=0.05)
+        except Empty:
+            continue
+
+        if (ts, frame) == SENTINEL:
+            logger.info(f"[{RUN_ID}][main] drain loop received sentinel; exiting.")
+            break
+
+        # Drain queue: keep the most recent frame, drop stale
+        drained = 0
+        while True:
             try:
-                ts, frame = self.q_proc.get(timeout=0.05)
-            except Empty:
-                continue
-
-            if (ts, frame) == SENTINEL:
-                logger.info(f"[{RUN_ID}][main] drain loop received sentinel; exiting.")
-                break
-
-            # Drain queue: keep the most recent frame, drop stale
-            drained = 0                                   # <<< ADDED
-            while True:
-                try:
-                    ts2, frame2 = self.q_proc.get_nowait()
-                    drained += 1                          # <<< ADDED
-                    if (ts2, frame2) == SENTINEL:
-                        logger.info(f"[{RUN_ID}][main] drain got sentinel during drain; exiting.")
-                        ts, frame = ts2, frame2
-                        break
+                ts2, frame2 = self.q_proc.get_nowait()
+                drained += 1
+                if (ts2, frame2) == SENTINEL:
+                    logger.info(f"[{RUN_ID}][main] drain got sentinel during drain; exiting.")
                     ts, frame = ts2, frame2
-                except Empty:
                     break
-            if (ts, frame) == SENTINEL:
+                ts, frame = ts2, frame2
+            except Empty:
                 break
+        if (ts, frame) == SENTINEL:
+            break
 
-            # queue staleness: age when we begin handling this frame
-            staleness_ms = (time.perf_counter() - ts) * 1000.0   # <<< ADDED
+        # queue staleness: age when we begin handling this frame
+        staleness_ms = (time.perf_counter() - ts) * 1000.0
 
-            # Raw dispatch first (no encode)
-            self._dispatch_raw(frame)
+        # Raw dispatch first (no encode)
+        self._dispatch_raw(frame)
 
-            # JPEG encode + base64 dispatch
-            jpeg_bytes = self._encode_jpeg(frame)
-            if jpeg_bytes is not None:
-                t_cb_all0 = time.perf_counter()           # <<< ADDED
-                self._dispatch(base64.b64encode(jpeg_bytes).decode("utf-8"))
-                cb_all_ms = (time.perf_counter() - t_cb_all0) * 1000.0  # <<< ADDED
-            else:
-                logger.error("[main] JPEG encode failed; dropping frame.")
-                continue
+        # JPEG encode + base64 dispatch
+        jpeg_bytes = self._encode_jpeg(frame)
+        if jpeg_bytes is not None:
+            t_cb_all0 = time.perf_counter()
+            self._dispatch(base64.b64encode(jpeg_bytes).decode("utf-8"))
+            cb_all_ms = (time.perf_counter() - t_cb_all0) * 1000.0
+        else:
+            logger.error("[main] JPEG encode failed; dropping frame.")
+            continue
 
-            # End-to-end latency (capture ts -> after callbacks now)
-            e2e_ms = (time.perf_counter() - ts) * 1000.0  # <<< ADDED
+        # --- FPS: delivered/output fps ------------------ # <<< FPS
+        fps_frames += 1                                   # <<< FPS
+        now = time.time()                                 # <<< FPS
+        if now - fps_t0 >= 1.0:                           # <<< FPS
+            out_fps = fps_frames / (now - fps_t0)         # <<< FPS
+            logger.info(f"[{RUN_ID}][main] output_fps={out_fps:.1f}")  # <<< FPS
+            fps_frames = 0                                # <<< FPS
+            fps_t0 = now                                  # <<< FPS
 
-            # accumulate + sample log
-            frames_drain += 1                              # <<< ADDED
-            sum_e2e_ms += e2e_ms                           # <<< ADDED
-            sum_stale_ms += staleness_ms                   # <<< ADDED
-            if frames_drain % 60 == 0:                     # <<< ADDED
-                try:
-                    qsize = self.q_proc.qsize()
-                except Exception:
-                    qsize = -1
-                logger.info(                                 # <<< ADDED
-                    f"[{RUN_ID}][main] e2e_avg_ms=%.1f stale_avg_ms=%.1f drained=%d qsize=%d last_cb_ms=%.1f",
-                    sum_e2e_ms / max(1, frames_drain),
-                    sum_stale_ms / max(1, frames_drain),
-                    drained,
-                    qsize,
-                    cb_all_ms,
-                )
+        # End-to-end latency (capture ts -> after callbacks now)
+        e2e_ms = (time.perf_counter() - ts) * 1000.0
 
-            # Optional pacing if you want upper-FPS cap and you're ahead:
-            # now = time.perf_counter()
-            # elapsed = now - t_loop0
-            # if elapsed < frame_time and (now - ts) < frame_time:
-            #     time.sleep(frame_time - elapsed)
+        # accumulate + sample log
+        frames_drain += 1
+        sum_e2e_ms += e2e_ms
+        sum_stale_ms += staleness_ms
+        if frames_drain % 60 == 0:
+            try:
+                qsize = self.q_proc.qsize()
+            except Exception:
+                qsize = -1
+            logger.info(
+                f"[{RUN_ID}][main] e2e_avg_ms=%.1f stale_avg_ms=%.1f drained=%d qsize=%d last_cb_ms=%.1f",
+                sum_e2e_ms / max(1, frames_drain),
+                sum_stale_ms / max(1, frames_drain),
+                drained,
+                qsize,
+                cb_all_ms,
+            )
+
+        # Optional pacing if you want upper-FPS cap and you're ahead:
+        # now_perf = time.perf_counter()
+        # elapsed = now_perf - t_loop0
+        # if elapsed < frame_time and (now_perf - ts) < frame_time:
+        #     time.sleep(frame_time - elapsed)
+
+
+
