@@ -96,16 +96,8 @@ def proc_capture(
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, res[0])
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
         cap.set(cv2.CAP_PROP_FPS, fps)
-        try:
-            fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-            cap.set(cv2.CAP_PROP_FOURCC, fourcc)
-        except:
-            pass
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        try:
-            cap.set(cv2.CAP_PROP_CONVERT_RGB, 0) 
-        except Exception:
-            pass
+
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, max(1, int(buffer_frames)))
         except Exception:
