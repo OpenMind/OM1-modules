@@ -96,15 +96,10 @@ def proc_capture(
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, res[0])
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
         cap.set(cv2.CAP_PROP_FPS, fps)
-
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
 
-        # try:
-        #     cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)   # leave raw YUYV/MJPG; convert later as needed
-        # except Exception:
-        #     pass
         try:
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)    # minimize driver buffering
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, max(1, int(buffer_frames)))
         except Exception:
             pass
 
@@ -228,7 +223,6 @@ def proc_anonymize(
         logging.error(f"[{RUN_ID}][anon] pycuda not found, disabling anonymization.")
 
     try:
-        frame_i = 0
         if blur_enabled and scrfd_cfg.get("engine_path"):
             try:
                 cuda.init()
@@ -257,8 +251,8 @@ def proc_anonymize(
             if (ts, frame) == SENTINEL:
                 logging.info(f"[{RUN_ID}][anon] received sentinel; exiting loop.")
                 break
-            frame_i += 1
-            if blur_enabled and anonymizer is not None and (frame_i % 2 ==0):
+
+            if blur_enabled and anonymizer is not None:
                 t0 = time.perf_counter()
                 frame, dets, gpu_ms = anonymizer(frame)
                 t1 = time.perf_counter()
@@ -376,9 +370,9 @@ class VideoStreamBlurFace:
         jpeg_quality: int = 50,
         device_index: int = 0,
         blur_enabled: bool = True,
-        blur_conf: float = 0.6,
+        blur_conf: float = 0.5,
         scrfd_engine: Optional[str] = None,
-        scrfd_size: int = 320,
+        scrfd_size: int = 640,
         scrfd_input: str = "input.1",
         pixel_blocks: int = 8,
         pixel_margin: float = 0.25,
@@ -450,8 +444,8 @@ class VideoStreamBlurFace:
             size=int(scrfd_size),
             input_name=scrfd_input,
             conf=float(blur_conf) if blur_conf is not None else CONF_THRES,
-            topk=50, #int(TOPK_PER_LEVEL),
-            max_dets=50, #int(MAX_DETS),
+            topk=int(TOPK_PER_LEVEL),
+            max_dets=int(MAX_DETS),
             pixel_blocks=int(pixel_blocks),
             pixel_margin=float(pixel_margin),
             pixel_max_faces=int(pixel_max_faces),
