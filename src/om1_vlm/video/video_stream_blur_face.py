@@ -1,19 +1,12 @@
 # -*- coding: utf-8 -*-
 # om1_vlm/video/video_stream_blur_face.py
-
 """
 Video capture + optional face anonymization (pixelation) pipeline.
 
-Architecture (low-latency):
-- One worker subprocess does BOTH camera capture and (optional) anonymization.
-- Main process drain thread encodes to JPEG (TurboJPEG preferred) and dispatches:
-  * raw callbacks: numpy BGR frames (no encode/base64) for local preview
-  * frame callbacks: base64 JPEG strings (e.g., for WebSocket streaming)
-
-Policies:
-- Capture side: NO throttling; let device drive the pace.
-- Queues: tiny size (default 1). When full, drop oldest (latest-frame-wins).
-- Drain side: only sleep when we're AHEAD of target FPS; if behind, never sleep.
+- Capture process (V4L2 on Linux) reads frames and pushes to a queue
+- Anonymization process (optional, TensorRT SCRFD) pixelates faces
+- Main-thread drain loop encodes frames to JPEG (base64) and dispatches callbacks
+  with a latest-frame-wins policy to keep latency low.
 """
 
 import asyncio
@@ -29,7 +22,7 @@ from queue import Empty, Full
 from typing import Callable, Iterable, List, Optional, Tuple
 
 import cv2
-import numpy as np
+import numpy as np  # NEW: for buffer conversions
 
 from om1_utils.logging import LoggingConfig, get_logging_config, setup_logging
 
@@ -50,7 +43,6 @@ try:
 except Exception:
     _HAVE_TURBOJPEG = False
 
-# --- CUDA for SCRFD TensorRT ---
 try:
     import pycuda.driver as cuda
 except ImportError:
@@ -63,119 +55,185 @@ logger = logging.getLogger(root_package_name)
 
 SENTINEL = ("__STOP__", None)
 
-RUN_ID = f"run{int(time.time()) & 0xFFFF:X}"  # <<< ADDED (optional tag for logs)
 
-
-# ---------------------------------------------------------------------
-# Combined worker process: Camera + (optional) anonymization
-# ---------------------------------------------------------------------
-def proc_cam_ml(
+def proc_capture(
     out_q: mp.Queue,
     cam: str,
     res: Tuple[int, int],
-    target_fps: int,
+    fps: int,
     buffer_frames: int,
-    scrfd_cfg: dict,
-    blur_enabled: bool,
-    draw_boxes: bool,
     logging_config: Optional[LoggingConfig] = None,
 ) -> None:
-    """Single worker process that captures frames and optionally anonymizes them,
-    then publishes the (timestamp, frame_bgr) to out_q with latest-frame-wins.
+    """
+    Capture frames from a camera in a dedicated process and push them to a queue.
     """
     setup_logging("odom_processor", logging_config=logging_config)
-    try:
-        cv2.setNumThreads(1)
-        try:
-            cv2.ocl.setUseOpenCL(False)
-        except Exception:
-            pass
-    except Exception:
-        pass
-
+    cv2.setNumThreads(1)  
     cap = None
-    anonymizer = None
-    cuda_ctx = None
 
     try:
-        # Open camera (prefer V4L2 on Linux; ignored on macOS)
+        # Prefer V4L2 on Linux; macOS ignores this backend id.
         cap = cv2.VideoCapture(cam, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            logging.warning(f"[cap] failed to open {cam}, trying common fallbacks.")
+
         if not cap or not cap.isOpened():
-            logging.error(f"[{RUN_ID}][camml] cannot open camera {cam}")
+            logging.error(f"[cap] cannot open camera {cam}")
             return
 
-        # Best-effort camera settings
+        # Apply settings (best-effort)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, res[0])
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
-        cap.set(cv2.CAP_PROP_FPS, target_fps)
+        cap.set(cv2.CAP_PROP_FPS, fps)
 
-        # If latency seems high, try toggling MJPG off/on to compare:
-        # cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        # try:
+        #     # MJPG can reduce CPU usage (toggle off to compare latency)
+        #     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        # except Exception:
+        #     pass
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, max(1, int(buffer_frames)))
         except Exception:
             pass
 
+        # Warn if camera doesn't honor the requested resolution/fps
         actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = cap.get(cv2.CAP_PROP_FPS)
-        logging.info(f"[{RUN_ID}][camml] camera opened {cam} -> {(actual_w, actual_h)} fps={actual_fps:.2f}")
+        if (actual_w, actual_h) != (res[0], res[1]):
+            logging.warning(
+                f"[cap] Camera doesn't support resolution {res}. Using {(actual_w, actual_h)} instead."
+            )
+        logging.info(f"[cap] camera reports FPS={actual_fps:.2f}")
 
-        # Init anonymizer (same process; keeps one CUDA context)
-        if blur_enabled and scrfd_cfg.get("engine_path") and cuda is not None:
-            try:
-                cuda.init()
-                dev_id = int(os.environ.get("OM1_CUDA_DEVICE", "0"))
-                cuda_ctx = cuda.Device(dev_id).make_context()
-                anonymizer = _build_anonymizer(scrfd_cfg)
-                logging.info(f"[{RUN_ID}][camml] anonymizer ready on CUDA device {dev_id}")
-            except Exception:
-                logging.exception(f"[{RUN_ID}][camml] anonymizer init failed; running without blur")
-                anonymizer = None
-        elif blur_enabled and cuda is None:
-            logging.error(f"[{RUN_ID}][camml] pycuda not found; blur disabled")
+        frame_time = 1.0 / max(1, fps)
+        last = time.perf_counter()
 
-        # --- telemetry accumulators ---                     # <<< ADDED
-        n = 0
-        sum_gpu_ms = 0.0
-        sum_pix_ms = 0.0
-        frames_cam = 0
-        sum_pub_delay_ms = 0.0
-
-        logging.info(f"[{RUN_ID}][camml] loop start")
+        logging.info(f"[cap] capture loop starting at ~{fps} FPS, device={cam}")
         while True:
-            t_cap0 = time.perf_counter()                      # <<< ADDED
             ok, frame = cap.read()
             if not ok:
-                logging.error(f"[{RUN_ID}][camml] cap.read() failed; retry shortly")
-                # time.sleep(0.02)
+                logging.error("[cap] error reading frame; retrying shortly.")
+                time.sleep(0.02)
                 continue
 
-            ts = time.time()  # capture timestamp (seconds)   # <<< ADDED
+            ts = time.time()
+            pkt = (ts, frame)
 
-            gpu_ms = 0.0                                      # <<< ADDED
-            pix_ms = 0.0                                      # <<< ADDED
+            # Non-blocking put with drop policy
+            try:
+                out_q.put_nowait(pkt)
+            except Full:
+                try:
+                    out_q.get_nowait()  # drop one stale
+                except Empty:
+                    pass
+                try:
+                    out_q.put_nowait(pkt)
+                except Full:
+                    pass
+
+            elapsed = time.perf_counter() - last
+            if elapsed < frame_time:
+                time.sleep(frame_time - elapsed)
+            last = time.perf_counter()
+
+    except KeyboardInterrupt:
+        logging.info("[cap] received KeyboardInterrupt; shutting down.")
+    except Exception as e:
+        logging.exception(f"[cap] unexpected error: {e}")
+    finally:
+        try:
+            if cap is not None:
+                cap.release()
+                logging.info("[cap] released video capture device")
+        except Exception:
+            pass
+        try:
+            out_q.put_nowait(SENTINEL)
+        except Full:
+            pass
+        logging.info("[cap] exit.")
+
+
+def proc_anonymize(
+    in_q: mp.Queue,
+    out_q: mp.Queue,
+    scrfd_cfg: dict,
+    blur_enabled: bool,
+    draw_boxes: bool,
+    logging_config: Optional[LoggingConfig] = None,
+) -> None:
+    """
+    Optional anonymizer process: applies face detection & pixelation, then forwards frames.
+    """
+    setup_logging("odom_processor", logging_config=logging_config)
+    cv2.setNumThreads(1)  
+    anonymizer = None
+    cuda_ctx = None
+    sum_gpu_ms = 0.0
+    sum_pix_ms = 0.0
+    n_frames_anon = 0
+
+    if cuda is None:
+        blur_enabled = False
+        logging.error("[anon] pycuda not found, disabling anonymization.")
+
+    try:
+        if blur_enabled and scrfd_cfg.get("engine_path"):
+            cuda.init()
+            dev_id = int(os.environ.get("OM1_CUDA_DEVICE", "0"))
+            cuda_ctx = cuda.Device(dev_id).make_context()
+            logging.info(f"[anon] CUDA context created on device {dev_id}")
+
+            try:
+                anonymizer = _build_anonymizer(scrfd_cfg)
+                logging.info("[anon] anonymizer initialized.")
+            except Exception:
+                try:
+                    cuda_ctx.pop()
+                except Exception:
+                    pass
+                logging.exception("[anon] failed to initialize anonymizer.")
+                raise
+
+        logging.info("[anon] anonymize loop starting (enabled=%s).", bool(anonymizer))
+        while True:
+            try:
+                ts, frame = in_q.get(timeout=1.0)
+            except Empty:
+                continue
+
+            if (ts, frame) == SENTINEL:
+                logging.info("[anon] received sentinel; exiting loop.")
+                break
+
             if blur_enabled and anonymizer is not None:
                 t0 = time.perf_counter()
-                frame, dets, gpu_ms_ret = anonymizer(frame)
+                frame, dets, gpu_ms = anonymizer(frame)
                 t1 = time.perf_counter()
-                gpu_ms = float(gpu_ms_ret or 0.0)
-                pix_ms = max(0.0, (t1 - t0) * 1000.0 - gpu_ms)
+                pix_ms = (t1 - t0) * 1000.0 - (gpu_ms or 0.0)
+                if pix_ms < 0:
+                    pix_ms = 0.0
 
-                n += 1
-                sum_gpu_ms += gpu_ms
-                sum_pix_ms += pix_ms
-                if n % 120 == 0:
-                    logging.info(
-                        f"[{RUN_ID}][camml] avg gpu_ms=%.2f avg pix_ms=%.2f (n=%d)",
-                        sum_gpu_ms / max(1, n),
-                        sum_pix_ms / max(1, n),
-                        n,
-                    )
                 if draw_boxes and dets is not None:
                     draw_dets(frame, dets)
 
-            # Latest-frame-wins: if full, drop one stale then push
+                n_frames_anon += 1
+                sum_gpu_ms += gpu_ms or 0.0
+                sum_pix_ms += pix_ms
+
+                if n_frames_anon % 120 == 0:
+                    avg_gpu = sum_gpu_ms / max(1, n_frames_anon)
+                    avg_pix = sum_pix_ms / max(1, n_frames_anon)
+                    logging.info(
+                        "[anon] avg gpu_ms=%.2f avg pix_ms=%.2f (n=%d)",
+                        avg_gpu,
+                        avg_pix,
+                        n_frames_anon,
+                    )
+
+            # pass along processed frame
             try:
                 out_q.put_nowait((ts, frame))
             except Full:
@@ -188,48 +246,29 @@ def proc_cam_ml(
                 except Full:
                     pass
 
-            # --- publish latency telemetry ------------------ # <<< ADDED
-            pub_delay_ms = (time.perf_counter() - t_cap0) * 1000.0
-            frames_cam += 1
-            sum_pub_delay_ms += pub_delay_ms
-            if frames_cam % 60 == 0:
-                qsize = 0
-                try:
-                    qsize = out_q.qsize()
-                except Exception:
-                    pass
-                logging.info(
-                    f"[{RUN_ID}][camml] avg_pub_delay_ms=%.1f last_gpu_ms=%.1f last_pix_ms=%.1f qsize=%d",
-                    sum_pub_delay_ms / max(1, frames_cam),
-                    gpu_ms,
-                    pix_ms,
-                    qsize,
-                )
-
     except KeyboardInterrupt:
-        logging.info(f"[{RUN_ID}][camml] KeyboardInterrupt; exit")
+        logging.info("[anon] received KeyboardInterrupt; shutting down.")
     except Exception as e:
-        logging.exception(f"[{RUN_ID}][camml] unexpected error: {e}")
+        logging.exception(f"[anon] unexpected error: {e}")
     finally:
         try:
             out_q.put_nowait(SENTINEL)
         except Full:
             pass
-        try:
-            if cap is not None:
-                cap.release()
-        except Exception:
-            pass
         if cuda_ctx is not None:
             try:
                 cuda_ctx.pop()
+                logging.info("[anon] CUDA context released.")
             except Exception:
                 pass
-        logging.info(f"[{RUN_ID}][camml] exit.")
+        logging.info("[anon] exit.")
 
 
 def _build_anonymizer(cfg: dict):
-    """Build an anonymizer callable that runs SCRFD TensorRT and applies pixelation."""
+    """
+    Build an anonymizer callable that runs SCRFD TensorRT inference
+    and applies pixelation to detected faces.
+    """
     class _Anon:
         def __init__(self, cfg):
             self.inf = TRTInfer(
@@ -264,15 +303,11 @@ def _build_anonymizer(cfg: dict):
     return _Anon(cfg)
 
 
-# ---------------------------------------------------------------------
-# Main API
-# ---------------------------------------------------------------------
 class VideoStreamBlurFace:
     """
-    Video pipeline that:
-      - spawns ONE worker process (camera + optional anonymization),
-      - drains frames in the main process (encode + dispatch),
-      - keeps latency low with latest-frame-wins throughout.
+    Video pipeline that captures frames in one process, optionally anonymizes
+    faces in another process (via SCRFD TensorRT + pixelation), then encodes
+    frames as base64 JPEG and dispatches to registered callbacks.
     """
 
     def __init__(
@@ -280,7 +315,7 @@ class VideoStreamBlurFace:
         frame_callbacks: Optional[Iterable[Callable[[str], None]]] = None,
         fps: int = 30,
         resolution: Tuple[int, int] = (640, 480),
-        jpeg_quality: int = 50,
+        jpeg_quality: int = 70,
         device_index: int = 0,
         blur_enabled: bool = True,
         blur_conf: float = 0.5,
@@ -292,21 +327,14 @@ class VideoStreamBlurFace:
         pixel_max_faces: int = 32,
         pixel_noise: float = 0.0,
         draw_boxes: bool = False,
+        queue_size_raw: int = 1,
         queue_size_proc: int = 1,
         buffer_frames: int = 1,
-        use_turbojpeg: bool = True,
-        raw_frame_callbacks: Optional[Iterable[Callable[[np.ndarray], None]]] = None,
+        use_turbojpeg: bool = True,         # NEW: allow disabling at runtime
+        raw_frame_callbacks: Optional[Iterable[Callable[[np.ndarray], None]]] = None,  # NEW
     ):
         self.fps = int(fps)
-        try:
-            cv2.setNumThreads(1)
-            try:
-                cv2.ocl.setUseOpenCL(False)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
+        cv2.setNumThreads(1)  
         self.resolution = (int(resolution[0]), int(resolution[1]))
         self.encode_quality = [cv2.IMWRITE_JPEG_QUALITY, int(jpeg_quality)]
 
@@ -319,6 +347,7 @@ class VideoStreamBlurFace:
         else:
             self.frame_callbacks = list(frame_callbacks)
 
+        # NEW: raw callbacks (receive numpy frames, no JPEG/base64)
         if raw_frame_callbacks is None:
             self.raw_callbacks: List[Callable[[np.ndarray], None]] = []
         elif callable(raw_frame_callbacks):
@@ -332,23 +361,23 @@ class VideoStreamBlurFace:
         self.loop_thread.start()
         logger.debug("Starting background event loop for video streaming.")
 
-        # Camera device selection
         devices = enumerate_video_devices()
         if platform.system() == "Darwin":
             camindex = 0 if devices else 0
         else:
             camindex = f"/dev/video{devices[0][0]}" if devices else "/dev/video0"
+
         if device_index != 0:
             if platform.system() == "Darwin":
                 camindex = device_index
             else:
                 camindex = f"/dev/video{device_index}"
-        self.cam = camindex
 
-        # Single queue from worker → main drain
+        self.cam = camindex
+        self.q_raw = mp.Queue(maxsize=int(queue_size_raw))
         self.q_proc = mp.Queue(maxsize=int(queue_size_proc))
 
-        # Anonymizer config for worker
+        # Anonymizer config
         self.scrfd_cfg = dict(
             engine_path=scrfd_engine,
             size=int(scrfd_size),
@@ -376,8 +405,9 @@ class VideoStreamBlurFace:
                 logger.warning("TurboJPEG load failed, falling back to cv2.imencode")
                 self._use_turbojpeg = False
 
-        # Process and control
-        self.p_camml: Optional[mp.Process] = None
+        # Processes and control
+        self.p_cap: Optional[mp.Process] = None
+        self.p_anon: Optional[mp.Process] = None
         self._drain_thread: Optional[threading.Thread] = None
         self._running = mp.Value("b", False)
 
@@ -396,6 +426,7 @@ class VideoStreamBlurFace:
             else:
                 logger.warning("Frame callback already registered")
 
+    # NEW: raw callback API
     def register_raw_frame_callback(self, cb: Callable[[np.ndarray], None]) -> None:
         """Register a per-frame raw (numpy BGR) callback."""
         if cb is None:
@@ -427,7 +458,7 @@ class VideoStreamBlurFace:
                 logger.warning("Attempted to unregister a non-registered callback")
 
     def start(self) -> None:
-        """Start worker process (cam+ML) and the drain thread."""
+        """Start capture/anonymize worker processes and the drain thread."""
         if self._running.value:
             logger.warning("[main] start() called but already running.")
             return
@@ -438,51 +469,71 @@ class VideoStreamBlurFace:
         except RuntimeError:
             pass
 
-        self.p_camml = mp.Process(
-            target=proc_cam_ml,
+        self.p_cap = mp.Process(
+            target=proc_capture,
             args=(
-                self.q_proc,          # worker publishes directly to q_proc
+                self.q_raw,
                 self.cam,
                 self.resolution,
                 self.fps,
                 self.buffer_frames,
+                get_logging_config(),
+            ),
+            daemon=True,
+            name="CaptureProc",
+        )
+        self.p_anon = mp.Process(
+            target=proc_anonymize,
+            args=(
+                self.q_raw,
+                self.q_proc,
                 self.scrfd_cfg,
                 self.blur_enabled,
                 self.draw_boxes,
                 get_logging_config(),
             ),
             daemon=True,
-            name=f"CamMLProc-{RUN_ID}",
+            name="AnonProc",
         )
-        self.p_camml.start()
-        logger.info(f"[{RUN_ID}][main] CamML process started (pid={self.p_camml.pid}).")
+
+        self.p_cap.start()
+        logger.info("[main] Capture process started (pid=%s).", self.p_cap.pid)
+        self.p_anon.start()
+        logger.info("[main] Anonymize process started (pid=%s).", self.p_anon.pid)
 
         self._drain_thread = threading.Thread(
-            target=self._drain_loop, daemon=True, name=f"DrainThread-{RUN_ID}"
+            target=self._drain_loop, daemon=True, name="DrainThread"
         )
         self._drain_thread.start()
-        logger.info(f"[{RUN_ID}][main] Drain thread started. VideoStream running.")
+        logger.info("[main] Drain thread started. VideoStream running.")
 
     def stop(self, join_timeout: float = 1.0) -> None:
-        """Stop worker and drain thread, and release resources."""
+        """Stop workers and drain thread, and release resources."""
         if not self._running.value:
             logger.warning("[main] stop() called but not running.")
             return
 
         self._running.value = False
 
-        # Signal worker
-        try:
-            self.q_proc.put_nowait(SENTINEL)
-        except Full:
-            pass
+        # Signal workers
+        for q in (self.q_raw, self.q_proc):
+            try:
+                q.put_nowait(SENTINEL)
+            except Full:
+                pass
 
-        # Join worker
-        if self.p_camml and self.p_camml.is_alive():
-            self.p_camml.join(timeout=join_timeout)
-            if self.p_camml.is_alive():
-                logger.warning(f"[{RUN_ID}][main] CamMLProc did not exit in time; terminating.")
-                self.p_camml.terminate()
+        # Join processes
+        if self.p_cap and self.p_cap.is_alive():
+            self.p_cap.join(timeout=join_timeout)
+            if self.p_cap.is_alive():
+                logger.warning("[main] CaptureProc did not exit in time; terminating.")
+                self.p_cap.terminate()
+
+        if self.p_anon and self.p_anon.is_alive():
+            self.p_anon.join(timeout=join_timeout)
+            if self.p_anon.is_alive():
+                logger.warning("[main] AnonProc did not exit in time; terminating.")
+                self.p_anon.terminate()
 
         # Join drain thread
         if self._drain_thread and self._drain_thread.is_alive():
@@ -494,7 +545,7 @@ class VideoStreamBlurFace:
         except Exception:
             pass
 
-        logger.info(f"[{RUN_ID}][main] VideoStream stopped.")
+        logger.info("[main] VideoStream stopped.")
 
     # ----------------------------
     # Internals
@@ -506,43 +557,36 @@ class VideoStreamBlurFace:
         self.loop.run_forever()
 
     def _dispatch(self, b64_jpeg: str) -> None:
-        """Dispatch base64 JPEG to all registered callbacks."""
+        """Dispatch a base64-encoded JPEG frame to all registered callbacks."""
         with self._cb_lock:
             callbacks = tuple(self.frame_callbacks)
-
-        # --- per-callback telemetry --------------------- # <<< ADDED
         for cb in callbacks:
-            t_cb0 = time.perf_counter()                   # <<< ADDED
             try:
                 result = cb(b64_jpeg)
                 if inspect.isawaitable(result):
                     asyncio.run_coroutine_threadsafe(result, self.loop)
             except Exception as e:
                 logger.error("Frame callback raised: %s", e, exc_info=True)
-            finally:
-                cb_ms = (time.perf_counter() - t_cb0) * 1000.0
-                logger.debug(f"[{RUN_ID}][main] callback={getattr(cb,'__name__',str(cb))} took {cb_ms:.2f} ms")  # <<< ADDED
 
     def _dispatch_raw(self, frame_bgr: np.ndarray) -> None:
-        """Dispatch raw numpy frame (no encode/base64) to raw callbacks."""
+        """Dispatch a raw numpy frame to raw callbacks (no encode/base64)."""
         with self._cb_lock:
             raw_cbs = tuple(self.raw_callbacks)
         for cb in raw_cbs:
-            t_cb0 = time.perf_counter()                   # <<< ADDED
             try:
                 cb(frame_bgr)
             except Exception as e:
                 logger.error("Raw frame callback raised: %s", e, exc_info=True)
-            finally:
-                cb_ms = (time.perf_counter() - t_cb0) * 1000.0
-                logger.debug(f"[{RUN_ID}][main] raw-callback={getattr(cb,'__name__',str(cb))} took {cb_ms:.2f} ms")  # <<< ADDED
 
+    # --- JPEG encoding helper (TurboJPEG preferred) ---
     def _encode_jpeg(self, frame_bgr) -> Optional[bytes]:
-        """Encode BGR frame to JPEG bytes (TurboJPEG if available, else cv2)."""
-        t_enc0 = time.perf_counter()                      # <<< ADDED
+        """
+        Encode BGR frame to JPEG bytes using TurboJPEG if available,
+        else cv2.imencode fallback. Returns None on failure.
+        """
         try:
             if self._use_turbojpeg and self._jpeg is not None:
-                out = self._jpeg.encode(
+                return self._jpeg.encode(
                     frame_bgr,
                     quality=self._jpeg_quality,
                     pixel_format=TJPF.BGR,
@@ -554,38 +598,24 @@ class VideoStreamBlurFace:
                 )
                 if not ok:
                     return None
-                out = buf.tobytes()
+                return buf.tobytes()
         except Exception:
             logger.exception("[main] JPEG encode failed")
             return None
-        finally:
-            enc_ms = (time.perf_counter() - t_enc0) * 1000.0
-            logger.debug(f"[{RUN_ID}][main] encode_ms={enc_ms:.2f} (turbo={self._use_turbojpeg})")  # <<< ADDED
-        return out
 
     def _drain_loop(self) -> None:
         """
-        Drain loop (main process):
-        - Pull frames, drain queue to newest (latest-frame-wins)
-        - Dispatch raw frame first (for local preview)
-        - Encode to JPEG and dispatch base64
-        - Only sleep when we're ahead of target FPS (disabled by default)
+        Main-process drain loop with latest-frame-wins:
+        - Pull processed frames, drain queue to newest
+        - Dispatch raw frame (no encoding) for local preview (optional)
+        - JPEG encode + base64 for standard callbacks
+        - Pace only when ahead (avoid extra delay when behind)
         """
         frame_time = 1.0 / max(1, self.fps)
+        last = time.perf_counter()
 
-        # fps counters (show delivered/output fps)
-        fps_frames = 0
-        fps_t0 = time.time()
-
-        # telemetry accumulators
-        frames_drain = 0
-        sum_e2e_ms = 0.0
-        sum_stale_ms = 0.0
-
-        logger.info(f"[{RUN_ID}][main] drain loop starting at ~{self.fps} FPS.")
+        logger.info("[main] drain loop starting at ~%d FPS.", self.fps)
         while self._running.value:
-            t_loop0 = time.perf_counter()
-
             # Pull at least one frame
             try:
                 ts, frame = self.q_proc.get(timeout=0.05)
@@ -593,17 +623,15 @@ class VideoStreamBlurFace:
                 continue
 
             if (ts, frame) == SENTINEL:
-                logger.info(f"[{RUN_ID}][main] drain loop received sentinel; exiting.")
+                logger.info("[main] drain loop received sentinel; exiting.")
                 break
 
             # Drain queue: keep the most recent frame, drop stale
-            drained = 0
             while True:
                 try:
                     ts2, frame2 = self.q_proc.get_nowait()
-                    drained += 1
                     if (ts2, frame2) == SENTINEL:
-                        logger.info(f"[{RUN_ID}][main] drain got sentinel during drain; exiting.")
+                        logger.info("[main] drain got sentinel during drain; exiting.")
                         ts, frame = ts2, frame2
                         break
                     ts, frame = ts2, frame2
@@ -612,56 +640,21 @@ class VideoStreamBlurFace:
             if (ts, frame) == SENTINEL:
                 break
 
-            # queue staleness: age when we begin handling this frame
-            staleness_ms = (time.time() - ts) * 1000.0         # <<< FIX: use time.time() to match ts
-
-            # Raw dispatch first (no encode)
+            # Dispatch raw frame first (fast local preview, no encode)
             self._dispatch_raw(frame)
 
-            # JPEG encode + base64 dispatch
+            # Encode & dispatch base64 JPEG for normal callbacks / WS
             jpeg_bytes = self._encode_jpeg(frame)
             if jpeg_bytes is not None:
-                t_cb_all0 = time.perf_counter()
                 self._dispatch(base64.b64encode(jpeg_bytes).decode("utf-8"))
-                cb_all_ms = (time.perf_counter() - t_cb_all0) * 1000.0
             else:
                 logger.error("[main] JPEG encode failed; dropping frame.")
                 continue
 
-            # --- FPS: delivered/output fps ---
-            fps_frames += 1
-            now = time.time()
-            if now - fps_t0 >= 1.0:
-                out_fps = fps_frames / (now - fps_t0)
-                logger.info(f"[{RUN_ID}][main] output_fps={out_fps:.1f}")
-                fps_frames = 0
-                fps_t0 = now
-
-            # End-to-end latency (capture ts -> after callbacks now)
-            e2e_ms = (time.time() - ts) * 1000.0               # <<< FIX: call time.time() and match clock
-
-            # accumulate + sample log
-            frames_drain += 1
-            sum_e2e_ms += e2e_ms
-            sum_stale_ms += staleness_ms
-            if frames_drain % 60 == 0:
-                try:
-                    qsize = self.q_proc.qsize()
-                except Exception:
-                    qsize = -1
-                logger.info(
-                    f"[{RUN_ID}][main] e2e_avg_ms=%.1f stale_avg_ms=%.1f drained=%d qsize=%d last_cb_ms=%.1f",
-                    sum_e2e_ms / max(1, frames_drain),
-                    sum_stale_ms / max(1, frames_drain),
-                    drained,
-                    qsize,
-                    cb_all_ms,
-                )
-            # Optional pacing if you want upper-FPS cap and you're ahead:
-            # now_perf = time.perf_counter()
-            # elapsed = now_perf - t_loop0
-            # if elapsed < frame_time and (now_perf - ts) < frame_time:
+            # Pace only if we're ahead (frame is fresh & loop was faster than frame_time)
+            # now = time.perf_counter()
+            # elapsed = now - last
+            # # If frame age is small and loop was faster than target, sleep a bit
+            # if (now - ts) < frame_time and elapsed < frame_time:
             #     time.sleep(frame_time - elapsed)
-
-
-
+            # last = time.perf_counter()
