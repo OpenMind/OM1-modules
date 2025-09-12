@@ -51,7 +51,6 @@ except ImportError:
     print("pycuda not found, face anonymization will be disabled.")
     cuda = None
 
-# Keep logger naming consistent with your other modules
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
 
@@ -428,9 +427,6 @@ class VideoStreamBlurFace:
         self._drain_thread: Optional[threading.Thread] = None
         self._running = mp.Value("b", False)
 
-    # ----------------------------
-    # Public API
-    # ----------------------------
     def register_frame_callback(self, cb: Callable[[str], None]) -> None:
         """Register a per-frame (base64 JPEG) callback."""
         if cb is None:
@@ -665,21 +661,21 @@ class VideoStreamBlurFace:
                 logger.info("[main] drain loop received sentinel; exiting.")
                 break
 
-            # Drain queue: keep the most recent frame, drop stale
-            drained = 0
-            while True:
-                try:
-                    ts2, frame2 = self.q_proc.get_nowait()
-                    drained += 1
-                    if (ts2, frame2) == SENTINEL:
-                        logger.info("[main] drain got sentinel during drain; exiting.")
-                        ts, frame = ts2, frame2
-                        break
-                    ts, frame = ts2, frame2
-                except Empty:
-                    break
-            if (ts, frame) == SENTINEL:
-                break
+            # # Drain queue: keep the most recent frame, drop stale
+            # drained = 0
+            # while True:
+            #     try:
+            #         ts2, frame2 = self.q_proc.get_nowait()
+            #         drained += 1
+            #         if (ts2, frame2) == SENTINEL:
+            #             logger.info("[main] drain got sentinel during drain; exiting.")
+            #             ts, frame = ts2, frame2
+            #             break
+            #         ts, frame = ts2, frame2
+            #     except Empty:
+            #         break
+            # if (ts, frame) == SENTINEL:
+            #     break
 
             # Raw dispatch first (no encode)
             self._dispatch_raw(frame)
