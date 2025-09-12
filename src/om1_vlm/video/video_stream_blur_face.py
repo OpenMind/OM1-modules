@@ -653,7 +653,7 @@ class VideoStreamBlurFace:
         while self._running.value:
             # Pull at least one frame
             try:
-                ts, frame = self.q_proc.get(timeout=0.05)
+                ts, frame = self.q_proc.get(timeout=max(0.005, 1.0 / max(1, self.fps)))
             except Empty:
                 continue
 
