@@ -9,7 +9,6 @@ This module launches a two-process pipeline:
 A main-thread drain loop encodes frames to JPEG (base64) and dispatches to callbacks.
 """
 
-
 import asyncio
 import base64
 import inspect
@@ -162,6 +161,7 @@ def proc_capture(
                 cap_fps = fps_frames / (now - fps_t0)
                 avg_pub = sum_pub_delay_ms / max(1, frames_pub)
                 logging.info(
+                    #avg_pub_delay_ms: average time from starting a camera read to successfully queuing that frame (capture → queue).
                     f"[{RUN_ID}][cap][fps] capture_fps={cap_fps:.1f} avg_pub_delay_ms={avg_pub:.1f}"
                 )
                 fps_frames = 0
@@ -278,6 +278,8 @@ def proc_anonymize(
                     avg_gpu = sum_gpu_ms / max(1, n_frames_anon)
                     avg_pix = sum_pix_ms / max(1, n_frames_anon)
                     logging.info(
+                        #average GPU inference time per frame inside the anonymizer
+                        #average CPU time spent doing pixelation and post-processing per frame
                         f"[{RUN_ID}][anon] avg gpu_ms={avg_gpu:.2f} avg pix_ms={avg_pix:.2f} (n={n_frames_anon})"
                     )
 
@@ -665,6 +667,7 @@ class VideoStreamBlurFace:
             finally:
                 ms = (time.perf_counter() - t0) * 1000.0
                 logger.debug(
+                    #time a specific (raw or base64) callback spent processing a frame.
                     f"[{RUN_ID}][main] callback={getattr(cb, '__name__', str(cb))} took {ms:.2f} ms"
                 )
 
@@ -726,6 +729,7 @@ class VideoStreamBlurFace:
         finally:
             enc_ms = (time.perf_counter() - t0) * 1000.0
             logger.debug(
+                #time to JPEG-encode a frame (TurboJPEG if available, else OpenCV).
                 f"[{RUN_ID}][main] encode_ms={enc_ms:.2f} (turbo={self._use_turbojpeg})"
             )
 
@@ -799,6 +803,7 @@ class VideoStreamBlurFace:
             now = time.time()
             if now - fps_t0 >= 1.0:
                 out_fps = fps_frames / (now - fps_t0)
+                #frames per second that your main thread actually delivers to callbacks
                 logger.info(f"[{RUN_ID}][main][fps] output_fps={out_fps:.1f}")
                 fps_frames = 0
                 fps_t0 = now
@@ -816,7 +821,12 @@ class VideoStreamBlurFace:
                 except Exception:
                     qsize = -1
                 logger.info(
+                    #end-to-end latency from when the frame was captured to after all callbacks ran.
                     f"[{RUN_ID}][main] e2e_avg_ms={sum_e2e_ms / max(1, frames_drain):.1f} "
+                    #how “old” frames are when the main thread starts handling them (queueing delay).
                     f"stale_avg_ms={sum_stale_ms / max(1, frames_drain):.1f} "
+                    #drained: how many older frames were dropped to keep only the newest one
+                    #qsize:current size of the processed-frame queue when sampled
+                    #last_cb_ms: total time all callbacks took to run for the most recent frame.
                     f"drained={drained} qsize={qsize} last_cb_ms={last_cb_ms:.1f}"
                 )
