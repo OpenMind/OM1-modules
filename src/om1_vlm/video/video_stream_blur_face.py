@@ -685,7 +685,6 @@ class VideoStreamBlurFace:
                 logger.info("[main] drain loop received sentinel; exiting.")
                 break
 
-
             # Raw dispatch first (no encode)
             self._dispatch_raw(frame)
 
