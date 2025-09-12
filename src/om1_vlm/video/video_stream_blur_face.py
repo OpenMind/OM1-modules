@@ -99,10 +99,10 @@ def proc_capture(
 
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
 
-        try:
-            cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)   # leave raw YUYV/MJPG; convert later as needed
-        except Exception:
-            pass
+        # try:
+        #     cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)   # leave raw YUYV/MJPG; convert later as needed
+        # except Exception:
+        #     pass
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)    # minimize driver buffering
         except Exception:
