@@ -58,7 +58,6 @@ logger = logging.getLogger(root_package_name)
 SENTINEL = ("__STOP__", None)
 
 
-
 def proc_capture(
     out_q: mp.Queue,
     cam: str,
@@ -519,7 +518,7 @@ class VideoStreamBlurFace:
         logger.info(f"[main] Anonymize process started (pid={self.p_anon.pid}).")
 
         self._drain_thread = threading.Thread(
-            target=self._drain_loop, daemon=True, name=f"DrainThread"
+            target=self._drain_loop, daemon=True, name="DrainThread"
         )
         self._drain_thread.start()
         logger.info("[main] Drain thread started. VideoStream running.")
