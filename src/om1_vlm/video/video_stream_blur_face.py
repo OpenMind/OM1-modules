@@ -22,7 +22,7 @@ from queue import Empty, Full
 from typing import Callable, Iterable, List, Optional, Tuple
 
 import cv2
-import numpy as np
+import numpy as np  # NEW: for buffer conversions
 
 from om1_utils.logging import LoggingConfig, get_logging_config, setup_logging
 
@@ -43,7 +43,6 @@ try:
 except Exception:
     _HAVE_TURBOJPEG = False
 
-# --- CUDA for SCRFD TensorRT (optional) ---
 try:
     import pycuda.driver as cuda
 except ImportError:
@@ -55,12 +54,8 @@ root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
 
 SENTINEL = ("__STOP__", None)
-RUN_ID = f"run{int(time.time()) & 0xFFFF:X}"  # <<< ADDED: short tag to correlate logs
 
 
-# ---------------------------------------------------------------------
-# Capture process
-# ---------------------------------------------------------------------
 def proc_capture(
     out_q: mp.Queue,
     cam: str,
@@ -71,63 +66,54 @@ def proc_capture(
 ) -> None:
     """
     Capture frames from a camera in a dedicated process and push them to a queue.
-    Publishes (ts, frame_bgr) where ts is time.time().
     """
     setup_logging("odom_processor", logging_config=logging_config)
-    try:
-        cv2.setNumThreads(1)
-        try:
-            cv2.ocl.setUseOpenCL(False)
-        except Exception:
-            pass
-    except Exception:
-        pass
-
+    cv2.setNumThreads(1)  
     cap = None
 
     try:
         # Prefer V4L2 on Linux; macOS ignores this backend id.
         cap = cv2.VideoCapture(cam, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            logging.warning(f"[cap] failed to open {cam}, trying common fallbacks.")
+
         if not cap or not cap.isOpened():
-            logging.error(f"[{RUN_ID}][cap] cannot open camera {cam}")
+            logging.error(f"[cap] cannot open camera {cam}")
             return
 
         # Apply settings (best-effort)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, res[0])
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
         cap.set(cv2.CAP_PROP_FPS, fps)
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
 
+        # try:
+        #     # MJPG can reduce CPU usage (toggle off to compare latency)
+        #     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        # except Exception:
+        #     pass
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, max(1, int(buffer_frames)))
         except Exception:
             pass
 
-        # Warn if camera doesn't honor the requested settings
+        # Warn if camera doesn't honor the requested resolution/fps
         actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = cap.get(cv2.CAP_PROP_FPS)
         if (actual_w, actual_h) != (res[0], res[1]):
             logging.warning(
-                f"[{RUN_ID}][cap] Camera doesn't support resolution {res}. Using {(actual_w, actual_h)} instead."
+                f"[cap] Camera doesn't support resolution {res}. Using {(actual_w, actual_h)} instead."
             )
-        logging.info(f"[{RUN_ID}][cap] camera reports FPS={actual_fps:.2f}")
-
-        # Telemetry: capture/publish FPS + publish delay
-        fps_frames = 0                                   # <<< ADDED
-        fps_t0 = time.time()                             # <<< ADDED
-        sum_pub_delay_ms = 0.0                           # <<< ADDED
-        frames_pub = 0                                   # <<< ADDED
+        logging.info(f"[cap] camera reports FPS={actual_fps:.2f}")
 
         # frame_time = 1.0 / max(1, fps)
         # last = time.perf_counter()
 
-        logging.info(f"[{RUN_ID}][cap] capture loop starting at ~{fps} FPS, device={cam}")
+        logging.info(f"[cap] capture loop starting at ~{fps} FPS, device={cam}")
         while True:
-            t_cap0 = time.perf_counter()                 # <<< ADDED
             ok, frame = cap.read()
             if not ok:
-                logging.error(f"[{RUN_ID}][cap] error reading frame; retrying shortly.")
+                logging.error("[cap] error reading frame; retrying shortly.")
                 time.sleep(0.02)
                 continue
 
@@ -147,50 +133,29 @@ def proc_capture(
                 except Full:
                     pass
 
-            # Publish latency (from read start to enqueued)
-            pub_delay_ms = (time.perf_counter() - t_cap0) * 1000.0  # <<< ADDED
-            sum_pub_delay_ms += pub_delay_ms                        # <<< ADDED
-            frames_pub += 1                                         # <<< ADDED
-
-            # Capture/publish FPS once per second
-            fps_frames += 1                                         # <<< ADDED
-            now = time.time()                                       # <<< ADDED
-            if now - fps_t0 >= 1.0:                                 # <<< ADDED
-                cap_fps = fps_frames / (now - fps_t0)
-                avg_pub = sum_pub_delay_ms / max(1, frames_pub)
-                logging.info(
-                    f"[{RUN_ID}][cap][fps] capture_fps={cap_fps:.1f} avg_pub_delay_ms={avg_pub:.1f}"
-                )
-                fps_frames = 0
-                fps_t0 = now
-
-            # Optional pacing to target FPS from the capture side:
             # elapsed = time.perf_counter() - last
             # if elapsed < frame_time:
             #     time.sleep(frame_time - elapsed)
             # last = time.perf_counter()
 
     except KeyboardInterrupt:
-        logging.info(f"[{RUN_ID}][cap] received KeyboardInterrupt; shutting down.")
+        logging.info("[cap] received KeyboardInterrupt; shutting down.")
     except Exception as e:
-        logging.exception(f"[{RUN_ID}][cap] unexpected error: {e}")
+        logging.exception(f"[cap] unexpected error: {e}")
     finally:
         try:
             if cap is not None:
                 cap.release()
-                logging.info(f"[{RUN_ID}][cap] released video capture device")
+                logging.info("[cap] released video capture device")
         except Exception:
             pass
         try:
             out_q.put_nowait(SENTINEL)
         except Full:
             pass
-        logging.info(f"[{RUN_ID}][cap] exit.")
+        logging.info("[cap] exit.")
 
 
-# ---------------------------------------------------------------------
-# Anonymization process
-# ---------------------------------------------------------------------
 def proc_anonymize(
     in_q: mp.Queue,
     out_q: mp.Queue,
@@ -203,45 +168,36 @@ def proc_anonymize(
     Optional anonymizer process: applies face detection & pixelation, then forwards frames.
     """
     setup_logging("odom_processor", logging_config=logging_config)
-    try:
-        cv2.setNumThreads(1)
-        try:
-            cv2.ocl.setUseOpenCL(False)
-        except Exception:
-            pass
-    except Exception:
-        pass
-
+    cv2.setNumThreads(1)  
     anonymizer = None
     cuda_ctx = None
     sum_gpu_ms = 0.0
     sum_pix_ms = 0.0
     n_frames_anon = 0
 
-    if cuda is None and blur_enabled:
+    if cuda is None:
         blur_enabled = False
-        logging.error(f"[{RUN_ID}][anon] pycuda not found, disabling anonymization.")
+        logging.error("[anon] pycuda not found, disabling anonymization.")
 
     try:
         if blur_enabled and scrfd_cfg.get("engine_path"):
+            cuda.init()
+            dev_id = int(os.environ.get("OM1_CUDA_DEVICE", "0"))
+            cuda_ctx = cuda.Device(dev_id).make_context()
+            logging.info(f"[anon] CUDA context created on device {dev_id}")
+
             try:
-                cuda.init()
-                dev_id = int(os.environ.get("OM1_CUDA_DEVICE", "0"))
-                cuda_ctx = cuda.Device(dev_id).make_context()
-                logging.info(f"[{RUN_ID}][anon] CUDA context created on device {dev_id}")
                 anonymizer = _build_anonymizer(scrfd_cfg)
-                logging.info(f"[{RUN_ID}][anon] anonymizer initialized.")
+                logging.info("[anon] anonymizer initialized.")
             except Exception:
-                # Ensure we pop context on failure
                 try:
-                    if cuda_ctx is not None:
-                        cuda_ctx.pop()
+                    cuda_ctx.pop()
                 except Exception:
                     pass
-                logging.exception(f"[{RUN_ID}][anon] failed to initialize anonymizer.")
-                anonymizer = None
+                logging.exception("[anon] failed to initialize anonymizer.")
+                raise
 
-        logging.info(f"[{RUN_ID}][anon] anonymize loop starting (enabled={bool(anonymizer)}).")
+        logging.info("[anon] anonymize loop starting (enabled=%s).", bool(anonymizer))
         while True:
             try:
                 ts, frame = in_q.get(timeout=1.0)
@@ -249,15 +205,14 @@ def proc_anonymize(
                 continue
 
             if (ts, frame) == SENTINEL:
-                logging.info(f"[{RUN_ID}][anon] received sentinel; exiting loop.")
+                logging.info("[anon] received sentinel; exiting loop.")
                 break
 
             if blur_enabled and anonymizer is not None:
                 t0 = time.perf_counter()
                 frame, dets, gpu_ms = anonymizer(frame)
                 t1 = time.perf_counter()
-                gpu_ms = float(gpu_ms or 0.0)                       # <<< ADDED (normalize type)
-                pix_ms = (t1 - t0) * 1000.0 - gpu_ms
+                pix_ms = (t1 - t0) * 1000.0 - (gpu_ms or 0.0)
                 if pix_ms < 0:
                     pix_ms = 0.0
 
@@ -265,20 +220,20 @@ def proc_anonymize(
                     draw_dets(frame, dets)
 
                 n_frames_anon += 1
-                sum_gpu_ms += gpu_ms
+                sum_gpu_ms += gpu_ms or 0.0
                 sum_pix_ms += pix_ms
 
                 if n_frames_anon % 120 == 0:
                     avg_gpu = sum_gpu_ms / max(1, n_frames_anon)
                     avg_pix = sum_pix_ms / max(1, n_frames_anon)
                     logging.info(
-                        f"[{RUN_ID}][anon] avg gpu_ms=%.2f avg pix_ms=%.2f (n=%d)",
+                        "[anon] avg gpu_ms=%.2f avg pix_ms=%.2f (n=%d)",
                         avg_gpu,
                         avg_pix,
                         n_frames_anon,
                     )
 
-            # Forward processed frame
+            # pass along processed frame
             try:
                 out_q.put_nowait((ts, frame))
             except Full:
@@ -292,9 +247,9 @@ def proc_anonymize(
                     pass
 
     except KeyboardInterrupt:
-        logging.info(f"[{RUN_ID}][anon] received KeyboardInterrupt; shutting down.")
+        logging.info("[anon] received KeyboardInterrupt; shutting down.")
     except Exception as e:
-        logging.exception(f"[{RUN_ID}][anon] unexpected error: {e}")
+        logging.exception(f"[anon] unexpected error: {e}")
     finally:
         try:
             out_q.put_nowait(SENTINEL)
@@ -303,15 +258,12 @@ def proc_anonymize(
         if cuda_ctx is not None:
             try:
                 cuda_ctx.pop()
-                logging.info(f"[{RUN_ID}][anon] CUDA context released.")
+                logging.info("[anon] CUDA context released.")
             except Exception:
                 pass
-        logging.info(f"[{RUN_ID}][anon] exit.")
+        logging.info("[anon] exit.")
 
 
-# ---------------------------------------------------------------------
-# Anonymizer Builder
-# ---------------------------------------------------------------------
 def _build_anonymizer(cfg: dict):
     """
     Build an anonymizer callable that runs SCRFD TensorRT inference
@@ -351,15 +303,11 @@ def _build_anonymizer(cfg: dict):
     return _Anon(cfg)
 
 
-# ---------------------------------------------------------------------
-# Main API
-# ---------------------------------------------------------------------
 class VideoStreamBlurFace:
     """
-    Two-process pipeline:
-      - Capture process → pushes (ts, frame_bgr) to q_raw
-      - Anonymize process (optional) → pulls from q_raw, pixelates, pushes to q_proc
-      - Drain thread (main process) → raw preview callbacks + JPEG/base64 callbacks
+    Video pipeline that captures frames in one process, optionally anonymizes
+    faces in another process (via SCRFD TensorRT + pixelation), then encodes
+    frames as base64 JPEG and dispatches to registered callbacks.
     """
 
     def __init__(
@@ -382,19 +330,11 @@ class VideoStreamBlurFace:
         queue_size_raw: int = 1,
         queue_size_proc: int = 1,
         buffer_frames: int = 1,
-        use_turbojpeg: bool = True,
-        raw_frame_callbacks: Optional[Iterable[Callable[[np.ndarray], None]]] = None,
+        use_turbojpeg: bool = True,         # NEW: allow disabling at runtime
+        raw_frame_callbacks: Optional[Iterable[Callable[[np.ndarray], None]]] = None,  # NEW
     ):
         self.fps = int(fps)
-        try:
-            cv2.setNumThreads(1)
-            try:
-                cv2.ocl.setUseOpenCL(False)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
+        cv2.setNumThreads(1)  
         self.resolution = (int(resolution[0]), int(resolution[1]))
         self.encode_quality = [cv2.IMWRITE_JPEG_QUALITY, int(jpeg_quality)]
 
@@ -407,7 +347,7 @@ class VideoStreamBlurFace:
         else:
             self.frame_callbacks = list(frame_callbacks)
 
-        # Raw callbacks (no encode/base64)
+        # NEW: raw callbacks (receive numpy frames, no JPEG/base64)
         if raw_frame_callbacks is None:
             self.raw_callbacks: List[Callable[[np.ndarray], None]] = []
         elif callable(raw_frame_callbacks):
@@ -421,20 +361,19 @@ class VideoStreamBlurFace:
         self.loop_thread.start()
         logger.debug("Starting background event loop for video streaming.")
 
-        # Camera device selection
         devices = enumerate_video_devices()
         if platform.system() == "Darwin":
             camindex = 0 if devices else 0
         else:
             camindex = f"/dev/video{devices[0][0]}" if devices else "/dev/video0"
+
         if device_index != 0:
             if platform.system() == "Darwin":
                 camindex = device_index
             else:
                 camindex = f"/dev/video{device_index}"
-        self.cam = camindex
 
-        # Queues
+        self.cam = camindex
         self.q_raw = mp.Queue(maxsize=int(queue_size_raw))
         self.q_proc = mp.Queue(maxsize=int(queue_size_proc))
 
@@ -487,6 +426,7 @@ class VideoStreamBlurFace:
             else:
                 logger.warning("Frame callback already registered")
 
+    # NEW: raw callback API
     def register_raw_frame_callback(self, cb: Callable[[np.ndarray], None]) -> None:
         """Register a per-frame raw (numpy BGR) callback."""
         if cb is None:
@@ -557,15 +497,15 @@ class VideoStreamBlurFace:
         )
 
         self.p_cap.start()
-        logger.info(f"[{RUN_ID}][main] Capture process started (pid={self.p_cap.pid}).")
+        logger.info("[main] Capture process started (pid=%s).", self.p_cap.pid)
         self.p_anon.start()
-        logger.info(f"[{RUN_ID}][main] Anonymize process started (pid={self.p_anon.pid}).")
+        logger.info("[main] Anonymize process started (pid=%s).", self.p_anon.pid)
 
         self._drain_thread = threading.Thread(
-            target=self._drain_loop, daemon=True, name=f"DrainThread-{RUN_ID}"
+            target=self._drain_loop, daemon=True, name="DrainThread"
         )
         self._drain_thread.start()
-        logger.info(f"[{RUN_ID}][main] Drain thread started. VideoStream running.")
+        logger.info("[main] Drain thread started. VideoStream running.")
 
     def stop(self, join_timeout: float = 1.0) -> None:
         """Stop workers and drain thread, and release resources."""
@@ -586,13 +526,13 @@ class VideoStreamBlurFace:
         if self.p_cap and self.p_cap.is_alive():
             self.p_cap.join(timeout=join_timeout)
             if self.p_cap.is_alive():
-                logger.warning(f"[{RUN_ID}][main] CaptureProc did not exit in time; terminating.")
+                logger.warning("[main] CaptureProc did not exit in time; terminating.")
                 self.p_cap.terminate()
 
         if self.p_anon and self.p_anon.is_alive():
             self.p_anon.join(timeout=join_timeout)
             if self.p_anon.is_alive():
-                logger.warning(f"[{RUN_ID}][main] AnonProc did not exit in time; terminating.")
+                logger.warning("[main] AnonProc did not exit in time; terminating.")
                 self.p_anon.terminate()
 
         # Join drain thread
@@ -605,7 +545,7 @@ class VideoStreamBlurFace:
         except Exception:
             pass
 
-        logger.info(f"[{RUN_ID}][main] VideoStream stopped.")
+        logger.info("[main] VideoStream stopped.")
 
     # ----------------------------
     # Internals
@@ -621,44 +561,32 @@ class VideoStreamBlurFace:
         with self._cb_lock:
             callbacks = tuple(self.frame_callbacks)
         for cb in callbacks:
-            t_cb0 = time.perf_counter()  # <<< ADDED
             try:
                 result = cb(b64_jpeg)
                 if inspect.isawaitable(result):
                     asyncio.run_coroutine_threadsafe(result, self.loop)
             except Exception as e:
                 logger.error("Frame callback raised: %s", e, exc_info=True)
-            finally:
-                cb_ms = (time.perf_counter() - t_cb0) * 1000.0  # <<< ADDED
-                logger.debug(
-                    f"[{RUN_ID}][main] callback={getattr(cb,'__name__',str(cb))} took {cb_ms:.2f} ms"
-                )  # <<< ADDED
 
     def _dispatch_raw(self, frame_bgr: np.ndarray) -> None:
         """Dispatch a raw numpy frame to raw callbacks (no encode/base64)."""
         with self._cb_lock:
             raw_cbs = tuple(self.raw_callbacks)
         for cb in raw_cbs:
-            t_cb0 = time.perf_counter()  # <<< ADDED
             try:
                 cb(frame_bgr)
             except Exception as e:
                 logger.error("Raw frame callback raised: %s", e, exc_info=True)
-            finally:
-                cb_ms = (time.perf_counter() - t_cb0) * 1000.0  # <<< ADDED
-                logger.debug(
-                    f"[{RUN_ID}][main] raw-callback={getattr(cb,'__name__',str(cb))} took {cb_ms:.2f} ms"
-                )  # <<< ADDED
 
+    # --- JPEG encoding helper (TurboJPEG preferred) ---
     def _encode_jpeg(self, frame_bgr) -> Optional[bytes]:
         """
         Encode BGR frame to JPEG bytes using TurboJPEG if available,
         else cv2.imencode fallback. Returns None on failure.
         """
-        t_enc0 = time.perf_counter()  # <<< ADDED
         try:
             if self._use_turbojpeg and self._jpeg is not None:
-                out = self._jpeg.encode(
+                return self._jpeg.encode(
                     frame_bgr,
                     quality=self._jpeg_quality,
                     pixel_format=TJPF.BGR,
@@ -670,16 +598,10 @@ class VideoStreamBlurFace:
                 )
                 if not ok:
                     return None
-                out = buf.tobytes()
+                return buf.tobytes()
         except Exception:
             logger.exception("[main] JPEG encode failed")
             return None
-        finally:
-            enc_ms = (time.perf_counter() - t_enc0) * 1000.0  # <<< ADDED
-            logger.debug(
-                f"[{RUN_ID}][main] encode_ms={enc_ms:.2f} (turbo={self._use_turbojpeg})"
-            )  # <<< ADDED
-        return out
 
     def _drain_loop(self) -> None:
         """
@@ -689,17 +611,10 @@ class VideoStreamBlurFace:
         - JPEG encode + base64 for standard callbacks
         - Pace only when ahead (avoid extra delay when behind)
         """
-        frame_time = 1.0 / max(1, self.fps)
-        last = time.perf_counter()
+        # frame_time = 1.0 / max(1, self.fps)
+        # last = time.perf_counter()
 
-        # Delivered FPS and latency accumulators
-        fps_frames = 0                                   # <<< ADDED
-        fps_t0 = time.time()                             # <<< ADDED
-        frames_drain = 0                                 # <<< ADDED
-        sum_e2e_ms = 0.0                                 # <<< ADDED
-        sum_stale_ms = 0.0                               # <<< ADDED
-
-        logger.info(f"[{RUN_ID}][main] drain loop starting at ~{self.fps} FPS.")
+        logger.info("[main] drain loop starting at ~%d FPS.", self.fps)
         while self._running.value:
             # Pull at least one frame
             try:
@@ -708,17 +623,15 @@ class VideoStreamBlurFace:
                 continue
 
             if (ts, frame) == SENTINEL:
-                logger.info(f"[{RUN_ID}][main] drain loop received sentinel; exiting.")
+                logger.info("[main] drain loop received sentinel; exiting.")
                 break
 
             # Drain queue: keep the most recent frame, drop stale
-            drained = 0                                   # <<< ADDED
             while True:
                 try:
                     ts2, frame2 = self.q_proc.get_nowait()
-                    drained += 1                          # <<< ADDED
                     if (ts2, frame2) == SENTINEL:
-                        logger.info(f"[{RUN_ID}][main] drain got sentinel during drain; exiting.")
+                        logger.info("[main] drain got sentinel during drain; exiting.")
                         ts, frame = ts2, frame2
                         break
                     ts, frame = ts2, frame2
@@ -727,55 +640,22 @@ class VideoStreamBlurFace:
             if (ts, frame) == SENTINEL:
                 break
 
-            # How old when we start handling this frame?
-            staleness_ms = (time.time() - ts) * 1000.0    # <<< ADDED (use time.time to match ts)
-
-            # Raw dispatch first (no encode)
+            # Dispatch raw frame first (fast local preview, no encode)
             self._dispatch_raw(frame)
+            preview = cv2.resize(frame, (426, 240))
 
-            # JPEG encode + base64 dispatch
-            jpeg_bytes = self._encode_jpeg(frame)
+            # Encode & dispatch base64 JPEG for normal callbacks / WS
+            jpeg_bytes = self._encode_jpeg(preview)
             if jpeg_bytes is not None:
-                t_cb_all0 = time.perf_counter()           # <<< ADDED
                 self._dispatch(base64.b64encode(jpeg_bytes).decode("utf-8"))
-                cb_all_ms = (time.perf_counter() - t_cb_all0) * 1000.0  # <<< ADDED
             else:
                 logger.error("[main] JPEG encode failed; dropping frame.")
                 continue
 
-            # Delivered/output FPS (once per second)
-            fps_frames += 1                               # <<< ADDED
-            now = time.time()                             # <<< ADDED
-            if now - fps_t0 >= 1.0:                       # <<< ADDED
-                out_fps = fps_frames / (now - fps_t0)
-                logger.info(f"[{RUN_ID}][main][fps] output_fps={out_fps:.1f}")
-                fps_frames = 0
-                fps_t0 = now
-
-            # End-to-end latency: capture ts -> after callbacks now
-            e2e_ms = (time.time() - ts) * 1000.0          # <<< ADDED
-
-            # Accumulate and sample-log every 60 frames
-            frames_drain += 1                              # <<< ADDED
-            sum_e2e_ms += e2e_ms                           # <<< ADDED
-            sum_stale_ms += staleness_ms                   # <<< ADDED
-            if frames_drain % 60 == 0:                     # <<< ADDED
-                try:
-                    qsize = self.q_proc.qsize()
-                except Exception:
-                    qsize = -1
-                logger.info(
-                    f"[{RUN_ID}][main] e2e_avg_ms=%.1f stale_avg_ms=%.1f drained=%d qsize=%d last_cb_ms=%.1f",
-                    sum_e2e_ms / max(1, frames_drain),
-                    sum_stale_ms / max(1, frames_drain),
-                    drained,
-                    qsize,
-                    cb_all_ms,
-                )
-
-            # Optional pacing if you want an upper-FPS cap (keep disabled for lowest latency)
-            # now_perf = time.perf_counter()
-            # elapsed = now_perf - last
-            # if (time.time() - ts) < frame_time and elapsed < frame_time:   # <<< FIX if enabled
+            # Pace only if we're ahead (frame is fresh & loop was faster than frame_time)
+            # now = time.perf_counter()
+            # elapsed = now - last
+            # # If frame age is small and loop was faster than target, sleep a bit
+            # if (now - ts) < frame_time and elapsed < frame_time:
             #     time.sleep(frame_time - elapsed)
             # last = time.perf_counter()
