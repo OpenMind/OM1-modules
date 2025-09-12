@@ -318,6 +318,30 @@ class VideoStreamBlurFace:
       - Capture process → pushes (ts, frame_bgr) to q_raw
       - Anonymize process (optional) → pulls from q_raw, pixelates, pushes to q_proc
       - Drain thread (main process) → raw preview callbacks + JPEG/base64 callbacks
+    Parameters
+    ----------
+    frame_callbacks: Callback(s) receiving **base64 JPEG strings** per frame
+        (e.g., to send over WebSocket).
+    fps: Target output FPS.
+    resolution: Frame size `(width, height)` for capture.
+    jpeg_quality: JPEG quality (0–100) for encoded outputs.
+    device_index: Camera index (e.g., 0, 1) or platform path selector.
+    blur_enabled: Enable face anonymization (pixelation) if an engine is provided.
+    blur_conf: SCRFD detection confidence threshold.
+    scrfd_engine: Path to SCRFD TensorRT engine; if None, disables anonymization.
+    scrfd_size: SCRFD model input size (square).
+    scrfd_input: SCRFD engine input tensor name.
+    pixel_blocks: Pixelation block size (larger = coarser blur).
+    pixel_margin: Extra margin around face boxes (fraction of box size).
+    pixel_max_faces: Max faces to anonymize per frame.
+    pixel_noise: Stddev of Gaussian noise added to pixelated regions (0 = off).
+    draw_boxes: Draw detection boxes for debugging.
+    queue_size_raw: Max queued frames from capture→anonymize (use 1 to keep freshest).
+    queue_size_proc: Max queued frames from anonymize→main (use 1 to keep freshest).
+    buffer_frames: Desired capture buffer size (driver hint).
+    use_turbojpeg: Try TurboJPEG for faster/lower-CPU JPEG encoding.
+    raw_frame_callbacks: Callback(s) receiving **np.ndarray (BGR)** frames
+        per frame (already anonymized but not encoded). Ideal for local preview/recording. Optional.
     """
 
     def __init__(
@@ -661,21 +685,6 @@ class VideoStreamBlurFace:
                 logger.info("[main] drain loop received sentinel; exiting.")
                 break
 
-            # # Drain queue: keep the most recent frame, drop stale
-            # drained = 0
-            # while True:
-            #     try:
-            #         ts2, frame2 = self.q_proc.get_nowait()
-            #         drained += 1
-            #         if (ts2, frame2) == SENTINEL:
-            #             logger.info("[main] drain got sentinel during drain; exiting.")
-            #             ts, frame = ts2, frame2
-            #             break
-            #         ts, frame = ts2, frame2
-            #     except Empty:
-            #         break
-            # if (ts, frame) == SENTINEL:
-            #     break
 
             # Raw dispatch first (no encode)
             self._dispatch_raw(frame)
