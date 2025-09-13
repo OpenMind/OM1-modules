@@ -15,7 +15,8 @@ packages = [
 om1_tts = "om1_speech.audio.audio_output_stream:main"
 
 [tool.poetry.dependencies]
-python = ">=3.9"
+pycuda = { version = "2024.1.2", optional = true }
+python = ">=3.9,<4.0"
 pyaudio = "^0.2.13"
 numpy = "^2.0.2"
 websockets = "^13.0"
@@ -27,9 +28,12 @@ pyrealsense2 = {version = "2.55.1.6486", markers = "sys_platform == 'win32'", op
 pyrealsense2-macosx = {version = "^2.54.2", markers = "sys_platform == 'darwin'", optional = true}
 eclipse-zenoh = "^1.4.0"
 pycdr2 = "^1.0.0"
+torch = { url = "https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl", optional = true }
 
 [tool.poetry.extras]
 realsense = ["pyrealsense2", "pyrealsense2-macosx"]
+jetson61 = ["torch"]
+gpu = ["pycuda"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.0"
