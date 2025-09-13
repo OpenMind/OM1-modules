@@ -1,14 +1,3 @@
-# -*- coding: utf-8 -*-
-# om1_vlm/video/video_stream_blur_face.py
-"""
-Video capture + optional face anonymization (pixelation) pipeline.
-
-This module launches a two-process pipeline:
-- Capture process that reads frames and pushes them into a queue
-- Anonymization process (optional, TensorRT SCRFD) that pixelates faces
-A main-thread drain loop encodes frames to JPEG (base64) and dispatches to callbacks.
-"""
-
 import asyncio
 import base64
 import inspect
@@ -22,7 +11,7 @@ from queue import Empty, Full
 from typing import Callable, Iterable, List, Optional, Tuple
 
 import cv2
-import numpy as np  # for raw callbacks and resizing
+import numpy as np
 
 from om1_utils.logging import LoggingConfig, get_logging_config, setup_logging
 
@@ -36,15 +25,6 @@ from ..anonymizationSys.scrfd_trt_pixelate import (
 )
 from .video_utils import enumerate_video_devices
 
-# --- TurboJPEG (fast JPEG) ---
-try:
-    from turbojpeg import TJPF, TJSAMP, TurboJPEG
-
-    _HAVE_TURBOJPEG = True
-except Exception:
-    _HAVE_TURBOJPEG = False
-
-# --- CUDA for SCRFD TensorRT (optional) ---
 try:
     import pycuda.driver as cuda
 except ImportError:
@@ -339,7 +319,6 @@ class VideoStreamBlurFace:
     queue_size_raw: Max queued frames from capture→anonymize (use 1 to keep freshest).
     queue_size_proc: Max queued frames from anonymize→main (use 1 to keep freshest).
     buffer_frames: Desired capture buffer size (driver hint).
-    use_turbojpeg: Try TurboJPEG for faster/lower-CPU JPEG encoding.
     raw_frame_callbacks: Callback(s) receiving **np.ndarray (BGR)** frames
         per frame (already anonymized but not encoded). Ideal for local preview/recording. Optional.
     """
@@ -364,7 +343,6 @@ class VideoStreamBlurFace:
         queue_size_raw: int = 1,
         queue_size_proc: int = 1,
         buffer_frames: int = 1,
-        use_turbojpeg: bool = True,
         raw_frame_callbacks: Optional[Iterable[Callable[[np.ndarray], None]]] = None,
     ):
         self.fps = int(fps)
@@ -429,22 +407,6 @@ class VideoStreamBlurFace:
         self.draw_boxes = bool(draw_boxes)
         self.buffer_frames = int(buffer_frames)
 
-        # JPEG encoder (TurboJPEG preferred)
-        self._jpeg_quality = int(jpeg_quality)
-        self._use_turbojpeg = _HAVE_TURBOJPEG and bool(use_turbojpeg)
-        self._jpeg = None
-        self._tj_flags = 0
-        if self._use_turbojpeg:
-            try:
-                self._jpeg = TurboJPEG()
-                if hasattr(TurboJPEG, "FLAG_FASTDCT"):
-                    self._tj_flags |= getattr(TurboJPEG, "FLAG_FASTDCT")
-                if hasattr(TurboJPEG, "FLAG_FASTUPSAMPLE"):
-                    self._tj_flags |= getattr(TurboJPEG, "FLAG_FASTUPSAMPLE")
-            except Exception:
-                logger.warning("TurboJPEG load failed, falling back to cv2.imencode")
-                self._use_turbojpeg = False
-
         # Processes and control
         self.p_cap: Optional[mp.Process] = None
         self.p_anon: Optional[mp.Process] = None
@@ -464,7 +426,14 @@ class VideoStreamBlurFace:
                 logger.warning("Frame callback already registered")
 
     def register_raw_frame_callback(self, cb: Callable[[np.ndarray], None]) -> None:
-        """Register a per-frame raw (numpy BGR) callback."""
+        """
+        Register a per-frame raw (numpy BGR) callback.
+
+        Parameters
+        ----------
+        cb : Callable[[np.ndarray], None]
+            Callback function that takes a single argument: the current video frame in BGR order.
+        """
         if cb is None:
             logger.warning("Raw frame callback is None, not registering")
             return
@@ -476,7 +445,14 @@ class VideoStreamBlurFace:
                 logger.warning("Raw frame callback already registered")
 
     def unregister_frame_callback(self, cb: Callable[[str], None]) -> None:
-        """Unregister a previously added base64 JPEG callback."""
+        """
+        Unregister a previously added base64 JPEG callback.
+
+        Parameters
+        ----------
+        cb : Callable[[str], None]
+            The callback function to unregister.
+        """
         with self._cb_lock:
             try:
                 self.frame_callbacks.remove(cb)
@@ -485,7 +461,14 @@ class VideoStreamBlurFace:
                 logger.warning("Attempted to unregister a non-registered callback")
 
     def unregister_raw_frame_callback(self, cb: Callable[[np.ndarray], None]) -> None:
-        """Unregister a previously added raw frame callback."""
+        """
+        Unregister a previously added raw frame callback.
+
+        Parameters
+        ----------
+        cb : Callable[[np.ndarray], None]
+            The raw frame callback function to unregister.
+        """
         with self._cb_lock:
             try:
                 self.raw_callbacks.remove(cb)
@@ -494,7 +477,9 @@ class VideoStreamBlurFace:
                 logger.warning("Attempted to unregister a non-registered callback")
 
     def start(self) -> None:
-        """Start capture/anonymize worker processes and the drain thread."""
+        """
+        Start capture/anonymize worker processes and the drain thread.
+        """
         if self._running.value:
             logger.warning("[main] start() called but already running.")
             return
@@ -594,7 +579,9 @@ class VideoStreamBlurFace:
     # Internals
     # ----------------------------
     def _start_loop(self) -> None:
-        """Start the asyncio event loop in a dedicated thread."""
+        """
+        Start the asyncio event loop in a dedicated thread.
+        """
         asyncio.set_event_loop(self.loop)
         logger.debug("Starting background asyncio event loop.")
         self.loop.run_forever()
@@ -621,6 +608,7 @@ class VideoStreamBlurFace:
     def _dispatch_raw(self, frame_bgr: np.ndarray) -> None:
         """
         Dispatch a raw numpy frame to raw callbacks (no encode/base64).
+
         Parameters
         ----------
         frame_bgr : np.ndarray
@@ -634,37 +622,6 @@ class VideoStreamBlurFace:
             except Exception as e:
                 logger.error(f"[main] Raw frame callback raised: {e}", exc_info=True)
 
-    # --- JPEG encoding helper (TurboJPEG preferred) ---
-    def _encode_jpeg(self, frame_bgr) -> Optional[bytes]:
-        """
-        Encode BGR frame to JPEG bytes using TurboJPEG if available,
-        else cv2.imencode fallback. Returns None on failure.
-        Parameters
-        ----------
-        frame_bgr : np.ndarray
-            The frame to encode in BGR order
-        """
-        try:
-            if self._use_turbojpeg and self._jpeg is not None:
-                out = self._jpeg.encode(
-                    frame_bgr,
-                    quality=self._jpeg_quality,
-                    pixel_format=TJPF.BGR,
-                    jpeg_subsample=TJSAMP.SAMP_420,
-                    **({"flags": self._tj_flags} if self._tj_flags else {}),
-                )
-            else:
-                ok, buf = cv2.imencode(
-                    ".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality]
-                )
-                if not ok:
-                    return None
-                out = buf.tobytes()
-            return out
-        except Exception:
-            logger.exception("[main] JPEG encode failed")
-            return None
-
     def _drain_loop(self) -> None:
         """
         Main-process drain loop:
@@ -675,7 +632,6 @@ class VideoStreamBlurFace:
         """
 
         while self._running.value:
-            # Pull at least one frame
             try:
                 ts, frame = self.q_proc.get(timeout=max(0.005, 1.0 / max(1, self.fps)))
             except Empty:
@@ -685,13 +641,13 @@ class VideoStreamBlurFace:
                 logger.info("[main] drain loop received sentinel; exiting.")
                 break
 
-            # Raw dispatch first (no encode)
             self._dispatch_raw(frame)
 
-            # JPEG encode + base64 dispatch
-            jpeg_bytes = self._encode_jpeg(frame)
-            if jpeg_bytes is not None:
-                self._dispatch(base64.b64encode(jpeg_bytes).decode("utf-8"))
-            else:
-                logger.error("[main] JPEG encode failed; dropping frame.")
+            try:
+                _, buffer = cv2.imencode(".jpg", frame, self.encode_quality)
+                self._dispatch(base64.b64encode(buffer).decode("utf-8"))
+            except Exception as e:
+                logger.error(
+                    f"[main] error encoding/dispatching frame: {e}", exc_info=True
+                )
                 continue
