@@ -227,9 +227,6 @@ class AudioOutputStream:
                 ),
                 status_speaker=AudioStatus.STATUS_SPEAKER.ACTIVE.value,
                 sentence_to_speak=String(""),
-                sentence_counter=(
-                    self.audio_status.sentence_counter + 1 if self.audio_status else 0
-                ),
             )
 
             if self.pub:
@@ -269,9 +266,6 @@ class AudioOutputStream:
                 ),
                 status_speaker=AudioStatus.STATUS_SPEAKER.READY.value,
                 sentence_to_speak=String(""),
-                sentence_counter=(
-                    self.audio_status.sentence_counter + 1 if self.audio_status else 0
-                ),
             )
 
             if self.pub:

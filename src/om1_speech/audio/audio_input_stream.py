@@ -203,7 +203,6 @@ class AudioInputStream:
                         status_mic=self.audio_status.status_mic,
                         status_speaker=AudioStatus.STATUS_SPEAKER.ACTIVE.value,
                         sentence_to_speak=String(""),
-                        sentence_counter=self.audio_status.sentence_counter,
                     )
 
                     if self.pub:
@@ -219,7 +218,6 @@ class AudioInputStream:
                         status_mic=self.audio_status.status_mic,
                         status_speaker=AudioStatus.STATUS_SPEAKER.READY.value,
                         sentence_to_speak=String(""),
-                        sentence_counter=self.audio_status.sentence_counter,
                     )
 
                     if self.pub:
