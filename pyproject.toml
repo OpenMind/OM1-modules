@@ -8,7 +8,7 @@ packages = [
     { include = "om1_speech", from = "src" },
     { include = "om1_utils", from = "src" },
     { include = "om1_vlm", from = "src" },
-    { include = "zenoh_idl", from = "src" }
+    { include = "zenoh_msgs", from = "src" }
 ]
 
 [tool.poetry.scripts]
