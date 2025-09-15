@@ -22,7 +22,7 @@ numpy = "^2.0.2"
 websockets = "^13.0"
 opencv-python = "^4.5.0"
 requests = "^2.32.4"
-protobuf = "^5.29.3"
+protobuf = "^5.29.5"
 google = "^3.0.0"
 pyrealsense2 = {version = "2.55.1.6486", markers = "sys_platform == 'win32'", optional = true}
 pyrealsense2-macosx = {version = "^2.54.2", markers = "sys_platform == 'darwin'", optional = true}
