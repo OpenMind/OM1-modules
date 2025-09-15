@@ -13,7 +13,7 @@ from typing import Callable, Iterable, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from om1_utils.logging import LoggingConfig, get_logging_config, setup_logging
+from om1_utils import LoggingConfig, get_logging_config, setup_logging
 
 from ..anonymizationSys.scrfd_trt_pixelate import (
     CONF_THRES,

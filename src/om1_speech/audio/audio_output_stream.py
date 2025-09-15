@@ -10,10 +10,8 @@ from queue import Queue
 from typing import Callable, Dict, Optional
 
 import requests
-import zenoh
 
-from zenoh_idl.status_msgs import AudioStatus
-from zenoh_idl.std_msgs import String, prepare_header
+from zenoh_msgs import AudioStatus, String, open_zenoh_session, prepare_header
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
@@ -61,7 +59,7 @@ class AudioOutputStream:
         self.audio_status = None
 
         try:
-            self.session = zenoh.open(zenoh.Config())
+            self.session = open_zenoh_session()
             self.pub = self.session.declare_publisher(self.topic)
             self.session.declare_subscriber(self.topic, self.zenoh_audio_message)
         except Exception as e:
