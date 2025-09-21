@@ -49,12 +49,12 @@ class AudioRTSPInputStream:
 
     def __init__(
         self,
-        rate: Optional[int] = None,
+        rtsp_url: str = "rtsp://localhost:8554/live",
+        rate: int = 48000,
         chunk: Optional[int] = None,
         audio_data_callback: Optional[Callable] = None,
         audio_data_callbacks: Optional[List[Callable]] = None,
         language_code: Optional[str] = None,
-        rtsp_url: str = "rtsp://localhost:8554/live",
         remote_input: bool = False,
     ):
         self._rate = rate
