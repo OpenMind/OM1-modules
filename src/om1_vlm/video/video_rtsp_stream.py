@@ -79,7 +79,9 @@ class VideoRTSPStream:
         self.loop_thread.start()
 
     def _start_loop(self):
-        """Set and run the event loop forever in a dedicated thread."""
+        """
+        Set and run the event loop forever in a dedicated thread.
+        """
         asyncio.set_event_loop(self.loop)
         logger.debug("Starting background event loop for video streaming.")
         self.loop.run_forever()
@@ -88,7 +90,7 @@ class VideoRTSPStream:
         """
         Main video capture and processing loop.
 
-        Captures frames from the camera, encodes them to base64,
+        Captures frames from the RTMP stream, encodes them to base64,
         and sends them through the callback if registered.
 
         Raises
