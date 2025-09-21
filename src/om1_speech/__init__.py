@@ -1,4 +1,4 @@
-from .audio import AudioInputStream, AudioOutputStream
+from .audio import AudioInputStream, AudioOutputStream, AudioRTSPInputStream
 from .riva import ASRProcessor, AudioDeviceInput, AudioStreamInput, TTSProcessor
 
 __all__ = [
@@ -7,5 +7,6 @@ __all__ = [
     "AudioDeviceInput",
     "AudioStreamInput",
     "AudioInputStream",
+    "AudioRTSPInputStream",
     "AudioOutputStream",
 ]
