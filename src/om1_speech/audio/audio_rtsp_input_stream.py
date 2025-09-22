@@ -94,6 +94,9 @@ class AudioRTSPInputStream:
         # Audio processing thread
         self._audio_thread: Optional[threading.Thread] = None
 
+        # Audio callback thread
+        self._audio_callback_thread: Optional[threading.Thread] = None
+
         # Lock for thread safety
         self._lock = threading.Lock()
 
@@ -236,6 +239,7 @@ class AudioRTSPInputStream:
                 logger.info("Starting RTSP audio capture")
 
             self._start_audio_thread()
+            self._start_audio_callback_thread()
 
             logger.info(f"Started RTSP audio stream: {self._rtsp_url}")
 
@@ -257,6 +261,22 @@ class AudioRTSPInputStream:
             )
             self._audio_thread.start()
             logger.info("Started RTSP audio processing thread")
+
+    def _start_audio_callback_thread(self):
+        """
+        Starts the audio callback processing thread if it's not already running.
+
+        The thread runs as a daemon to ensure it terminates when the main program exits.
+        """
+        if (
+            self._audio_callback_thread is None
+            or not self._audio_callback_thread.is_alive()
+        ):
+            self._audio_callback_thread = threading.Thread(
+                target=self.on_audio, daemon=True
+            )
+            self._audio_callback_thread.start()
+            logger.info("Started audio callback processing thread")
 
     def _rtsp_audio_loop(self):
         """
@@ -291,7 +311,7 @@ class AudioRTSPInputStream:
                         break
 
                     frame_data = self._process_rtsp_frame(frame)
-                    if frame_data:
+                    if frame_data is not None and len(frame_data) > 0:
                         audio_buffer = np.concatenate([audio_buffer, frame_data])
 
                         if len(audio_buffer) >= self._chunk:
@@ -314,9 +334,9 @@ class AudioRTSPInputStream:
         if self._rtsp_container:
             self._rtsp_container.close()
 
-    def _process_rtsp_frame(self, frame: av.AudioFrame) -> Optional[bytes]:
+    def _process_rtsp_frame(self, frame: av.AudioFrame) -> Optional[np.ndarray]:
         """
-        Process RTSP audio frame and convert to bytes.
+        Process RTSP audio frame and convert to numpy array.
 
         Parameters
         ----------
@@ -325,8 +345,8 @@ class AudioRTSPInputStream:
 
         Returns
         -------
-        Optional[bytes]
-            Processed audio data in bytes, or None if processing fails
+        Optional[np.ndarray]
+            Processed audio data as numpy array, or None if processing fails
         """
         try:
             frame = self.resampler.resample(frame)[0]
@@ -449,6 +469,10 @@ class AudioRTSPInputStream:
         # Clean up the audio processing thread
         if self._audio_thread and self._audio_thread.is_alive():
             self._audio_thread.join(timeout=1.0)
+
+        # Clean up the audio callback thread
+        if self._audio_callback_thread and self._audio_callback_thread.is_alive():
+            self._audio_callback_thread.join(timeout=1.0)
 
         self._buff.put(None)
         logger.info("Stopped RTSP audio stream")
