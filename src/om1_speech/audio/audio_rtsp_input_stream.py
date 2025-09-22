@@ -31,7 +31,7 @@ class AudioRTSPInputStream:
     ----------
     rate : int, optional
         The sampling rate in Hz for audio capture. If None, uses the rate from RTSP stream.
-        (default: None)
+        (default: 16000)
     chunk : int, optional
         The size of each audio chunk in frames. If None, automatically calculates an optimal chunk size
         based on the sample rate (approximately 200ms of audio).
@@ -50,7 +50,7 @@ class AudioRTSPInputStream:
     def __init__(
         self,
         rtsp_url: str = "rtsp://localhost:8554/live",
-        rate: int = 48000,
+        rate: int = 16000,
         chunk: Optional[int] = None,
         audio_data_callback: Optional[Callable] = None,
         audio_data_callbacks: Optional[List[Callable]] = None,
@@ -58,7 +58,6 @@ class AudioRTSPInputStream:
         remote_input: bool = False,
     ):
         self._rate = rate
-        self._chunk = chunk
 
         # Determine RTSP URL from device parameters
         self._rtsp_url = rtsp_url
@@ -80,6 +79,13 @@ class AudioRTSPInputStream:
 
         # Thread-safe buffer for audio data
         self._buff: queue.Queue[Optional[bytes]] = queue.Queue()
+
+        # Resampler
+        self.resampler = av.audio.resampler.AudioResampler(
+            format="s16",
+            layout="mono",
+            rate=self._rate,
+        )
 
         # RTSP container and stream
         self._rtsp_container: Optional[av.container.InputContainer] = None
@@ -114,53 +120,15 @@ class AudioRTSPInputStream:
             )
             return
 
-        # Initialize RTSP connection
-        logger.info(f"Initializing RTSP audio input: {self._rtsp_url}")
-        try:
-            self._init_rtsp_stream()
-        except Exception as e:
-            logger.error(f"Error initializing RTSP audio input: {e}")
-            raise
-
-    def _init_rtsp_stream(self):
-        """Initialize and test RTSP audio stream connection."""
-        try:
-            # Test RTSP connection to get stream properties
-            test_container = av.open(self._rtsp_url, options={"rtsp_transport": "tcp"})
-
-            if not test_container.streams.audio:
-                raise ValueError(f"No audio stream found in RTSP URL: {self._rtsp_url}")
-
-            audio_stream = test_container.streams.audio[0]
-
-            # Set rate from RTSP stream if not specified
-            if self._rate is None:
-                self._rate = audio_stream.sample_rate
-                logger.info(f"Using RTSP stream sample rate: {self._rate} Hz")
-            else:
-                logger.info(f"Using specified sample rate: {self._rate} Hz")
-
-            # Calculate chunk size if not specified
-            if self._chunk is None:
-                self._chunk = int(self._rate * 0.2)  # ~200ms of audio
-                logger.info(
-                    f"Using calculated chunk size: {self._chunk} frames (~200ms)"
-                )
-            else:
-                chunk_duration_ms = (self._chunk / self._rate) * 1000
-                logger.info(
-                    f"Using specified chunk size: {self._chunk} frames (~{chunk_duration_ms:.1f}ms)"
-                )
-
-            logger.info(f"RTSP Audio codec: {audio_stream.codec_context.name}")
-            logger.info(f"RTSP Sample rate: {audio_stream.sample_rate}")
-            logger.info(f"RTSP Channels: {audio_stream.channels}")
-
-            test_container.close()
-
-        except Exception as e:
-            logger.error(f"Error initializing RTSP audio stream: {e}")
-            raise
+        if chunk is None:
+            self._chunk = int(rate * 0.5)
+            logger.info(f"Auto-calculated chunk size: {self._chunk} frames")
+        else:
+            self._chunk = chunk
+            chunk_duration_ms = (self._chunk / self._rate) * 1000
+            logger.info(
+                f"Using specified chunk size: {self._chunk} frames ({chunk_duration_ms:.2f} ms)"
+            )
 
     def zenoh_audio_message(self, data: str):
         """
@@ -296,33 +264,42 @@ class AudioRTSPInputStream:
 
         This replaces the PyAudio callback mechanism with RTSP frame processing.
         """
-        reconnect_delay = 1.0
-        max_reconnect_delay = 30.0
+        reconnect_delay = 2.0
 
         while self.running:
             try:
                 logger.info(f"Opening RTSP stream: {self._rtsp_url}")
+
                 self._rtsp_container = av.open(
                     self._rtsp_url, options={"rtsp_transport": "tcp"}
                 )
 
                 if not self._rtsp_container.streams.audio:
-                    logger.error("No audio stream found in RTSP")
+                    logger.error(
+                        f"No audio stream found in RTSP. Retrying in {reconnect_delay} seconds..."
+                    )
                     time.sleep(reconnect_delay)
-                    reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
                     continue
 
                 self._rtsp_audio_stream = self._rtsp_container.streams.audio[0]
                 logger.info("RTSP audio stream connected successfully")
-                reconnect_delay = 1.0
+
+                audio_buffer = np.array([], dtype=np.int16)
 
                 for frame in self._rtsp_container.decode(self._rtsp_audio_stream):
                     if not self.running:
                         break
 
-                    audio_bytes = self._process_rtsp_frame(frame)
-                    if audio_bytes:
-                        self._fill_buffer(audio_bytes)
+                    frame_data = self._process_rtsp_frame(frame)
+                    if frame_data:
+                        audio_buffer = np.concatenate([audio_buffer, frame_data])
+
+                        if len(audio_buffer) >= self._chunk:
+                            chunk_data = audio_buffer[: self._chunk]
+                            audio_buffer = audio_buffer[self._chunk :]
+
+                            pcm = chunk_data.tobytes()
+                            self._fill_buffer(pcm)
 
             except Exception as e:
                 logger.error(f"RTSP audio error: {e}")
@@ -333,12 +310,11 @@ class AudioRTSPInputStream:
                 if self.running:
                     logger.info(f"Reconnecting in {reconnect_delay} seconds...")
                     time.sleep(reconnect_delay)
-                    reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
 
         if self._rtsp_container:
             self._rtsp_container.close()
 
-    def _process_rtsp_frame(self, frame) -> Optional[bytes]:
+    def _process_rtsp_frame(self, frame: av.AudioFrame) -> Optional[bytes]:
         """
         Process RTSP audio frame and convert to bytes.
 
@@ -350,28 +326,12 @@ class AudioRTSPInputStream:
         Returns
         -------
         Optional[bytes]
-            Processed audio data as bytes, or None if processing fails
+            Processed audio data in bytes, or None if processing fails
         """
         try:
-            audio_array = frame.to_ndarray()
-
-            if len(audio_array.shape) > 1:
-                # If stereo, take first channel or mix to mono
-                if audio_array.shape[0] == 2:
-                    # Mix stereo to mono
-                    audio_array = np.mean(audio_array, axis=0)
-                else:
-                    audio_array = audio_array[0]
-
-            if audio_array.dtype != np.int16:
-                if audio_array.dtype in [np.float32, np.float64]:
-                    audio_array = np.clip(audio_array, -1.0, 1.0)
-                    audio_array = (audio_array * 32767).astype(np.int16)
-                else:
-                    audio_array = audio_array.astype(np.int16)
-
-            return audio_array.tobytes()
-
+            frame = self.resampler.resample(frame)[0]
+            frame_data = frame.to_ndarray().astype(np.int16).flatten()
+            return frame_data
         except Exception as e:
             logger.error(f"Error processing RTSP frame: {e}")
             return None
