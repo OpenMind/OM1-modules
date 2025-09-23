@@ -69,14 +69,11 @@ class Client:
     def _send_messages(self):
         """
         Internal method to handle sending messages through the WebSocket connection.
-
-        Continuously processes messages from the message queue and sends them through
-        the WebSocket connection. Runs in a separate thread.
         """
         while self.running:
             try:
+                message = self.message_queue.get()
                 if self.connected and self.websocket:
-                    message = self.message_queue.get_nowait()
                     try:
                         self.websocket.send(message)
                         formatted_msg = self.format_message(message)
@@ -84,6 +81,8 @@ class Client:
                     except Exception as e:
                         logger.error(f"Failed to send message: {e}")
                         self.message_queue.put(message)
+                else:
+                    self.message_queue.put(message)
             except Empty:
                 continue
             except Exception as e:
