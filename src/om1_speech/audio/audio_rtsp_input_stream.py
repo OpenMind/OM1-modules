@@ -11,7 +11,7 @@ from typing import Callable, Dict, Generator, List, Optional, Union
 import av
 import numpy as np
 
-from om1_utils import logging_config, setup_logging
+from om1_utils import LoggingConfig, get_logging_config, setup_logging
 from zenoh_msgs import AudioStatus, String, open_zenoh_session, prepare_header
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
@@ -24,6 +24,7 @@ def rtsp_audio_processor(
     chunk: int,
     audio_data_queue: mp.Queue,
     control_queue: mp.Queue,
+    logging_config: Optional[LoggingConfig] = None,
 ):
     """
     Process RTSP audio stream and put audio data into a multiprocessing queue.
@@ -333,6 +334,7 @@ class AudioRTSPInputStream:
                     self._chunk,
                     self._buff,
                     self._control_queue,
+                    get_logging_config(),
                 ),
             )
             self._rtsp_audio_processor_thread.start()
