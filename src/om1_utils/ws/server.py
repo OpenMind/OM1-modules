@@ -32,11 +32,11 @@ class Server:
     port : int, optional
         The port number to listen on, by default 6789
     health_check_port : int, optional
-        The port for the health check server, by default 8888
+        The port for the health check server, by default 9999
     """
 
     def __init__(
-        self, host: str = "localhost", port: int = 6789, health_check_port: int = 8888
+        self, host: str = "localhost", port: int = 6789, health_check_port: int = 9999
     ):
         self.host = host
         self.port = port
