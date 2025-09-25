@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import pycuda.driver as cuda
 import tensorrt as trt
-from face_recog_stream.trt_base import TRTModule
+from .trt_base import TRTModule
 
 
 def distance2bbox(points: np.ndarray, distance: np.ndarray) -> np.ndarray:

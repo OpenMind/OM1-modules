@@ -4,7 +4,6 @@ import glob
 import os.path as osp
 from typing import List
 
-# --- add to utils.py (文件末尾即可) ---
 import numpy as np
 
 
