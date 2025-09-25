@@ -24,10 +24,10 @@ python -m om1_vlm.anonymizationSys.face_recog_stream.run    --scrfd-engine "/hom
 from __future__ import annotations
 
 import argparse
+import logging
 import signal
 import time
 from typing import List, Optional
-import logging
 
 import cv2
 import numpy as np
@@ -39,13 +39,13 @@ from .arcface import TRTArcFace, warp_face_by_5p
 from .draw import draw_overlays
 from .gallery import build_gallery_embeddings
 from .io import (
+    AsyncVideoWriter,
     build_cam_capture,
     build_file_writer,
     build_gst_capture,
     open_nvenc_rtmp_writer,
-    safe_read,
     reopen_capture,
-    AsyncVideoWriter,
+    safe_read,
 )
 from .scrfd import TRTSCRFD
 from .utils import infer_arc_batched, pick_topk_indices
@@ -357,7 +357,9 @@ def main() -> None:
                             crops.append(crop)
 
                         if crops:
-                            feats = infer_arc_batched(arc, crops, max_bs=args.recog_topk)  # type: ignore[arg-type]
+                            feats = infer_arc_batched(
+                                arc, crops, max_bs=args.recog_topk
+                            )  # type: ignore[arg-type]
                             S = feats @ gal_feats.T
                             best_j = np.argmax(S, axis=1)
                             best_v = S[np.arange(S.shape[0]), best_j]

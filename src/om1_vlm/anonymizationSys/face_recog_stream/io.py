@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import re
-import time
-import threading
-import queue
-from typing import Callable, Optional, Tuple, TYPE_CHECKING
 import logging
+import queue
+import re
+import threading
+import time
+from typing import TYPE_CHECKING, Callable, Optional, Tuple
+
 import cv2
 
 logging.basicConfig(level=logging.INFO)

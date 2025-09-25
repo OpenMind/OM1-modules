@@ -7,10 +7,7 @@ from .video_utils import enumerate_video_devices
 __all__ = [
     "enumerate_video_devices",
     "VideoStream",
-<<<<<<< HEAD
-=======
     "VideoRTSPStream",
->>>>>>> origin/main
     "VideoStreamBlurFace",
     "GazeboVideoStream",
 ]
