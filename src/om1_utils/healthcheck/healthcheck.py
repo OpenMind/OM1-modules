@@ -32,10 +32,10 @@ class HealthCheckServer:
     Parameters
     ----------
     port : int, optional
-        The port to listen on, by default 8888
+        The port to listen on, by default 9999
     """
 
-    def __init__(self, port: int = 8888):
+    def __init__(self, port: int = 9999):
         self.port = port
         self.server = None
         self.server_thread = None

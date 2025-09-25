@@ -1,68 +1,157 @@
-# Description: Audio stream class for capturing audio from a microphone
-# A partial of code comes from https://github.com/nvidia-riva/python-clients/blob/main/riva/client/audio_io.py
-
 import base64
 import json
 import logging
+import multiprocessing as mp
 import queue
 import threading
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
+import time
+from queue import Empty, Full
+from typing import Callable, Dict, Generator, List, Optional, Union
 
-import pyaudio
+import av
+import numpy as np
 
+from om1_utils import LoggingConfig, get_logging_config, setup_logging
 from zenoh_msgs import AudioStatus, String, open_zenoh_session, prepare_header
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
 
 
-class AudioInputStream:
+def rtsp_audio_processor(
+    rtsp_url: str,
+    rate: int,
+    chunk: int,
+    audio_data_queue: mp.Queue,
+    control_queue: mp.Queue,
+    logging_config: Optional[LoggingConfig] = None,
+):
     """
-    A class for capturing and managing real-time audio input from a microphone.
+    Process RTSP audio stream and put audio data into a multiprocessing queue.
 
-    This class provides functionality to capture audio data from a specified or default
-    microphone device, process it in chunks, and make it available through a generator
-    or callback mechanism. It supports Text-to-Speech (TTS) integration by temporarily
+    This function runs in a separate process to handle RTSP audio streaming,
+    resampling, and chunking. It puts the processed audio data into a
+    multiprocessing queue for consumption by other processes or threads.
+
+    Parameters
+    ----------
+    rtsp_url : str
+        The RTSP URL of the audio stream
+    rate : int
+        The sampling rate in Hz for audio capture
+    chunk : int
+        The size of each audio chunk in frames
+    audio_data_queue : mp.Queue
+        A multiprocessing queue to put audio data chunks.
+    control_queue : mp.Queue
+        A multiprocessing queue to receive control commands (e.g., stop).
+    """
+    setup_logging("rtsp_audio_processor", logging_config=logging_config)
+
+    resampler = av.audio.resampler.AudioResampler(
+        format="s16",
+        layout="mono",
+        rate=rate,
+    )
+
+    running = True
+    while running:
+        try:
+            cmd = control_queue.get_nowait()
+            if cmd == "STOP":
+                running = False
+                break
+        except Empty:
+            pass
+
+        try:
+            rtsp_container = av.open(rtsp_url, options={"rtsp_transport": "tcp"})
+
+            if not rtsp_container.streams.audio:
+                logging.error("No audio stream found in RTSP. Retrying...")
+                time.sleep(2.0)
+                continue
+
+            rtsp_audio_stream = rtsp_container.streams.audio[0]
+            logging.info("RTSP audio stream connected successfully")
+
+            audio_buffer = np.array([], dtype=np.int16)
+            for frame in rtsp_container.decode(rtsp_audio_stream):
+                if not running:
+                    break
+
+                frame = resampler.resample(frame)[0]
+                frame_data = frame.to_ndarray().astype(np.int16).flatten()
+                audio_buffer = np.concatenate([audio_buffer, frame_data])
+
+                if len(audio_buffer) >= chunk:
+                    chunk_data = audio_buffer[:chunk]
+                    audio_buffer = audio_buffer[chunk:]
+
+                    pcm = chunk_data.tobytes()
+                    try:
+                        audio_data_queue.put(pcm, timeout=1.0)
+                    except Full:
+                        logging.warning("Audio data queue is full, dropping chunk")
+
+        except Exception as e:
+            logging.error(f"RTSP audio error: {e}")
+            if rtsp_container:
+                rtsp_container.close()
+                rtsp_container = None
+
+            if running:
+                logging.info("Reconnecting in 2 seconds...")
+                time.sleep(2.0)
+
+        finally:
+            if rtsp_container:
+                rtsp_container.close()
+                rtsp_container = None
+
+        time.sleep(0.01)
+
+
+class AudioRTSPInputStream:
+    """
+    A class for capturing and managing real-time audio input from RTSP streams.
+
+    This class provides functionality to capture audio data from RTSP streams,
+    process it in chunks, and make it available through a generator or callback
+    mechanism. It supports Text-to-Speech (TTS) integration by temporarily
     suspending audio capture during TTS playback.
 
     Parameters
     ----------
     rate : int, optional
-        The sampling rate in Hz for audio capture. If None, uses the default rate of the selected device.
-        (default: None)
+        The sampling rate in Hz for audio capture. If None, uses the rate from RTSP stream.
+        (default: 16000)
     chunk : int, optional
         The size of each audio chunk in frames. If None, automatically calculates an optimal chunk size
-        based on the sample rate (approximately 100ms of audio).
-        (default: None)
-    device : Optional[Union[str, int, float, Any]], optional
-        The input device identifier. Can be device index or name. If None,
-        uses system default input device (default: None)
-    device_name: str, optional
-        The input device name. If None, uses the first available input device.
+        based on the sample rate (approximately 200ms of audio).
         (default: None)
     audio_data_callback : Optional[Callable], optional
         A callback function that receives audio data chunks (default: None)
     language_code: str, optional
         The language for the ASR to listen. (default: en-US)
-    remote_input : bool, optional
-        If True, indicates that the audio input is from a remote source.
+    rtsp_url : str, optional
+        The RTSP URL of the audio stream. If None, uses device or device_name to determine the URL.
+        (default: "rtsp://localhost:8554/live")
     """
 
     def __init__(
         self,
-        rate: Optional[int] = None,
+        rtsp_url: str = "rtsp://localhost:8554/live",
+        rate: int = 16000,
         chunk: Optional[int] = None,
-        device: Optional[Union[str, int, float, Any]] = None,
-        device_name: str = None,
         audio_data_callback: Optional[Callable] = None,
         audio_data_callbacks: Optional[List[Callable]] = None,
         language_code: Optional[str] = None,
-        remote_input: bool = False,
     ):
         self._rate = rate
-        self._chunk = chunk
-        self._device = device
-        self._device_name = device_name
+
+        # Determine RTSP URL from device parameters
+        self._rtsp_url = rtsp_url
 
         # Determine language code
         if language_code is None:
@@ -80,14 +169,14 @@ class AudioInputStream:
         self._is_tts_active: bool = False
 
         # Thread-safe buffer for audio data
-        self._buff: queue.Queue[Optional[bytes]] = queue.Queue()
-
-        # audio interface and stream
-        self._audio_interface: pyaudio.PyAudio = pyaudio.PyAudio()
-        self._audio_stream: Optional[pyaudio.Stream] = None
+        self._buff = mp.Queue()
+        self._control_queue = mp.Queue()
 
         # Audio processing thread
-        self._audio_thread: Optional[threading.Thread] = None
+        self._rtsp_audio_processor_thread: Optional[threading.Thread] = None
+
+        # Audio callback thread
+        self._audio_callback_thread: Optional[threading.Thread] = None
 
         # Lock for thread safety
         self._lock = threading.Lock()
@@ -108,81 +197,15 @@ class AudioInputStream:
 
         self.running: bool = True
 
-        self.remote_input = remote_input
-        if self.remote_input:
-            logger.info("Remote input is enabled, skipping audio input initialization")
-            return
-
-        if self._device is not None and self._device_name is not None:
-            raise ValueError("Only one of device or device_name can be specified")
-
-        try:
-            input_device = None
-            device_count = self._audio_interface.get_device_count()
-            logger.info(f"Found {device_count} audio devices")
-
-            if self._device is not None:
-                input_device = self._audio_interface.get_device_info_by_index(
-                    self._device
-                )
-                logger.info(
-                    f"Selected input device: {input_device['name']} ({self._device})"
-                )
-                if input_device["maxInputChannels"] == 0:
-                    logger.warning(
-                        f"Selected input device does not advertize input channels: {input_device['name']} ({self._device})"
-                    )
-            elif self._device_name is not None:
-                available_devices = []
-                for i in range(device_count):
-                    device_info = self._audio_interface.get_device_info_by_index(i)
-                    device_name = device_info["name"]
-                    available_devices.append({"name": device_name, "index": i})
-                    if self._device_name.lower() in device_name.lower():
-                        input_device = device_info
-                        self._device = i
-                        break
-                if input_device is None:
-                    raise ValueError(
-                        f"Input device '{self._device_name}' not found. Available devices: {available_devices}"
-                    )
-            else:
-                input_device = self._audio_interface.get_default_input_device_info()
-                self._device = input_device["index"]
-                logger.info(
-                    f"Default input device: {input_device['name']} ({self._device})"
-                )
-
-            if input_device is None:
-                raise ValueError("No input device found")
-
+        if chunk is None:
+            self._chunk = int(rate * 0.5)
+            logger.info(f"Auto-calculated chunk size: {self._chunk} frames")
+        else:
+            self._chunk = chunk
+            chunk_duration_ms = (self._chunk / self._rate) * 1000
             logger.info(
-                f"Selected input device: {input_device['name']} ({self._device})"
+                f"Using specified chunk size: {self._chunk} frames ({chunk_duration_ms:.2f} ms)"
             )
-
-            if rate is None:
-                self._rate = int(input_device.get("defaultSampleRate", 16000))
-                logger.info(f"Using device default sample rate: {self._rate} Hz")
-            else:
-                self._rate = rate
-                logger.info(f"Using specified sample rate: {self._rate} Hz")
-
-            if chunk is None:
-                self._chunk = int(self._rate * 0.2)  # ~200ms of audio
-                logger.info(
-                    f"Using calculated chunk size: {self._chunk} frames (~200ms)"
-                )
-            else:
-                self._chunk = chunk
-                chunk_duration_ms = (self._chunk / self._rate) * 1000
-                logger.info(
-                    f"Using specified chunk size: {self._chunk} frames (~{chunk_duration_ms:.1f}ms)"
-                )
-
-        except Exception as e:
-            logger.error(f"Error initializing audio input: {e}")
-            self._audio_interface.terminate()
-            raise
 
     def zenoh_audio_message(self, data: str):
         """
@@ -262,12 +285,11 @@ class AudioInputStream:
         logger.warning("Audio data callback already registered")
         return
 
-    def start(self) -> "AudioInputStream":
+    def start(self) -> "AudioRTSPInputStream":
         """
         Initializes and starts the audio capture stream.
 
-        This method sets up the PyAudio interface, configures the input device,
-        and starts the audio processing thread.
+        This method starts the RTSP audio processing thread.
 
         Returns
         -------
@@ -277,83 +299,81 @@ class AudioInputStream:
         Raises
         ------
         Exception
-            If there are errors initializing the audio interface or opening the stream
+            If there are errors starting the RTSP stream
         """
         if not self.running:
             return self
 
         try:
-            if not self.remote_input:
-                logger.info("Remote input is disabled, initializing audio input stream")
-                self._audio_stream = self._audio_interface.open(
-                    format=pyaudio.paInt16,
-                    input_device_index=self._device,
-                    channels=1,
-                    rate=self._rate,
-                    input=True,
-                    frames_per_buffer=self._chunk,
-                    stream_callback=self._fill_buffer,
-                )
+            self._start_rtsp_audio_processor_thread()
+            self._start_audio_callback_thread()
 
-            # Start the audio processing thread
-            self._start_audio_thread()
-
-            logger.info(f"Started audio stream with device {self._device}")
+            logger.info(f"Started RTSP audio stream: {self._rtsp_url}")
 
         except Exception as e:
-            logger.error(f"Error opening audio stream: {e}")
-            self._audio_interface.terminate()
+            logger.error(f"Error starting RTSP audio stream: {e}")
             raise
 
         return self
 
-    def _start_audio_thread(self):
+    def _start_rtsp_audio_processor_thread(self):
         """
         Starts the audio processing thread if it's not already running.
 
         The thread runs as a daemon to ensure it terminates when the main program exits.
         """
-        if self._audio_thread is None or not self._audio_thread.is_alive():
-            self._audio_thread = threading.Thread(target=self.on_audio, daemon=True)
-            self._audio_thread.start()
-            logger.info("Started audio processing thread")
+        if (
+            self._rtsp_audio_processor_thread is None
+            or not self._rtsp_audio_processor_thread.is_alive()
+        ):
+            self._rtsp_audio_processor_thread = mp.Process(
+                target=rtsp_audio_processor,
+                args=(
+                    self._rtsp_url,
+                    self._rate,
+                    self._chunk,
+                    self._buff,
+                    self._control_queue,
+                    get_logging_config(),
+                ),
+            )
+            self._rtsp_audio_processor_thread.start()
+            logger.info("Started RTSP audio processing thread")
 
-    def _fill_buffer(
-        self, in_data: bytes, frame_count: int, time_info: dict, status_flags: int
-    ) -> Tuple[None, int]:
+    def _start_audio_callback_thread(self):
         """
-        Callback function for the PyAudio stream to fill the audio buffer.
+        Starts the audio callback processing thread if it's not already running.
 
-        This method is called by PyAudio when new audio data is available.
-        It adds the data to the buffer queue if TTS is not active.
+        The thread runs as a daemon to ensure it terminates when the main program exits.
+        """
+        if (
+            self._audio_callback_thread is None
+            or not self._audio_callback_thread.is_alive()
+        ):
+            self._audio_callback_thread = threading.Thread(
+                target=self.on_audio, daemon=True
+            )
+            self._audio_callback_thread.start()
+            logger.info("Started audio callback processing thread")
+
+    def _fill_buffer(self, in_data: bytes):
+        """
+        Fill the audio buffer with processed RTSP data.
+
+        This replaces the PyAudio stream callback mechanism.
 
         Parameters
         ----------
         in_data : bytes
-            The captured audio data
-        frame_count : int
-            Number of frames in the audio data
-        time_info : dict
-            Timing information from PyAudio
-        status_flags : int
-            Status flags from PyAudio
-
-        Returns
-        -------
-        Tuple[None, int]
-            A tuple containing None and pyaudio.paContinue
+            The captured audio data from RTSP stream
         """
         with self._lock:
             if not self._is_tts_active:
                 self._buff.put(in_data)
-        return None, pyaudio.paContinue
 
     def fill_buffer_remote(self, data: str):
         """
         Callback function for remote audio data to fill the audio buffer.
-
-        This method is called when remote audio data is received. It adds the
-        data to the buffer queue if TTS is not active.
 
         Parameters
         ----------
@@ -389,8 +409,8 @@ class AudioInputStream:
 
         Yields
         ------
-        bytes
-            Combined audio data chunks
+        Dict[str, Union[bytes, int]]
+            Dictionary containing base64 encoded audio, rate, and language_code
         """
         while self.running:
             chunk = self._buff.get()
@@ -434,24 +454,25 @@ class AudioInputStream:
         """
         Stops the audio stream and cleans up resources.
 
-        This method stops the audio stream, terminates the PyAudio interface,
-        and ensures the audio processing thread is properly shut down.
+        This method stops the RTSP stream and ensures the audio processing
+        thread is properly shut down.
         """
         self.running = False
 
         if self.session:
             self.session.close()
 
-        if self._audio_stream:
-            self._audio_stream.stop_stream()
-            self._audio_stream.close()
-
-        if self._audio_interface:
-            self._audio_interface.terminate()
-
         # Clean up the audio processing thread
-        if self._audio_thread and self._audio_thread.is_alive():
-            self._audio_thread.join(timeout=1.0)
+        if (
+            self._rtsp_audio_processor_thread
+            and self._rtsp_audio_processor_thread.is_alive()
+        ):
+            self._rtsp_audio_processor_thread.join(timeout=1.0)
+
+        # Clean up the audio callback thread
+        if self._audio_callback_thread and self._audio_callback_thread.is_alive():
+            self._audio_callback_thread.join(timeout=1.0)
 
         self._buff.put(None)
-        logger.info("Stopped audio stream")
+        self._control_queue.put("STOP")
+        logger.info("Stopped RTSP audio stream")
