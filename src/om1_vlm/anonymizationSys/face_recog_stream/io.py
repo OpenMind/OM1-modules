@@ -6,6 +6,7 @@ import re
 import threading
 import time
 from typing import TYPE_CHECKING, Callable, Optional, Tuple
+from urllib.parse import urlparse
 
 import cv2
 
@@ -195,10 +196,6 @@ class AsyncVideoWriter:
     def is_open(self) -> bool:
         """Return True if the underlying writer is still open."""
         return self._w is not None
-
-
-# put near other imports
-from urllib.parse import urlparse
 
 
 def open_nvenc_rtmp_writer(
