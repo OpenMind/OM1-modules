@@ -8,17 +8,17 @@ SCRFD TensorRT on Jetson Orin + Pixelation anonymization
 - Pixelation with adjustable strength/margin/max-faces (+ optional noise)
 
 Usage:
-ython scrfd_trt_pixelate.py  \ 
-    --engine "$HOME/anon-orin/models/scrfd_2.5g_640.engine" \  
-    --input "/home/openmind/Desktop/wenjinf-OM-workspace/videos/my_video.mp4" \  
-    --out "$HOME/anon-orin/results/out_nvenc_mask.mp4" \  
-    --nvenc \  
+python scrfd_trt_pixelate.py  \
+    --engine "./src/om1_vlm/anonymizationSys/models/scrfd_2.5g_640.engine" \
+    --input "*.mp4" \
+    --out "*.mp4" \
+    --nvenc \
     --conf 0.5 \
     --topk 100 \
-    --max_dets 50 \  
+    --max_dets 50 \
     --pixelate \
     --pixel_blocks 8 \
-    --pixel_margin 0.25 
+    --pixel_margin 0.25
 --nvenc->use nvenv or not not include it if using cpu
 """
 
@@ -375,7 +375,6 @@ class TRTInfer:
     ):
         self.size = size
         self.verbose = verbose
-        import pycuda.driver as cuda
 
         cuda.init()
         self.stream = cuda.Stream()
@@ -408,36 +407,31 @@ class TRTInfer:
                     f"[tensor] {n:20s} mode={self.modes[n].name} shape={self.shapes[n]} dtype={self.dtypes[n]}"
                 )
 
-        # device alloc + address binding
-        import pycuda.driver as cuda2
-
         self.alloc: Dict[str, Any] = {}
         for n in self.names:
             nbytes = int(np.prod(self.shapes[n])) * np.dtype(self.dtypes[n]).itemsize
             if nbytes == 0:
                 continue
-            mem = cuda2.mem_alloc(nbytes)
+            mem = cuda.mem_alloc(nbytes)
             self.alloc[n] = mem
             self.ctx.set_tensor_address(n, int(mem))
 
         # pinned host buffers
-        self.h_in = cuda2.pagelocked_empty(
+        self.h_in = cuda.pagelocked_empty(
             (1, 3, self.size, self.size), dtype=self.dtypes[self.in_name]
         )
         self.out_names = [
             n for n in self.names if self.modes[n] == trt.TensorIOMode.OUTPUT
         ]
         self.h_out = {
-            n: cuda2.pagelocked_empty(
-                int(np.prod(self.shapes[n])), dtype=self.dtypes[n]
-            )
+            n: cuda.pagelocked_empty(int(np.prod(self.shapes[n])), dtype=self.dtypes[n])
             for n in self.out_names
             if int(np.prod(self.shapes[n])) > 0
         }
 
         # timing events
-        self.ev_start = cuda2.Event()
-        self.ev_end = cuda2.Event()
+        self.ev_start = cuda.Event()
+        self.ev_end = cuda.Event()
 
     def _preprocess(self, frame_bgr: np.ndarray) -> Tuple[float, int, int, int, int]:
         """
@@ -474,10 +468,8 @@ class TRTInfer:
         Tuple[np.ndarray, float]
             (dets, gpu_ms) where dets is (N,5) and gpu_ms is kernel time in ms.
         """
-        import pycuda.driver as cuda3
-
         r, left, top, W, H = self._preprocess(frame_bgr)
-        cuda3.memcpy_htod_async(self.alloc[self.in_name], self.h_in, self.stream)
+        cuda.memcpy_htod_async(self.alloc[self.in_name], self.h_in, self.stream)
 
         self.ev_start.record(self.stream)
         if not self.ctx.execute_async_v3(self.stream.handle):
@@ -486,7 +478,7 @@ class TRTInfer:
 
         for n in self.out_names:
             if n in self.alloc and n in self.h_out:
-                cuda3.memcpy_dtoh_async(self.h_out[n], self.alloc[n], self.stream)
+                cuda.memcpy_dtoh_async(self.h_out[n], self.alloc[n], self.stream)
 
         self.stream.synchronize()
         gpu_ms = self.ev_end.time_since(self.ev_start)

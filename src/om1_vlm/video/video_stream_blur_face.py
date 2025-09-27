@@ -15,7 +15,7 @@ import numpy as np
 
 from om1_utils import LoggingConfig, get_logging_config, setup_logging
 
-from ..anonymizationSys.scrfd_trt_pixelate import (
+from ..anonymizationSys.detection.scrfd_trt_pixelate import (
     CONF_THRES,
     MAX_DETS,
     TOPK_PER_LEVEL,
