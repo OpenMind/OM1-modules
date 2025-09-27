@@ -3,13 +3,13 @@
 Usage examples
 --------------
 
-python -m om1_vlm.anonymizationSys.face_recog_stream.run   --scrfd-engine "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine"   --arc-engine   "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine"   --gallery      "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/gallery"   --gst --device /dev/video0   --width 1280 --height 720 --fps 30   --detection --recognition --blur --blur-mode all   --draw-boxes --draw-names --show-fps   --recog-topk 8 --crowd-thr 12   --nvenc   --rtsp "rtsp://api-video-ingest.openmind.org:8554/78e8f78e86ea6b3d?api_key=om1_live_78e8f78e86ea6b3dd5a519dd5a9d91f16711b68c6a3b037748a840807f4b80e4ea05c9709b58ea73" --no-window
+python -m om1_vlm.anonymizationSys.face_recog_stream.run   --scrfd-engine "./src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine"   --arc-engine   "./src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine"   --gallery      "./src/om1_vlm/anonymizationSys/gallery"   --gst --device /dev/video0   --width 1280 --height 720 --fps 30   --detection --recognition --blur --blur-mode all   --draw-boxes --draw-names --show-fps   --recog-topk 8 --crowd-thr 12   --nvenc   --rtsp "rtsp://api-video-ingest.openmind.org:8554/<API_KEY_ID>?api_key=<API_KEY>" --no-window
 
 Local mediamtx (RTMP), no preview window, NVENC:
   python -m om1_vlm.anonymizationSys.face_recog_stream.run  \
-    --scrfd-engine "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine" \
-    --arc-engine   "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine" \
-    --gallery      "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/gallery" \
+    --scrfd-engine "./src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine" \
+    --arc-engine   "./src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine" \
+    --gallery      "./src/om1_vlm/anonymizationSys/gallery" \
     --gst --device /dev/video0 \
     --width 1280 --height 720 --fps 30 \
     --detection --recognition --blur --blur-mode all \
@@ -31,9 +31,9 @@ Local mediamtx (RTMP), no preview window, NVENC:
     --no-window --nvenc
 
 OpenMind ingest (headless), NVENC:
-  python -m om1_vlm.anonymizationSys.face_recog_stream.run   --scrfd-engine "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine"   --arc-engine   "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine"   --gallery      "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/gallery"   --gst --device /dev/video0   --width 1280 --height 720 --fps 30   --detection --recognition --blur --blur-mode all   --draw-boxes --draw-names --show-fps   --recog-topk 8 --crowd-thr 12   --rtmp "rtmp://api-video-ingest.openmind.org:1935/<OM_API_KEY_ID>?api_key=<OM_API_KEY>"
+  python -m om1_vlm.anonymizationSys.face_recog_stream.run   --scrfd-engine "./src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine"   --arc-engine   "./src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine"   --gallery      "./src/om1_vlm/anonymizationSys/gallery"   --gst --device /dev/video0   --width 1280 --height 720 --fps 30   --detection --recognition --blur --blur-mode all   --draw-boxes --draw-names --show-fps   --recog-topk 8 --crowd-thr 12   --rtmp "rtmp://api-video-ingest.openmind.org:1935/<OM_API_KEY_ID>?api_key=<OM_API_KEY>"
 
-python -m om1_vlm.anonymizationSys.face_recog_stream.run    --scrfd-engine "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine"   --arc-engine   "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine"   --gallery      "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/gallery"   --gst --device /dev/video0   --width 1280 --height 720 --fps 30   --detection --recognition --blur --blur-mode all   --draw-boxes --draw-names --show-fps   --recog-topk 8 --crowd-thr 12   --rtmp "rtmp://api-video-ingest.openmind.org:1935/<OM_API_KEY_ID>?api_key=<OM_API_KEY>   --no-window --nvenc"
+python -m om1_vlm.anonymizationSys.face_recog_stream.run    --scrfd-engine "./src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine"   --arc-engine   "./src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine"   --gallery      "./src/om1_vlm/anonymizationSys/gallery"   --gst --device /dev/video0   --width 1280 --height 720 --fps 30   --detection --recognition --blur --blur-mode all   --draw-boxes --draw-names --show-fps   --recog-topk 8 --crowd-thr 12   --rtmp "rtmp://api-video-ingest.openmind.org:1935/<OM_API_KEY_ID>?api_key=<OM_API_KEY>   --no-window --nvenc"
 """
 
 from __future__ import annotations
