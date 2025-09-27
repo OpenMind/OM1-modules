@@ -854,7 +854,6 @@ def main() -> None:
         ok, frame = cap.read()
         if not ok:
             break
-
         dets, gpu_ms = infer.infer(frame)
         total_frames += 1
         ema_ms = gpu_ms if ema_ms is None else (0.9 * ema_ms + 0.1 * gpu_ms)
