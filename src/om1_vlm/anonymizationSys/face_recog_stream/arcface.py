@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import List, Optional
 
 import cv2
@@ -7,6 +8,8 @@ import numpy as np
 import pycuda.driver as cuda
 
 from .trt_base import TRTModule
+
+logging.basicConfig(level=logging.INFO)
 
 # Standard ArcFace 5-point reference landmarks for 112×112 alignment
 ARC_112_LMK = np.array(
@@ -128,7 +131,7 @@ class TRTArcFace(TRTModule):
             self.context.set_tensor_address(self.out_name, int(d_out))
             ok = self.context.execute_async_v3(self.stream.handle)
             if not ok:
-                raise RuntimeError("ArcFace execute_async_v3 failed")
+                logging.error("[error] ArcFace execute_async_v3 failed")
             out_host = np.empty(out_shape, dtype=np.float32)
             cuda.memcpy_dtoh_async(out_host, d_out, self.stream)
             self.stream.synchronize()
@@ -143,7 +146,7 @@ class TRTArcFace(TRTModule):
                 bindings=bindings, stream_handle=self.stream.handle
             )
             if not ok:
-                raise RuntimeError("ArcFace execute_async_v2 failed")
+                logging.error("[error] ArcFace execute_async_v2 failed")
             out_host = np.empty(out_shape, dtype=np.float32)
             cuda.memcpy_dtoh_async(out_host, d_out, self.stream)
             self.stream.synchronize()

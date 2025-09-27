@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import os.path as osp
 from typing import List, Tuple
@@ -10,6 +11,8 @@ import numpy as np
 from .arcface import TRTArcFace, warp_face_by_5p
 from .scrfd import TRTSCRFD
 from .utils import list_images
+
+logging.basicConfig(level=logging.INFO)
 
 
 def iter_identities(gallery_root: str) -> List[Tuple[str, List[str]]]:
@@ -62,7 +65,7 @@ def build_gallery_embeddings(
     labels: List[str] = []
     identities = iter_identities(gallery_root)
     if not identities:
-        raise RuntimeError(f"No identities under: {gallery_root}")
+        logging.warning("[WARN] No identities under: {gallery_root}")
 
     for label, paths in identities:
         emb_list = []
@@ -92,6 +95,6 @@ def build_gallery_embeddings(
             labels.append(label)
 
     if not feats:
-        raise RuntimeError("No valid gallery embeddings.")
+        logging.warning("[WARN] No valid gallery embeddings.")
 
     return np.stack(feats, axis=0).astype(np.float32), labels

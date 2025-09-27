@@ -122,7 +122,7 @@ def build_gst_capture(
     for pipe in (mjpeg, yuy2):
         cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
         if cap.isOpened():
-            logging.info("[gst] using pipeline:", pipe)
+            logging.info(f"[gst] using pipeline: {pipe}")
             return cap
 
     logging.warning("[gst] both MJPEG and YUY2 pipelines failed for device=%s", device)
@@ -196,6 +196,53 @@ class AsyncVideoWriter:
     def is_open(self) -> bool:
         """Return True if the underlying writer is still open."""
         return self._w is not None
+
+
+def open_nvenc_rtsp_writer(rtsp_url: str, width: int, height: int, fps_in: float):
+    """
+    Publish to an RTSP server (MediaMTX) using rtspclientsink (RECORD).
+    Feed H.264 elementary stream (video/x-h264). Do NOT use rtph264pay here.
+    """
+    fps = int(round(fps_in if fps_in and fps_in > 0 else 25))
+    gop = max(1, fps)
+
+    # Live source (frames from OpenCV)
+    common_src = (
+        "appsrc is-live=true do-timestamp=true format=time "
+        f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 "
+        "! queue leaky=downstream max-size-buffers=1 "
+    )
+
+    # Jetson NVENC → H.264 elementary stream
+    nvenc_branch = (
+        "! videoconvert ! nvvidconv "
+        "! video/x-raw(memory:NVMM),format=NV12 "
+        f"! nvv4l2h264enc insert-sps-pps=true control-rate=1 bitrate=3000000 "
+        f"iframeinterval={gop} idrinterval={gop} preset-level=1 "
+        "! h264parse config-interval=1 "
+        "! video/x-h264,stream-format=byte-stream,alignment=au "
+        f'! rtspclientsink location="{rtsp_url}" protocols=tcp latency=0'
+    )
+
+    # CPU x264 fallback (if NVENC not available)
+    x264_branch = (
+        "! videoconvert "
+        f"! x264enc tune=zerolatency speed-preset=ultrafast bitrate=2500 "
+        f"   key-int-max={gop} bframes=0 byte-stream=true "
+        "! h264parse config-interval=1 "
+        "! video/x-h264,stream-format=byte-stream,alignment=au "
+        f'! rtspclientsink location="{rtsp_url}" protocols=tcp latency=0'
+    )
+
+    for pipe in (common_src + nvenc_branch, common_src + x264_branch):
+        w = cv2.VideoWriter(pipe, cv2.CAP_GSTREAMER, 0, fps, (width, height))
+        if w.isOpened():
+            enc = "NVENC" if "nvv4l2h264enc" in pipe else "x264"
+            logging.info("[rtsp] using %s -> rtspclientsink (elementary H.264)", enc)
+            return w
+
+    logging.error("[rtsp] failed to open RTSP pipeline: %s", rtsp_url)
+    return None
 
 
 def open_nvenc_rtmp_writer(

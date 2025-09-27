@@ -2,7 +2,22 @@
 """
 Usage examples
 --------------
+
+python -m om1_vlm.anonymizationSys.face_recog_stream.run   --scrfd-engine "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine"   --arc-engine   "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine"   --gallery      "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/gallery"   --gst --device /dev/video0   --width 1280 --height 720 --fps 30   --detection --recognition --blur --blur-mode all   --draw-boxes --draw-names --show-fps   --recog-topk 8 --crowd-thr 12   --nvenc   --rtsp "rtsp://api-video-ingest.openmind.org:8554/78e8f78e86ea6b3d?api_key=om1_live_78e8f78e86ea6b3dd5a519dd5a9d91f16711b68c6a3b037748a840807f4b80e4ea05c9709b58ea73" --no-window
+
 Local mediamtx (RTMP), no preview window, NVENC:
+  python -m om1_vlm.anonymizationSys.face_recog_stream.run  \
+    --scrfd-engine "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine" \
+    --arc-engine   "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine" \
+    --gallery      "/home/openmind/Desktop/wenjinf-OM-workspace/OM1-modules/src/om1_vlm/anonymizationSys/gallery" \
+    --gst --device /dev/video0 \
+    --width 1280 --height 720 --fps 30 \
+    --detection --recognition --blur --blur-mode all \
+    --draw-boxes --draw-names --show-fps \
+    --recog-topk 8 --crowd-thr 12 \
+    --rtsp "rtsp://127.0.0.1:8554/om1" \
+    --nvenc
+
   python -m om1_vlm.anonymizationSys.face_recog_stream.run  \
     --scrfd-engine "/path/to/scrfd_2.5g_bnkps_shape640x640.engine" \
     --arc-engine   "/path/to/buffalo_m_w600k_r50.engine" \
@@ -44,6 +59,7 @@ from .io import (
     build_file_writer,
     build_gst_capture,
     open_nvenc_rtmp_writer,
+    open_nvenc_rtsp_writer,
     reopen_capture,
     safe_read,
 )
@@ -173,6 +189,10 @@ def main() -> None:
         action="store_true",
         help="Use GStreamer v4l2src pipeline instead of OpenCV V4L2.",
     )
+
+    ap.add_argument(
+        "--rtsp", default="", help="RTSP URL to publish (e.g. rtsp://host:8554/stream)."
+    )
     ap.add_argument("--width", type=int, default=1280, help="Capture width.")
     ap.add_argument("--height", type=int, default=720, help="Capture height.")
     ap.add_argument("--fps", type=int, default=30, help="Capture frame rate.")
@@ -237,6 +257,7 @@ def main() -> None:
 
     # Open outputs
     rtmp_writer: Optional[AsyncVideoWriter] = None
+    rtsp_writer: Optional[AsyncVideoWriter] = None
     if args.rtmp:
         raw_writer = open_nvenc_rtmp_writer(args.rtmp, W, H, fps_in)
         if raw_writer is None:
@@ -245,6 +266,15 @@ def main() -> None:
             )
         else:
             rtmp_writer = AsyncVideoWriter(raw_writer, queue_size=1)
+
+    if args.rtsp:
+        raw_writer = open_nvenc_rtsp_writer(args.rtsp, W, H, fps_in)
+        if raw_writer is None:
+            logging.warning(
+                "[warn] RTSP pipeline failed to open. Continue without streaming."
+            )
+        else:
+            rtsp_writer = AsyncVideoWriter(raw_writer, queue_size=1)
 
     file_writer = (
         build_file_writer(args.outfile, W, H, fps_in, args.nvenc)
@@ -456,6 +486,14 @@ def main() -> None:
             # Outputs (non-blocking RTMP)
             if rtmp_writer is not None and rtmp_writer.is_open():
                 rtmp_writer.write(frame)
+            # (re)open RTSP writer if requested and currently closed
+            if args.rtsp and (rtsp_writer is None or not rtsp_writer.is_open()):
+                raw_writer = open_nvenc_rtsp_writer(args.rtsp, W, H, fps_in)
+                if raw_writer is not None:
+                    rtsp_writer = AsyncVideoWriter(raw_writer, queue_size=1)
+
+            if rtsp_writer is not None and rtsp_writer.is_open():
+                rtsp_writer.write(frame)
             if file_writer is not None:
                 file_writer.write(frame)
 
@@ -481,6 +519,8 @@ def main() -> None:
             pass
         if rtmp_writer is not None:
             rtmp_writer.close()
+        if rtsp_writer is not None:
+            rtsp_writer.close()
         if file_writer is not None:
             try:
                 file_writer.release()
