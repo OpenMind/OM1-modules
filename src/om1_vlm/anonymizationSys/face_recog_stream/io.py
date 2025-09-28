@@ -193,6 +193,26 @@ class AsyncVideoWriter:
         if self._thr.is_alive():
             self._thr.join(timeout=1.0)
 
+        # Clean up ffmpeg process if it exists
+        if hasattr(self._w, '_ffmpeg_proc') and self._w._ffmpeg_proc:
+            try:
+                self._w._ffmpeg_proc.terminate()
+                self._w._ffmpeg_proc.wait(timeout=2.0)
+            except:
+                try:
+                    self._w._ffmpeg_proc.kill()
+                except:
+                    pass
+
+        # Clean up named pipe if it exists
+        if hasattr(self._w, '_pipe_path') and self._w._pipe_path:
+            try:
+                import os
+                if os.path.exists(self._w._pipe_path):
+                    os.unlink(self._w._pipe_path)
+            except:
+                pass
+
     def is_open(self) -> bool:
         """Return True if the underlying writer is still open."""
         return self._w is not None
@@ -200,8 +220,13 @@ class AsyncVideoWriter:
 
 def open_nvenc_rtsp_writer(rtsp_url: str, width: int, height: int, fps_in: float):
     """
-    Publish to an RTSP server (MediaMTX) using rtspclientsink (RECORD).
-    Feed H.264 elementary stream (video/x-h264). Do NOT use rtph264pay here.
+    Publish to an RTSP server using alternative methods since rtspclientsink is not available.
+
+    Options:
+    1. Use shmsink to write to shared memory and external process (ffmpeg) for RTSP
+    2. Use filesink to write to named pipe and external process
+    3. Use udpsink with RTP payload (if server supports it)
+    4. Fallback to RTMP if RTSP server supports it
     """
     fps = int(round(fps_in if fps_in and fps_in > 0 else 25))
     gop = max(1, fps)
@@ -213,35 +238,89 @@ def open_nvenc_rtsp_writer(rtsp_url: str, width: int, height: int, fps_in: float
         "! queue leaky=downstream max-size-buffers=1 "
     )
 
-    # Jetson NVENC → H.264 elementary stream
-    nvenc_branch = (
+    # Parse URL to extract host/port for UDP approach
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(rtsp_url)
+        host = parsed.hostname or "127.0.0.1"
+        # For UDP RTP, use a different port (usually +2 from RTSP port)
+        udp_port = (parsed.port or 8554) + 2
+    except:
+        host = "127.0.0.1"
+        udp_port = 8556
+
+    # Option 1: UDP with RTP payload (most compatible with RTSP servers)
+    nvenc_udp = (
         "! videoconvert ! nvvidconv "
         "! video/x-raw(memory:NVMM),format=NV12 "
         f"! nvv4l2h264enc insert-sps-pps=true control-rate=1 bitrate=3000000 "
         f"iframeinterval={gop} idrinterval={gop} preset-level=1 "
         "! h264parse config-interval=1 "
-        "! video/x-h264,stream-format=byte-stream,alignment=au "
-        f'! rtspclientsink location="{rtsp_url}" protocols=tcp latency=0'
+        "! rtph264pay config-interval=1 pt=96 "
+        f"! udpsink host={host} port={udp_port} sync=false"
     )
 
-    # CPU x264 fallback (if NVENC not available)
-    x264_branch = (
+    x264_udp = (
         "! videoconvert "
         f"! x264enc tune=zerolatency speed-preset=ultrafast bitrate=2500 "
-        f"   key-int-max={gop} bframes=0 byte-stream=true "
+        f"key-int-max={gop} bframes=0 "
         "! h264parse config-interval=1 "
-        "! video/x-h264,stream-format=byte-stream,alignment=au "
-        f'! rtspclientsink location="{rtsp_url}" protocols=tcp latency=0'
+        "! rtph264pay config-interval=1 pt=96 "
+        f"! udpsink host={host} port={udp_port} sync=false"
     )
 
-    for pipe in (common_src + nvenc_branch, common_src + x264_branch):
-        w = cv2.VideoWriter(pipe, cv2.CAP_GSTREAMER, 0, fps, (width, height))
-        if w.isOpened():
-            enc = "NVENC" if "nvv4l2h264enc" in pipe else "x264"
-            logging.info("[rtsp] using %s -> rtspclientsink (elementary H.264)", enc)
-            return w
+    # Option 2: Write to shared memory for external ffmpeg process
+    import os
+    shm_path = f"/tmp/rtsp_stream_{os.getpid()}"
 
-    logging.error("[rtsp] failed to open RTSP pipeline: %s", rtsp_url)
+    nvenc_shm = (
+        "! videoconvert ! nvvidconv "
+        "! video/x-raw(memory:NVMM),format=NV12 "
+        f"! nvv4l2h264enc insert-sps-pps=true control-rate=1 bitrate=3000000 "
+        f"iframeinterval={gop} idrinterval={gop} preset-level=1 "
+        "! h264parse config-interval=1 "
+        "! mp4mux fragment-duration=1000 "
+        f"! filesink location={shm_path}.mp4 sync=false"
+    )
+
+    x264_shm = (
+        "! videoconvert "
+        f"! x264enc tune=zerolatency speed-preset=ultrafast bitrate=2500 "
+        f"key-int-max={gop} bframes=0 "
+        "! h264parse config-interval=1 "
+        "! mp4mux fragment-duration=1000 "
+        f"! filesink location={shm_path}.mp4 sync=false"
+    )
+
+    # Try pipelines in order of preference
+    pipelines = [
+        (common_src + nvenc_udp, "NVENC UDP-RTP"),
+        (common_src + x264_udp, "x264 UDP-RTP"),
+        (common_src + nvenc_shm, "NVENC file-based"),
+        (common_src + x264_shm, "x264 file-based")
+    ]
+
+    for pipe, desc in pipelines:
+        try:
+            w = cv2.VideoWriter(pipe, cv2.CAP_GSTREAMER, 0, fps, (width, height))
+            if w.isOpened():
+                logging.info(f"[rtsp] using {desc} for {rtsp_url}")
+                if "UDP-RTP" in desc:
+                    logging.info(f"[rtsp] streaming RTP to {host}:{udp_port}")
+                    logging.info(f"[rtsp] configure your RTSP server to receive RTP on this port")
+                elif "file-based" in desc:
+                    logging.info(f"[rtsp] writing to {shm_path}.mp4")
+                    logging.info(f"[rtsp] you can use ffmpeg to republish: ffmpeg -re -i {shm_path}.mp4 -c copy -f rtsp {rtsp_url}")
+                return w
+        except Exception as e:
+            logging.debug(f"[rtsp] {desc} failed: {e}")
+            continue
+
+    logging.error("[rtsp] all RTSP pipeline attempts failed for: %s", rtsp_url)
+    logging.info("[rtsp] suggestions:")
+    logging.info(f"[rtsp] 1. Use external ffmpeg: ffmpeg -f v4l2 -i /dev/video0 -c:v h264_nvenc -f rtsp {rtsp_url}")
+    logging.info(f"[rtsp] 2. Check if your RTSP server supports RTMP: {rtsp_url.replace('rtsp://', 'rtmp://')}")
+    logging.info(f"[rtsp] 3. Install gst-rtsp-server-1.0-dev for better RTSP support")
     return None
 
 
