@@ -3,37 +3,29 @@
 Usage examples
 --------------
 
-python -m om1_vlm.anonymizationSys.face_recog_stream.run   --scrfd-engine "./src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine"   --arc-engine   "./src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine"   --gallery      "./src/om1_vlm/anonymizationSys/gallery"   --gst --device /dev/video0   --width 1280 --height 720 --fps 30   --detection --recognition --blur --blur-mode all   --draw-boxes --draw-names --show-fps   --recog-topk 8 --crowd-thr 12   --nvenc   --rtsp "rtsp://api-video-ingest.openmind.org:8554/<API_KEY_ID>?api_key=<API_KEY>" --no-window
+python -m om1_vlm.anonymizationSys.face_recog_stream.run --scrfd-engine "./src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine" --arc-engine "./src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine" --gallery "./src/om1_vlm/anonymizationSys/gallery" --device /dev/video0 --width 1280 --height 720 --fps 30 --detection --recognition --blur --blur-mode all --draw-boxes --draw-names --show-fps --recog-topk 8 --crowd-thr 12  --remote-rtsp "rtsp://api-video-ingest.openmind.org:8554/<API_KEY_ID>?api_key=<API_KEY>"
 
-Local mediamtx (RTMP), no preview window, NVENC:
+Local mediamtx (RTMP), no preview window:
   python -m om1_vlm.anonymizationSys.face_recog_stream.run  \
     --scrfd-engine "./src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine" \
     --arc-engine   "./src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine" \
-    --gallery      "./src/om1_vlm/anonymizationSys/gallery" \
-    --gst --device /dev/video0 \
+    --gallery "./src/om1_vlm/anonymizationSys/gallery" \
+    --device /dev/video0 \
     --width 1280 --height 720 --fps 30 \
     --detection --recognition --blur --blur-mode all \
     --draw-boxes --draw-names --show-fps \
     --recog-topk 8 --crowd-thr 12 \
-    --rtsp "rtsp://127.0.0.1:8554/om1" \
-    --nvenc
 
   python -m om1_vlm.anonymizationSys.face_recog_stream.run  \
     --scrfd-engine "/path/to/scrfd_2.5g_bnkps_shape640x640.engine" \
     --arc-engine   "/path/to/buffalo_m_w600k_r50.engine" \
     --gallery      "/path/to/gallery" \
-    --gst --device /dev/video0 \
+    --device /dev/video0 \
     --width 1280 --height 720 --fps 30 \
     --detection --recognition --blur --blur-mode all \
     --draw-boxes --draw-names --show-fps \
     --recog-topk 8 --crowd-thr 12 \
-    --rtmp "rtmp://localhost:1935/live/om1" \
-    --no-window --nvenc
-
-OpenMind ingest (headless), NVENC:
-  python -m om1_vlm.anonymizationSys.face_recog_stream.run   --scrfd-engine "./src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine"   --arc-engine   "./src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine"   --gallery      "./src/om1_vlm/anonymizationSys/gallery"   --gst --device /dev/video0   --width 1280 --height 720 --fps 30   --detection --recognition --blur --blur-mode all   --draw-boxes --draw-names --show-fps   --recog-topk 8 --crowd-thr 12   --rtmp "rtmp://api-video-ingest.openmind.org:1935/<OM_API_KEY_ID>?api_key=<OM_API_KEY>"
-
-python -m om1_vlm.anonymizationSys.face_recog_stream.run    --scrfd-engine "./src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine"   --arc-engine   "./src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine"   --gallery      "./src/om1_vlm/anonymizationSys/gallery"   --gst --device /dev/video0   --width 1280 --height 720 --fps 30   --detection --recognition --blur --blur-mode all   --draw-boxes --draw-names --show-fps   --recog-topk 8 --crowd-thr 12   --rtmp "rtmp://api-video-ingest.openmind.org:1935/<OM_API_KEY_ID>?api_key=<OM_API_KEY>   --no-window --nvenc"
+    --no-window
 """
 
 from __future__ import annotations
@@ -47,21 +39,13 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
-# Ensure CUDA context exists for TensorRT
 import pycuda.autoinit  # noqa: F401
 
 from .arcface import TRTArcFace, warp_face_by_5p
 from .draw import draw_overlays
 from .gallery import build_gallery_embeddings
-from .io import (
-    build_cam_capture,
-    build_file_writer,
-    open_capture,
-    open_ffmpeg_rtmp_writer,
-    open_ffmpeg_rtsp_writer,
-    reopen_capture,
-    safe_read,
-)
+from .rtsp_video_writer import RTSPVideoStreamWriter
+from .camera_reader import CameraReader
 from .scrfd import TRTSCRFD
 from .utils import infer_arc_batched, pick_topk_indices
 
@@ -78,12 +62,12 @@ def main() -> None:
       4) Optionally pixelates faces (known/unknown/all).
       5) Draws boxes/names and optionally streams to RTMP and/or records to MP4.
     """
-    # setup_logging("face_recog_stream", logging_config=get_logging_config())
     logging.info("Starting realtime_stream...")
 
     ap = argparse.ArgumentParser(
         "Jetson real-time detection + recognition + blur + streaming"
     )
+
     # Engines
     ap.add_argument(
         "--scrfd-engine", required=True, help="Path to SCRFD TensorRT engine (.engine)."
@@ -107,15 +91,25 @@ def main() -> None:
         default=None,
         help="Gallery root (subfolders per identity). Required if --recognition.",
     )
+
     # Features
-    ap.add_argument("--detection", action="store_true", help="Enable face detection.")
+    ap.add_argument(
+        "--detection",
+        action="store_true",
+        default=True,
+        help="Enable face detection."
+    )
     ap.add_argument(
         "--recognition",
         action="store_true",
+        default=True,
         help="Enable face recognition (uses gallery).",
     )
     ap.add_argument(
-        "--blur", action="store_true", help="Enable pixelation blur on faces."
+        "--blur",
+        action="store_true",
+        default=True,
+        help="Enable pixelation blur on faces."
     )
     ap.add_argument(
         "--blur-mode",
@@ -160,6 +154,7 @@ def main() -> None:
         default=12,
         help="If detected faces in a frame exceed this threshold, skip recognition (still blur/draw).",
     )
+
     # Thresholds
     ap.add_argument(
         "--conf", type=float, default=0.5, help="Detection confidence threshold."
@@ -174,35 +169,30 @@ def main() -> None:
     ap.add_argument(
         "--max-num", type=int, default=0, help="Max faces to keep (0 = no limit)."
     )
-    # Input (camera/GStreamer)
-    ap.add_argument(
-        "--cam-index", type=int, default=0, help="V4L2 camera index (0,1,...)."
-    )
+
+    # Inputs
     ap.add_argument(
         "--device",
         default="/dev/video0",
-        help="GStreamer v4l2src device path (used with --gst).",
+        help="V4L2 device (e.g., /dev/video0)",
     )
-    ap.add_argument(
-        "--gst",
-        action="store_true",
-        help="Use GStreamer v4l2src pipeline instead of OpenCV V4L2.",
-    )
-
-    ap.add_argument(
-        "--rtsp", default="", help="RTSP URL to publish (e.g. rtsp://host:8554/stream)."
-    )
-    ap.add_argument("--width", type=int, default=1280, help="Capture width.")
-    ap.add_argument("--height", type=int, default=720, help="Capture height.")
+    ap.add_argument("--width", type=int, default=640, help="Capture width.")
+    ap.add_argument("--height", type=int, default=480, help="Capture height.")
     ap.add_argument("--fps", type=int, default=30, help="Capture frame rate.")
+
     # Outputs
     ap.add_argument(
-        "--rtmp", default="", help="RTMP/RTMPS URL to publish (empty = disabled)."
+        "--local-rtsp", default="rtsp://localhost:8554/live", help="RTSP URL to publish (e.g. rtsp://host:8554/stream)."
     )
     ap.add_argument(
-        "--nvenc", action="store_true", help="Use Jetson NVENC in GStreamer writers."
+        "--remote-rtsp", help="Remote RTSP URL to relay (e.g. rtsp://host:8554/stream)."
     )
-    ap.add_argument("--outfile", default="", help="Optional MP4 output path.")
+    ap.add_argument(
+        "--rtsp-mic_device", default="hw:3,0", help="Audio capture device for RTSP (e.g. hw:3,0)."
+    )
+    ap.add_argument(
+        "--rtsp-mic_ac", type=int, default=2, help="Audio channels for RTSP (e.g. 2)."
+    )
     ap.add_argument(
         "--no-window", action="store_true", help="Disable display window (headless)."
     )
@@ -240,46 +230,17 @@ def main() -> None:
             gal_feats, gal_labels = None, []
 
     # Open capture
-    cap = (
-        open_capture(args.device, args.width, args.height, args.fps)
-        if args.gst
-        else build_cam_capture(args.cam_index, args.width, args.height, args.fps)
-    )
-    if not cap or not cap.isOpened():
-        raise SystemExit(
-            "Failed to open camera. Try --gst or correct device/cam-index."
-        )
+    cap = CameraReader(args.device, args.width, args.height, args.fps)
+    if cap.is_opened() is False:
+        raise SystemExit(f"Failed to open camera {args.device}")
 
-    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or args.width
-    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or args.height
-    fps_in = cap.get(cv2.CAP_PROP_FPS) or float(args.fps)
+    local_rtsp = args.local_rtsp if args.local_rtsp else None
+    remote_rtsp = args.remote_rtsp if args.remote_rtsp else None
 
-    # Open outputs
-    if args.rtmp:
-        raw_writer = open_ffmpeg_rtmp_writer(args.rtmp, W, H, fps_in)
-        if raw_writer is None:
-            logging.warning(
-                "[warn] RTMP pipeline failed to open. Continue without streaming."
-            )
+    rstp_writer = RTSPVideoStreamWriter(cap.width, cap.height, cap.fps, local_rtsp, remote_rtsp, args.rtsp_mic_device, args.rtsp_mic_ac)
+    logging.info(f"Start streaming to RTSP server at local {local_rtsp} " +
+                 (f"and remote {remote_rtsp}" if remote_rtsp else ""))
 
-    if args.rtsp:
-        raw_writer = open_ffmpeg_rtsp_writer(args.rtsp, W, H, fps_in)
-        if raw_writer is None:
-            logging.warning(
-                "[warn] RTSP pipeline failed to open. Continue without streaming."
-            )
-
-    file_writer = (
-        build_file_writer(args.outfile, W, H, fps_in, args.nvenc)
-        if args.outfile
-        else None
-    )
-    if args.outfile and file_writer is None:
-        logging.warning(
-            f"[warn] File writer failed to open: {args.outfile}. Continue without local recording."
-        )
-
-    # Graceful shutdown on Ctrl-C
     running = True
 
     def handle_sigint(sig, frame):
@@ -295,27 +256,11 @@ def main() -> None:
 
     try:
         while running:
-            # Robust read with small retries; if still failing, try to reopen once.
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                ok, frame = safe_read(cap, max_retries=5, sleep_sec=0.02)
-            if not ok or frame is None:
-                logging.warning("[warn] capture read failed, trying to reopen...")
-                cap = reopen_capture(
-                    cap,
-                    open_capture if args.gst else build_cam_capture,
-                    args.device if args.gst else args.cam_index,
-                    args.width,
-                    args.height,
-                    args.fps,
-                )
-                if not cap or not cap.isOpened():
-                    logging.error("[error] reopen capture failed, exiting loop.")
-                    break
-                ok, frame = safe_read(cap, max_retries=5, sleep_sec=0.02)
-                if not ok or frame is None:
-                    logging.error("[error] still cannot read after reopen, exiting.")
-                    break
+            frame = cap.read_frame()
+            if frame is None:
+                logging.warning("Frame is None ")
+                time.sleep(0.1)
+                continue
 
             total += 1
             start = time.perf_counter()
@@ -476,35 +421,11 @@ def main() -> None:
                     cv2.LINE_AA,
                 )
 
-            # # Outputs (non-blocking RTMP)
-            # if rtmp_writer is not None and rtmp_writer.is_open():
-            #     rtmp_writer.write(frame)
-            # # (re)open RTSP writer if requested and currently closed
-            # if args.rtsp and (rtsp_writer is None or not rtsp_writer.is_open()):
-            #     raw_writer = open_ffmpeg_rtsp_writer(args.rtsp, W, H, fps_in)
+            if rstp_writer is not None:
+                rstp_writer.write_frame(frame)
 
-            if raw_writer is None:
-                if args.rtmp:
-                    raw_writer = open_ffmpeg_rtmp_writer(args.rtmp, W, H, fps_in)
-                elif args.rtsp:
-                    raw_writer = open_ffmpeg_rtsp_writer(args.rtsp, W, H, fps_in)
-
-            if raw_writer is not None:
-                raw_writer.stdin.write(frame)
-
-            # if rtsp_writer is not None and rtsp_writer.is_open():
-            #     rtsp_writer.write(frame)
-            if file_writer is not None:
-                start_time = time.time()
-                logging.info(f"Writing frame at time {start_time}")
-                file_writer.write(frame)
-                end_time = time.time()
-                logging.info(f"Finished writing frame at time {end_time}, took {end_time - start_time} seconds")
-
-            # Optional preview
             if not args.no_window:
                 cv2.imshow("Face Anonymizer", frame)
-                # Allow ESC to exit even when not receiving signals
                 if cv2.waitKey(1) & 0xFF == 27:
                     break
 
@@ -516,20 +437,17 @@ def main() -> None:
                 )
 
     finally:
-        # Cleanup
         try:
             cap.release()
         except Exception:
             pass
-        # if rtmp_writer is not None:
-        #     rtmp_writer.close()
-        # if rtsp_writer is not None:
-        #     rtsp_writer.close()
-        if file_writer is not None:
+
+        if rstp_writer is not None:
             try:
-                file_writer.release()
+                rstp_writer.stop()
             except Exception:
                 pass
+
         if not args.no_window:
             try:
                 cv2.destroyAllWindows()
