@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 import logging
 from typing import Optional
+
 import cv2
 
 logging.basicConfig(level=logging.INFO)
@@ -94,7 +96,7 @@ class CameraReader:
 
         try:
             self.cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             self.cap.set(cv2.CAP_PROP_FPS, fps)
@@ -104,7 +106,9 @@ class CameraReader:
                 actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
-                logging.info(f"Opened camera {device} with MJPEG: {actual_width}x{actual_height} @ {actual_fps}fps")
+                logging.info(
+                    f"Opened camera {device} with MJPEG: {actual_width}x{actual_height} @ {actual_fps}fps"
+                )
 
                 self.width = actual_width
                 self.height = actual_height

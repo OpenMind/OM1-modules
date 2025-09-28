@@ -1,31 +1,33 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 import queue
+import subprocess
 import threading
 from typing import Optional
 
-
 logging.basicConfig(level=logging.INFO)
 
-class RTSPVideoStreamWriter():
+
+class RTSPVideoStreamWriter:
     def __init__(
-            self,
-            width: int,
-            height: int,
-            fps: int,
-            local_rtsp_url: str = "rtsp://localhost:8554/live",
-            remote_rtsp_url: Optional[str] = None,
-            mic_device: str = "hw:3,0",
-            mic_ac: int = 2,
-        ):
+        self,
+        width: int,
+        height: int,
+        fps: int,
+        local_rtsp_url: str = "rtsp://localhost:8554/live",
+        remote_rtsp_url: Optional[str] = None,
+        mic_device: str = "hw:3,0",
+        mic_ac: int = 2,
+    ):
         """
         Initialize the RTSP video stream writer.
         """
 
         if not local_rtsp_url and not remote_rtsp_url:
-            raise ValueError("At least one of local_rtsp_url or remote_rtsp_url must be provided.")
+            raise ValueError(
+                "At least one of local_rtsp_url or remote_rtsp_url must be provided."
+            )
 
         self.width = width
         self.height = height
@@ -50,42 +52,64 @@ class RTSPVideoStreamWriter():
         Build the FFmpeg command array.
         """
         cmd = [
-            "ffmpeg", "-y",
+            "ffmpeg",
+            "-y",
             # Video input
-            "-f", "rawvideo",
-            "-pix_fmt", "bgr24",
-            "-s", f"{self.width}x{self.height}",
-            "-r", str(self.fps),
-            "-i", "-",
-
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s",
+            f"{self.width}x{self.height}",
+            "-r",
+            str(self.fps),
+            "-i",
+            "-",
             # Audio input
-            "-f", "alsa",
-            "-ac", str(self.mic_ac),
-            "-i", self.mic_device,
-
+            "-f",
+            "alsa",
+            "-ac",
+            str(self.mic_ac),
+            "-i",
+            self.mic_device,
             # Video encoding
-            "-map", "0:v",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-tune", "zerolatency",
-            "-g", str(self.fps),
-            "-keyint_min", str(self.fps),
-
+            "-map",
+            "0:v",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-g",
+            str(self.fps),
+            "-keyint_min",
+            str(self.fps),
             # Rotation
-            "-vf", "transpose=2",
-
+            "-vf",
+            "transpose=2",
             # Audio encoding
-            "-map", "1:a",
-            "-c:a", "libopus",
-            "-ar", "48000",
-            "-ac", "2",
-            "-b:a", "128k",
+            "-map",
+            "1:a",
+            "-c:a",
+            "libopus",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-b:a",
+            "128k",
         ]
 
         if self.remote_rtsp_url:
-            cmd.extend(["-f", "tee",
-                       f"[f=rtsp:rtsp_transport=tcp]{self.local_rtsp_url}|"
-                       f"[f=rtsp:rtsp_transport=tcp]{self.remote_rtsp_url}"])
+            cmd.extend(
+                [
+                    "-f",
+                    "tee",
+                    f"[f=rtsp:rtsp_transport=tcp]{self.local_rtsp_url}|"
+                    f"[f=rtsp:rtsp_transport=tcp]{self.remote_rtsp_url}",
+                ]
+            )
         else:
             cmd.extend(["-f", "rtsp", "-rtsp_transport", "tcp", self.local_rtsp_url])
 

@@ -38,14 +38,13 @@ from typing import List, Optional
 
 import cv2
 import numpy as np
-
 import pycuda.autoinit  # noqa: F401
 
 from .arcface import TRTArcFace, warp_face_by_5p
+from .camera_reader import CameraReader
 from .draw import draw_overlays
 from .gallery import build_gallery_embeddings
 from .rtsp_video_writer import RTSPVideoStreamWriter
-from .camera_reader import CameraReader
 from .scrfd import TRTSCRFD
 from .utils import infer_arc_batched, pick_topk_indices
 
@@ -94,10 +93,7 @@ def main() -> None:
 
     # Features
     ap.add_argument(
-        "--detection",
-        action="store_true",
-        default=True,
-        help="Enable face detection."
+        "--detection", action="store_true", default=True, help="Enable face detection."
     )
     ap.add_argument(
         "--recognition",
@@ -109,7 +105,7 @@ def main() -> None:
         "--blur",
         action="store_true",
         default=True,
-        help="Enable pixelation blur on faces."
+        help="Enable pixelation blur on faces.",
     )
     ap.add_argument(
         "--blur-mode",
@@ -182,13 +178,17 @@ def main() -> None:
 
     # Outputs
     ap.add_argument(
-        "--local-rtsp", default="rtsp://localhost:8554/live", help="RTSP URL to publish (e.g. rtsp://host:8554/stream)."
+        "--local-rtsp",
+        default="rtsp://localhost:8554/live",
+        help="RTSP URL to publish (e.g. rtsp://host:8554/stream).",
     )
     ap.add_argument(
         "--remote-rtsp", help="Remote RTSP URL to relay (e.g. rtsp://host:8554/stream)."
     )
     ap.add_argument(
-        "--rtsp-mic_device", default="hw:3,0", help="Audio capture device for RTSP (e.g. hw:3,0)."
+        "--rtsp-mic_device",
+        default="hw:3,0",
+        help="Audio capture device for RTSP (e.g. hw:3,0).",
     )
     ap.add_argument(
         "--rtsp-mic_ac", type=int, default=2, help="Audio channels for RTSP (e.g. 2)."
@@ -237,9 +237,19 @@ def main() -> None:
     local_rtsp = args.local_rtsp if args.local_rtsp else None
     remote_rtsp = args.remote_rtsp if args.remote_rtsp else None
 
-    rstp_writer = RTSPVideoStreamWriter(cap.width, cap.height, cap.fps, local_rtsp, remote_rtsp, args.rtsp_mic_device, args.rtsp_mic_ac)
-    logging.info(f"Start streaming to RTSP server at local {local_rtsp} " +
-                 (f"and remote {remote_rtsp}" if remote_rtsp else ""))
+    rstp_writer = RTSPVideoStreamWriter(
+        cap.width,
+        cap.height,
+        cap.fps,
+        local_rtsp,
+        remote_rtsp,
+        args.rtsp_mic_device,
+        args.rtsp_mic_ac,
+    )
+    logging.info(
+        f"Start streaming to RTSP server at local {local_rtsp} "
+        + (f"and remote {remote_rtsp}" if remote_rtsp else "")
+    )
 
     running = True
 
