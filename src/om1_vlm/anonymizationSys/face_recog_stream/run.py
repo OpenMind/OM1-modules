@@ -3,19 +3,19 @@
 Usage examples
 --------------
 
-python -m om1_vlm.anonymizationSys.face_recog_stream.run --scrfd-engine "./src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine" --arc-engine "./src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine" --gallery "./src/om1_vlm/anonymizationSys/gallery" --device /dev/video0 --width 1280 --height 720 --fps 30 --detection --recognition --blur --blur-mode all --draw-boxes --draw-names --show-fps --recog-topk 8 --crowd-thr 12  --remote-rtsp "rtsp://api-video-ingest.openmind.org:8554/<API_KEY_ID>?api_key=<API_KEY>"
+# Basic usage with default model paths (engines and gallery auto-detected):
+python -m om1_vlm.anonymizationSys.face_recog_stream.run --device /dev/video0 --width 1280 --height 720 --fps 30 --detection --recognition --blur --blur-mode all --draw-boxes --draw-names --show-fps --recog-topk 8 --crowd-thr 12 --remote-rtsp "rtsp://api-video-ingest.openmind.org:8554/<API_KEY_ID>?api_key=<API_KEY>"
 
-Local mediamtx (RTMP), no preview window:
+# Local mediamtx (RTMP), no preview window (uses default model paths):
   python -m om1_vlm.anonymizationSys.face_recog_stream.run  \
-    --scrfd-engine "./src/om1_vlm/anonymizationSys/models/scrfd_2.5g_bnkps_shape640x640.engine" \
-    --arc-engine   "./src/om1_vlm/anonymizationSys/models/buffalo_m_w600k_r50.engine" \
-    --gallery "./src/om1_vlm/anonymizationSys/gallery" \
     --device /dev/video0 \
     --width 1280 --height 720 --fps 30 \
     --detection --recognition --blur --blur-mode all \
     --draw-boxes --draw-names --show-fps \
     --recog-topk 8 --crowd-thr 12 \
+    --no-window
 
+# Custom paths example:
   python -m om1_vlm.anonymizationSys.face_recog_stream.run  \
     --scrfd-engine "/path/to/scrfd_2.5g_bnkps_shape640x640.engine" \
     --arc-engine   "/path/to/buffalo_m_w600k_r50.engine" \
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import time
 from typing import List, Optional
@@ -63,13 +64,23 @@ def main() -> None:
     """
     logging.info("Starting realtime_stream...")
 
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    models_dir = os.path.join(script_dir, "..", "models")
+    default_scrfd_engine = os.path.join(
+        models_dir, "scrfd_2.5g_bnkps_shape640x640.engine"
+    )
+    default_arc_engine = os.path.join(models_dir, "buffalo_m_w600k_r50.engine")
+    default_gallery = os.path.join(script_dir, "..", "gallery")
+
     ap = argparse.ArgumentParser(
         "Jetson real-time detection + recognition + blur + streaming"
     )
 
     # Engines
     ap.add_argument(
-        "--scrfd-engine", required=True, help="Path to SCRFD TensorRT engine (.engine)."
+        "--scrfd-engine",
+        default=default_scrfd_engine,
+        help="Path to SCRFD TensorRT engine (.engine).",
     )
     ap.add_argument(
         "--scrfd-input", default=None, help="SCRFD input tensor name (optional)."
@@ -79,7 +90,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--arc-engine",
-        required=False,
+        default=default_arc_engine,
         help="Path to ArcFace TensorRT engine (.engine).",
     )
     ap.add_argument(
@@ -87,7 +98,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--gallery",
-        default=None,
+        default=default_gallery,
         help="Gallery root (subfolders per identity). Required if --recognition.",
     )
 
@@ -200,8 +211,14 @@ def main() -> None:
 
     args = ap.parse_args()
 
-    if args.recognition and (not args.arc_engine or not args.gallery):
-        raise SystemExit("--recognition requires --arc-engine and --gallery")
+    if not os.path.exists(args.scrfd_engine):
+        raise SystemExit(f"SCRFD engine not found: {args.scrfd_engine}")
+
+    if args.recognition:
+        if not os.path.exists(args.arc_engine):
+            raise SystemExit(f"ArcFace engine not found: {args.arc_engine}")
+        if not os.path.exists(args.gallery):
+            raise SystemExit(f"Gallery directory not found: {args.gallery}")
 
     # Create engines
     scrfd = TRTSCRFD(args.scrfd_engine, input_name=args.scrfd_input, size=args.size)
