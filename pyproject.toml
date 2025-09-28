@@ -13,7 +13,7 @@ packages = [
 
 [tool.poetry.scripts]
 om1_tts = "om1_speech.audio.audio_output_stream:main"
-om_face_recog_stream = "om1_vlm.anonymizationSys.face_recog_stream:run"
+om_face_recog_stream = "om1_vlm.anonymizationSys.face_recog_stream.run:main"
 
 [tool.poetry.dependencies]
 pycuda = { version = "2024.1.2", optional = true }
