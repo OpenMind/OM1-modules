@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 import queue
 import re
 import threading
@@ -77,19 +78,13 @@ def _device_index_from_path(device: str) -> int:
     return int(m.group(1)) if m else 0
 
 
-def build_gst_capture(
+def open_capture(
     device: str,
     width: int,
     height: int,
     fps: int,
 ) -> Optional[cv2.VideoCapture]:
-    """Open a UVC camera using a GStreamer pipeline. Tries MJPEG then YUY2.
-
-    Pipelines are configured for low latency:
-      - `io-mode=2` for v4l2src (DMABUF when available)
-      - leaky queues and `appsink drop=true`
-      - `videorate` and fixed caps to keep a steady format
-
+    """Open a UVC camera using a V4L2 pipeline. Tries MJPEG then YUY2.
     Parameters
     ----------
     device : str
@@ -100,219 +95,54 @@ def build_gst_capture(
     Returns
     -------
     Optional[cv2.VideoCapture]
-        Opened GStreamer capture, or None if both attempts fail.
+        Opened V4L2 capture, or None if the camera can't be opened.
     """
-    mjpeg = (
-        f"v4l2src device={device} io-mode=2 "
-        f"! image/jpeg,framerate={fps}/1,width={width},height={height} "
-        f"! queue leaky=downstream max-size-buffers=1 "
-        f"! jpegdec ! videoconvert ! videorate "
-        f"! video/x-raw,format=BGR,framerate={fps}/1,width={width},height={height} "
-        f"! appsink drop=true max-buffers=1 sync=false"
-    )
-    yuy2 = (
-        f"v4l2src device={device} io-mode=2 "
-        f"! video/x-raw,format=YUY2,framerate={fps}/1,width={width},height={height} "
-        f"! queue leaky=downstream max-size-buffers=1 "
-        f"! videoconvert ! videorate "
-        f"! video/x-raw,format=BGR,framerate={fps}/1,width={width},height={height} "
-        f"! appsink drop=true max-buffers=1 sync=false"
-    )
+    cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_FPS, fps)
 
-    for pipe in (mjpeg, yuy2):
-        cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
-        if cap.isOpened():
-            logging.info(f"[gst] using pipeline: {pipe}")
-            return cap
+    if cap.isOpened():
+        return cap
 
-    logging.warning("[gst] both MJPEG and YUY2 pipelines failed for device=%s", device)
-    # Final fallback: plain OpenCV V4L2
-    idx = _device_index_from_path(device)
-    return build_cam_capture(idx, width, height, fps)
-
+    return None
 
 # ======================================================================
 # Writers
 # ======================================================================
 
-
-class AsyncVideoWriter:
-    """Non-blocking wrapper over cv2.VideoWriter.
-
-    Frames are queued and written on a background daemon thread.
-    If the queue is full, frames are dropped instead of blocking the main loop.
-
-    Parameters
-    ----------
-    writer : cv2.VideoWriter
-        An already opened writer object (e.g., from `open_nvenc_rtmp_writer`).
-    queue_size : int, optional
-        Max buffered frames; small values keep latency low (default 1).
-    """
-
-    def __init__(self, writer: cv2.VideoWriter, queue_size: int = 1):
-        self._w = writer
-        self._q: "queue.Queue" = queue.Queue(maxsize=queue_size)
-        self._stop = threading.Event()
-        self._thr = threading.Thread(target=self._run, daemon=True)
-        self._thr.start()
-
-    def write(self, frame) -> bool:
-        """Enqueue a frame for writing (drops when queue is full)."""
-        if self._w is None:
-            return False
-        try:
-            self._q.put_nowait(frame)
-            return True
-        except queue.Full:
-            return False
-
-    def _run(self) -> None:
-        try:
-            while not self._stop.is_set() and self._w is not None:
-                try:
-                    f = self._q.get(timeout=0.2)
-                except queue.Empty:
-                    continue
-                try:
-                    self._w.write(f)
-                except Exception as e:
-                    logging.warning(f"[warn] async writer error, stopping: {e}")
-                    break
-        finally:
-            try:
-                if self._w is not None:
-                    self._w.release()
-            except Exception:
-                pass
-            self._w = None
-
-    def close(self) -> None:
-        """Signal the writer thread to stop and release resources."""
-        self._stop.set()
-        if self._thr.is_alive():
-            self._thr.join(timeout=1.0)
-
-    def is_open(self) -> bool:
-        """Return True if the underlying writer is still open."""
-        return self._w is not None
-
-
-def open_nvenc_rtsp_writer(rtsp_url: str, width: int, height: int, fps_in: float):
-    """
-    Publish to an RTSP server (MediaMTX) using rtspclientsink (RECORD).
-    Feed H.264 elementary stream (video/x-h264). Do NOT use rtph264pay here.
-    """
-    fps = int(round(fps_in if fps_in and fps_in > 0 else 25))
-    gop = max(1, fps)
-
-    # Live source (frames from OpenCV)
-    common_src = (
-        "appsrc is-live=true do-timestamp=true format=time "
-        f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 "
-        "! queue leaky=downstream max-size-buffers=1 "
+def open_ffmpeg_rtmp_writer(rtmp_url: str, width: int, height: int, fps: int):
+    fourcc = cv2.VideoWriter_fourcc(*"H264")
+    out = cv2.VideoWriter(
+        rtmp_url,
+        cv2.CAP_FFMPEG,
+        fourcc,
+        fps,
+        (width, height),
     )
+    if not out.isOpened():
+        raise RuntimeError("Could not open FFmpeg RTMP writer")
+    return out
 
-    # Jetson NVENC → H.264 elementary stream
-    nvenc_branch = (
-        "! videoconvert ! nvvidconv "
-        "! video/x-raw(memory:NVMM),format=NV12 "
-        f"! nvv4l2h264enc insert-sps-pps=true control-rate=1 bitrate=3000000 "
-        f"iframeinterval={gop} idrinterval={gop} preset-level=1 "
-        "! h264parse config-interval=1 "
-        "! video/x-h264,stream-format=byte-stream,alignment=au "
-        f'! rtspclientsink location="{rtsp_url}" protocols=tcp latency=0'
-    )
-
-    # CPU x264 fallback (if NVENC not available)
-    x264_branch = (
-        "! videoconvert "
-        f"! x264enc tune=zerolatency speed-preset=ultrafast bitrate=2500 "
-        f"   key-int-max={gop} bframes=0 byte-stream=true "
-        "! h264parse config-interval=1 "
-        "! video/x-h264,stream-format=byte-stream,alignment=au "
-        f'! rtspclientsink location="{rtsp_url}" protocols=tcp latency=0'
-    )
-
-    for pipe in (common_src + nvenc_branch, common_src + x264_branch):
-        w = cv2.VideoWriter(pipe, cv2.CAP_GSTREAMER, 0, fps, (width, height))
-        if w.isOpened():
-            enc = "NVENC" if "nvv4l2h264enc" in pipe else "x264"
-            logging.info("[rtsp] using %s -> rtspclientsink (elementary H.264)", enc)
-            return w
-
-    logging.error("[rtsp] failed to open RTSP pipeline: %s", rtsp_url)
-    return None
-
-
-def open_nvenc_rtmp_writer(
-    rtmp_url: str, width: int, height: int, fps_in: float
-) -> Optional[cv2.VideoWriter]:
-    """
-    Create a GStreamer RTMP/RTMPS writer.
-    - Prefer rtmpsink (librtmp) for plain RTMP URLs (more tolerant of non /app/stream paths).
-    - Try NVENC first, then CPU x264.
-    - Use minimal, ffmpeg-like pipelines to avoid caps negotiation issues.
-    """
-    fps = int(round(fps_in if fps_in and fps_in > 0 else 25))
-    gop = max(1, fps)
-
-    u = urlparse(rtmp_url)
-    scheme = (u.scheme or "rtmp").lower()
-    port = u.port or (443 if scheme == "rtmps" else 1935)
-
-    # Choose sink preference:
-    # - for rtmp:// on 1935 (your cloud case), try rtmpsink first (librtmp),
-    #   then rtmp2sink. For rtmps:// prefer rtmp2sink first.
-    if scheme == "rtmps":
-        sink_order = ["rtmp2sink", "rtmpsink"]
-    else:
-        sink_order = ["rtmpsink", "rtmp2sink"]
-
-    # Common appsrc (live timestamps)
-    common_src = (
-        "appsrc is-live=true do-timestamp=true format=time "
-        f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 "
-        "! queue leaky=downstream max-size-buffers=1 "
-    )
-
-    # NVENC (Jetson) minimal path
-    nvenc = (
-        "! videoconvert ! nvvidconv "
-        "! video/x-raw(memory:NVMM),format=NV12 "
-        f"! nvv4l2h264enc insert-sps-pps=true maxperf-enable=1 control-rate=1 bitrate=2500000 "
-        f"iframeinterval={gop} idrinterval={gop} preset-level=1 "
-        "! h264parse config-interval=1 "
-        "! flvmux streamable=true "
-    )
-
-    # CPU x264 minimal path (mirrors your ffmpeg flags)
-    x264 = (
-        "! videoconvert "
-        f"! x264enc tune=zerolatency speed-preset=ultrafast bitrate=2500 key-int-max={gop} bframes=0 byte-stream=true "
-        "! h264parse config-interval=1 "
-        "! flvmux streamable=true "
-    )
-
-    # Build candidate pipelines in the right order
-    candidates = []
-    for sink in sink_order:
-        sink_str = f'! {sink} location="{rtmp_url}" sync=false async=false'
-        candidates.append(common_src + nvenc + sink_str)
-        candidates.append(common_src + x264 + sink_str)
-
-    # Try each candidate until one opens
-    for pipe in candidates:
-        w = cv2.VideoWriter(pipe, cv2.CAP_GSTREAMER, 0, fps, (width, height))
-        if w.isOpened():
-            which_enc = "NVENC" if "nvv4l2h264enc" in pipe else "x264"
-            which_sink = "rtmp2sink" if "rtmp2sink" in pipe else "rtmpsink"
-            logging.info(
-                f"[rtmp] using {which_enc} -> {which_sink} ({scheme}://:{port})"
-            )
-            return w
-
-    return None
+def open_ffmpeg_rtsp_writer(rtsp_url: str, width: int, height: int, fps: int):
+    # return None
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{width}x{height}",
+        "-r", str(fps),
+        "-i", "-",
+        "-c:v", "h264",          # or "h264_nvenc" if you have NVIDIA GPU
+        "-preset", "veryfast",
+        "-tune", "zerolatency",
+        "-f", "rtsp",
+        "-rtsp_transport", "tcp",   # use TCP to avoid UDP packet loss
+        rtsp_url,
+    ]
+    return subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
 
 def build_file_writer(

@@ -54,12 +54,11 @@ from .arcface import TRTArcFace, warp_face_by_5p
 from .draw import draw_overlays
 from .gallery import build_gallery_embeddings
 from .io import (
-    AsyncVideoWriter,
     build_cam_capture,
     build_file_writer,
-    build_gst_capture,
-    open_nvenc_rtmp_writer,
-    open_nvenc_rtsp_writer,
+    open_capture,
+    open_ffmpeg_rtmp_writer,
+    open_ffmpeg_rtsp_writer,
     reopen_capture,
     safe_read,
 )
@@ -242,7 +241,7 @@ def main() -> None:
 
     # Open capture
     cap = (
-        build_gst_capture(args.device, args.width, args.height, args.fps)
+        open_capture(args.device, args.width, args.height, args.fps)
         if args.gst
         else build_cam_capture(args.cam_index, args.width, args.height, args.fps)
     )
@@ -256,25 +255,19 @@ def main() -> None:
     fps_in = cap.get(cv2.CAP_PROP_FPS) or float(args.fps)
 
     # Open outputs
-    rtmp_writer: Optional[AsyncVideoWriter] = None
-    rtsp_writer: Optional[AsyncVideoWriter] = None
     if args.rtmp:
-        raw_writer = open_nvenc_rtmp_writer(args.rtmp, W, H, fps_in)
+        raw_writer = open_ffmpeg_rtmp_writer(args.rtmp, W, H, fps_in)
         if raw_writer is None:
             logging.warning(
                 "[warn] RTMP pipeline failed to open. Continue without streaming."
             )
-        else:
-            rtmp_writer = AsyncVideoWriter(raw_writer, queue_size=1)
 
     if args.rtsp:
-        raw_writer = open_nvenc_rtsp_writer(args.rtsp, W, H, fps_in)
+        raw_writer = open_ffmpeg_rtsp_writer(args.rtsp, W, H, fps_in)
         if raw_writer is None:
             logging.warning(
                 "[warn] RTSP pipeline failed to open. Continue without streaming."
             )
-        else:
-            rtsp_writer = AsyncVideoWriter(raw_writer, queue_size=1)
 
     file_writer = (
         build_file_writer(args.outfile, W, H, fps_in, args.nvenc)
@@ -310,7 +303,7 @@ def main() -> None:
                 logging.warning("[warn] capture read failed, trying to reopen...")
                 cap = reopen_capture(
                     cap,
-                    build_gst_capture if args.gst else build_cam_capture,
+                    open_capture if args.gst else build_cam_capture,
                     args.device if args.gst else args.cam_index,
                     args.width,
                     args.height,
@@ -483,19 +476,30 @@ def main() -> None:
                     cv2.LINE_AA,
                 )
 
-            # Outputs (non-blocking RTMP)
-            if rtmp_writer is not None and rtmp_writer.is_open():
-                rtmp_writer.write(frame)
-            # (re)open RTSP writer if requested and currently closed
-            if args.rtsp and (rtsp_writer is None or not rtsp_writer.is_open()):
-                raw_writer = open_nvenc_rtsp_writer(args.rtsp, W, H, fps_in)
-                if raw_writer is not None:
-                    rtsp_writer = AsyncVideoWriter(raw_writer, queue_size=1)
+            # # Outputs (non-blocking RTMP)
+            # if rtmp_writer is not None and rtmp_writer.is_open():
+            #     rtmp_writer.write(frame)
+            # # (re)open RTSP writer if requested and currently closed
+            # if args.rtsp and (rtsp_writer is None or not rtsp_writer.is_open()):
+            #     raw_writer = open_ffmpeg_rtsp_writer(args.rtsp, W, H, fps_in)
 
-            if rtsp_writer is not None and rtsp_writer.is_open():
-                rtsp_writer.write(frame)
+            if raw_writer is None:
+                if args.rtmp:
+                    raw_writer = open_ffmpeg_rtmp_writer(args.rtmp, W, H, fps_in)
+                elif args.rtsp:
+                    raw_writer = open_ffmpeg_rtsp_writer(args.rtsp, W, H, fps_in)
+
+            if raw_writer is not None:
+                raw_writer.stdin.write(frame)
+
+            # if rtsp_writer is not None and rtsp_writer.is_open():
+            #     rtsp_writer.write(frame)
             if file_writer is not None:
+                start_time = time.time()
+                logging.info(f"Writing frame at time {start_time}")
                 file_writer.write(frame)
+                end_time = time.time()
+                logging.info(f"Finished writing frame at time {end_time}, took {end_time - start_time} seconds")
 
             # Optional preview
             if not args.no_window:
@@ -517,10 +521,10 @@ def main() -> None:
             cap.release()
         except Exception:
             pass
-        if rtmp_writer is not None:
-            rtmp_writer.close()
-        if rtsp_writer is not None:
-            rtsp_writer.close()
+        # if rtmp_writer is not None:
+        #     rtmp_writer.close()
+        # if rtsp_writer is not None:
+        #     rtsp_writer.close()
         if file_writer is not None:
             try:
                 file_writer.release()
