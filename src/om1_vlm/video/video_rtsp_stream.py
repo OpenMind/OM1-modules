@@ -86,6 +86,19 @@ class VideoRTSPStream:
         logger.debug("Starting background event loop for video streaming.")
         self.loop.run_forever()
 
+    def _release_capture(self):
+        """
+        Safely release the video capture device.
+        """
+        if self._cap is not None:
+            try:
+                self._cap.release()
+                logger.debug("Released video capture device")
+            except Exception as e:
+                logger.warning(f"Error releasing capture: {e}")
+            finally:
+                self._cap = None
+
     def on_video(self):
         """
         Main video capture and processing loop.
@@ -100,6 +113,8 @@ class VideoRTSPStream:
         """
         while self.running:
             try:
+                self._release_capture()
+
                 self._cap = cv2.VideoCapture(self.rtsp_url)
 
                 self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -140,7 +155,7 @@ class VideoRTSPStream:
                     if not ret:
                         logger.error("Error reading frame from video stream")
                         time.sleep(0.1)
-                        continue
+                        break
 
                     if elapsed <= 1.5 * frame_time and self.frame_callbacks:
                         _, buffer = cv2.imencode(".jpg", frame, self.encode_quality)
@@ -166,10 +181,12 @@ class VideoRTSPStream:
             except Exception as e:
                 logger.error(f"Error streaming video: {e}")
             finally:
-                if self._cap:
-                    self._cap.release()
-                    logger.info("Released video capture device")
-                break
+                self._release_capture()
+
+            if self.running:
+                time.sleep(2)
+
+        logger.info("RTSP Video processing thread stopped")
 
     def _start_video_thread(self):
         """
@@ -211,6 +228,7 @@ class VideoRTSPStream:
         Initializes the video processing thread and begins
         capturing frames.
         """
+        self.running = True
         self._start_video_thread()
 
     def stop(self):
@@ -222,8 +240,7 @@ class VideoRTSPStream:
         """
         self.running = False
 
-        if self._cap:
-            self._cap.release()
+        self._release_capture()
 
         if self._video_thread and self._video_thread.is_alive():
             self._video_thread.join(timeout=1.0)
