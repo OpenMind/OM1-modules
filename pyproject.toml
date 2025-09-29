@@ -13,12 +13,13 @@ packages = [
 
 [tool.poetry.scripts]
 om1_tts = "om1_speech.audio.audio_output_stream:main"
+om_face_recog_stream = "om1_vlm.anonymizationSys.face_recog_stream.run:main"
 
 [tool.poetry.dependencies]
 pycuda = { version = "2024.1.2", optional = true }
 python = ">=3.9,<4.0"
 pyaudio = "^0.2.13"
-numpy = "^2.0.2"
+numpy = ">2.0.0"
 websockets = "^13.0"
 opencv-python = "^4.5.0"
 requests = "^2.32.4"
@@ -30,6 +31,7 @@ eclipse-zenoh = "^1.4.0"
 pycdr2 = "^1.0.0"
 torch = { url = "https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl", optional = true }
 av = "^15.1.0"
+
 
 [tool.poetry.extras]
 realsense = ["pyrealsense2", "pyrealsense2-macosx"]
