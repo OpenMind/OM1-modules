@@ -209,7 +209,9 @@ def main() -> None:
     )
     ap.add_argument("--print-every", type=int, default=30, help="Log every N frames.")
     ap.add_argument(
-        "--perf-mode", action="store_true", help="Enable performance mode (skip recognition when processing is slow)."
+        "--perf-mode",
+        action="store_true",
+        help="Enable performance mode (skip recognition when processing is slow).",
     )
 
     args = ap.parse_args()
@@ -316,7 +318,11 @@ def main() -> None:
             # Recognition (Top-K with crowd skip)
             names = []
             known_mask = []
-            skip_recognition = args.perf_mode and ema_ms is not None and ema_ms > (target_frame_time * 800)  # 80% of frame time
+            skip_recognition = (
+                args.perf_mode
+                and ema_ms is not None
+                and ema_ms > (target_frame_time * 800)
+            )  # 80% of frame time
 
             if (
                 args.recognition

@@ -54,7 +54,6 @@ class RTSPVideoStreamWriter:
         cmd = [
             "ffmpeg",
             "-y",
-
             # Video input
             "-f",
             "rawvideo",
@@ -66,7 +65,6 @@ class RTSPVideoStreamWriter:
             str(self.fps),
             "-i",
             "-",
-
             # Audio input
             "-f",
             "alsa",
@@ -74,7 +72,6 @@ class RTSPVideoStreamWriter:
             str(self.mic_ac),
             "-i",
             self.mic_device,
-
             # Video encoding
             "-map",
             "0:v",
@@ -90,11 +87,9 @@ class RTSPVideoStreamWriter:
             "30",
             "-keyint_min",
             "30",
-
             # Rotation
             "-vf",
             "transpose=2",
-
             # Audio encoding
             "-map",
             "1:a",
@@ -106,7 +101,6 @@ class RTSPVideoStreamWriter:
             "2",
             "-b:a",
             "128k",
-
             # Audio filtering
             "-af",
             "highpass=f=120, lowpass=f=6000, afftdn=nt=w:nf=-40, equalizer=f=1000:t=q:w=1:g=-15",
