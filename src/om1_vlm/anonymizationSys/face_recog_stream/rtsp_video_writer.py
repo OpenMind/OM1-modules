@@ -64,7 +64,7 @@ class RTSPVideoStreamWriter:
 
         time_diffs = []
         for i in range(1, len(self.frame_times)):
-            time_diffs.append(self.frame_times[i] - self.frame_times[i-1])
+            time_diffs.append(self.frame_times[i] - self.frame_times[i - 1])
 
         if time_diffs:
             avg_frame_time = sum(time_diffs) / len(time_diffs)
@@ -99,44 +99,73 @@ class RTSPVideoStreamWriter:
             "ffmpeg",
             "-y",
             # Video input - use variable framerate
-            "-f", "rawvideo",
-            "-pix_fmt", "bgr24",
-            "-s", f"{self.width}x{self.height}",
-            "-r", str(self.current_fps),
-            "-use_wallclock_as_timestamps", "1",  # Use wall clock for timestamps
-            "-i", "-",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s",
+            f"{self.width}x{self.height}",
+            "-r",
+            str(self.current_fps),
+            "-use_wallclock_as_timestamps",
+            "1",  # Use wall clock for timestamps
+            "-i",
+            "-",
             # Audio input with larger buffer and error resilience
-            "-f", "alsa",
-            "-ac", str(self.mic_ac),
-            "-thread_queue_size", "2048",
-            "-i", self.mic_device,
+            "-f",
+            "alsa",
+            "-ac",
+            str(self.mic_ac),
+            "-thread_queue_size",
+            "2048",
+            "-i",
+            self.mic_device,
             # Video encoding - optimize for variable framerate
-            "-map", "0:v",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-tune", "zerolatency",
-            "-b:v", f"{int(400 * self.current_fps / 15)}k",
-            "-g", str(max(15, int(self.current_fps * 2))),
-            "-keyint_min", str(max(5, int(self.current_fps / 2))),
-            "-vsync", "vfr",  # Variable frame rate sync
+            "-map",
+            "0:v",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-b:v",
+            f"{int(400 * self.current_fps / 15)}k",
+            "-g",
+            str(max(15, int(self.current_fps * 2))),
+            "-keyint_min",
+            str(max(5, int(self.current_fps / 2))),
+            "-vsync",
+            "vfr",  # Variable frame rate sync
             # Rotation
-            "-vf", "transpose=2",
+            "-vf",
+            "transpose=2",
             # Audio encoding with async compensation
-            "-map", "1:a",
-            "-c:a", "libopus",
-            "-ar", "48000",
-            "-ac", "2",
-            "-b:a", "128k",
-            "-async", "1",  # Audio sync compensation
-            "-af", "highpass=f=120, lowpass=f=6000, afftdn=nt=w:nf=-40, equalizer=f=1000:t=q:w=1:g=-15",
+            "-map",
+            "1:a",
+            "-c:a",
+            "libopus",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-b:a",
+            "128k",
+            "-async",
+            "1",  # Audio sync compensation
+            "-af",
+            "highpass=f=120, lowpass=f=6000, afftdn=nt=w:nf=-40, equalizer=f=1000:t=q:w=1:g=-15",
         ]
 
         if self.remote_rtsp_url:
-            cmd.extend([
-                "-f", "tee",
-                f"[f=rtsp:rtsp_transport=tcp]{self.local_rtsp_url}|"
-                f"[f=rtsp:rtsp_transport=tcp:onfail=ignore]{self.remote_rtsp_url}",
-            ])
+            cmd.extend(
+                [
+                    "-f",
+                    "tee",
+                    f"[f=rtsp:rtsp_transport=tcp]{self.local_rtsp_url}|"
+                    f"[f=rtsp:rtsp_transport=tcp:onfail=ignore]{self.remote_rtsp_url}",
+                ]
+            )
         else:
             cmd.extend(["-f", "rtsp", "-rtsp_transport", "tcp", self.local_rtsp_url])
 
@@ -196,7 +225,9 @@ class RTSPVideoStreamWriter:
             new_fps = self._calculate_fps()
 
             if self._should_restart_process(new_fps):
-                logging.info(f"FPS changed significantly: {self.current_fps} -> {new_fps:.1f}, restarting FFmpeg")
+                logging.info(
+                    f"FPS changed significantly: {self.current_fps} -> {new_fps:.1f}, restarting FFmpeg"
+                )
                 self.current_fps = new_fps
                 self.restart_needed = True
 
