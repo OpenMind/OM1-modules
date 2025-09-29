@@ -100,7 +100,8 @@ class CameraReader:
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             self.cap.set(cv2.CAP_PROP_FPS, fps)
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
 
             if self.cap.isOpened():
                 actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))

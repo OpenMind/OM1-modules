@@ -208,6 +208,9 @@ def main() -> None:
         "--no-window", action="store_true", help="Disable display window (headless)."
     )
     ap.add_argument("--print-every", type=int, default=30, help="Log every N frames.")
+    ap.add_argument(
+        "--perf-mode", action="store_true", help="Enable performance mode (skip recognition when processing is slow)."
+    )
 
     args = ap.parse_args()
 
@@ -281,6 +284,9 @@ def main() -> None:
     total = 0
     ema_ms: Optional[float] = None
 
+    target_frame_time = 1.0 / args.fps
+    last_frame_time = time.perf_counter()
+
     try:
         while running:
             frame = cap.read_frame()
@@ -310,8 +316,11 @@ def main() -> None:
             # Recognition (Top-K with crowd skip)
             names = []
             known_mask = []
+            skip_recognition = args.perf_mode and ema_ms is not None and ema_ms > (target_frame_time * 800)  # 80% of frame time
+
             if (
                 args.recognition
+                and not skip_recognition
                 and dets is not None
                 and dets.shape[0] > 0
                 and gal_feats is not None
@@ -455,6 +464,13 @@ def main() -> None:
                 cv2.imshow("Face Anonymizer", frame)
                 if cv2.waitKey(1) & 0xFF == 27:
                     break
+
+            current_time = time.perf_counter()
+            elapsed = current_time - last_frame_time
+            if elapsed < target_frame_time:
+                sleep_time = target_frame_time - elapsed
+                time.sleep(sleep_time)
+            last_frame_time = time.perf_counter()
 
             if total % max(1, args.print_every) == 0:
                 sec = max(1e-9, time.perf_counter() - t0)

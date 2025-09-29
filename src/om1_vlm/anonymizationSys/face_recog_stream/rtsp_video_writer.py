@@ -42,7 +42,7 @@ class RTSPVideoStreamWriter:
         self._start_process()
 
         # Queue and threading for frame handling
-        self.frame_queue = queue.Queue(maxsize=10)
+        self.frame_queue = queue.Queue(maxsize=3)
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._writer_thread, daemon=True)
         self.thread.start()
@@ -54,6 +54,7 @@ class RTSPVideoStreamWriter:
         cmd = [
             "ffmpeg",
             "-y",
+
             # Video input
             "-f",
             "rawvideo",
@@ -65,6 +66,7 @@ class RTSPVideoStreamWriter:
             str(self.fps),
             "-i",
             "-",
+
             # Audio input
             "-f",
             "alsa",
@@ -72,6 +74,7 @@ class RTSPVideoStreamWriter:
             str(self.mic_ac),
             "-i",
             self.mic_device,
+
             # Video encoding
             "-map",
             "0:v",
@@ -81,13 +84,17 @@ class RTSPVideoStreamWriter:
             "ultrafast",
             "-tune",
             "zerolatency",
+            "-b:v",
+            "600k",
             "-g",
-            str(self.fps),
+            "30",
             "-keyint_min",
-            str(self.fps),
+            "30",
+
             # Rotation
             "-vf",
             "transpose=2",
+
             # Audio encoding
             "-map",
             "1:a",
@@ -99,6 +106,10 @@ class RTSPVideoStreamWriter:
             "2",
             "-b:a",
             "128k",
+
+            # Audio filtering
+            "-af",
+            "highpass=f=120, lowpass=f=6000, afftdn=nt=w:nf=-40, equalizer=f=1000:t=q:w=1:g=-15",
         ]
 
         if self.remote_rtsp_url:
@@ -107,7 +118,7 @@ class RTSPVideoStreamWriter:
                     "-f",
                     "tee",
                     f"[f=rtsp:rtsp_transport=tcp]{self.local_rtsp_url}|"
-                    f"[f=rtsp:rtsp_transport=tcp]{self.remote_rtsp_url}",
+                    f"[f=rtsp:rtsp_transport=tcp:onfail=ignore]{self.remote_rtsp_url}",
                 ]
             )
         else:
@@ -161,16 +172,16 @@ class RTSPVideoStreamWriter:
             return
 
         try:
-            if self.frame_queue.full():
+            while self.frame_queue.qsize() >= 2:
                 try:
                     self.frame_queue.get_nowait()
                 except queue.Empty:
-                    pass
+                    break
 
             self.frame_queue.put_nowait(frame)
 
         except queue.Full:
-            logging.debug("Frame queue full, dropping frame")
+            pass
         except Exception as e:
             logging.error(f"Error queueing frame: {e}")
 
