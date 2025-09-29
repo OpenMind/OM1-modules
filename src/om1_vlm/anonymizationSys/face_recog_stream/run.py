@@ -197,12 +197,12 @@ def main() -> None:
         "--remote-rtsp", help="Remote RTSP URL to relay (e.g. rtsp://host:8554/stream)."
     )
     ap.add_argument(
-        "--rtsp-mic_device",
+        "--rtsp-mic-device",
         default="hw:3,0",
         help="Audio capture device for RTSP (e.g. hw:3,0).",
     )
     ap.add_argument(
-        "--rtsp-mic_ac", type=int, default=2, help="Audio channels for RTSP (e.g. 2)."
+        "--rtsp-mic-ac", type=int, default=2, help="Audio channels for RTSP (e.g. 2)."
     )
     ap.add_argument(
         "--no-window", action="store_true", help="Disable display window (headless)."
