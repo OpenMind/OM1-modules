@@ -55,6 +55,7 @@ def rtsp_audio_processor(
     )
 
     running = True
+    rtsp_container = None
     while running:
         try:
             cmd = control_queue.get_nowait()
