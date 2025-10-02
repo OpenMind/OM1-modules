@@ -273,7 +273,7 @@ def main() -> None:
         remote_rtsp,
         args.rtsp_mic_device,
         args.rtsp_mic_ac,
-        args.rtsp_mic_rnnoise
+        args.rtsp_mic_rnnoise,
     )
     logging.info(
         f"Start streaming to RTSP server at local {local_rtsp} "
