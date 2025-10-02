@@ -17,13 +17,33 @@ class RTSPVideoStreamWriter:
         width: int,
         height: int,
         estimated_fps: int = 15,
-        local_rtsp_url: str = "rtsp://localhost:8554/live",
+        local_rtsp_url: Optional[str] = "rtsp://localhost:8554/live",
         remote_rtsp_url: Optional[str] = None,
         mic_device: str = "hw:3,0",
         mic_ac: int = 2,
+        mic_rnnoise: Optional[str] = None,
     ):
         """
         Initialize the RTSP video stream writer.
+
+        Parameters
+        ----------
+        width : int
+            Width of the video frames.
+        height : int
+            Height of the video frames.
+        estimated_fps : int, optional
+            Estimated frames per second for the video stream, by default 15.
+        local_rtsp_url : Optional[str], optional
+            Local RTSP URL to stream to, by default "rtsp://localhost:8554/live".
+        remote_rtsp_url : Optional[str], optional
+            Remote RTSP URL to stream to, by default None.
+        mic_device : str, optional
+            Audio input device (e.g. ALSA device), by default "hw:3,0".
+        mic_ac : int, optional
+            Number of audio channels, by default 2.
+        mic_rnnoise : Optional[str], optional
+            Path to RNNoise model for noise suppression, by default None.
         """
         if not local_rtsp_url and not remote_rtsp_url:
             raise ValueError(
@@ -37,6 +57,7 @@ class RTSPVideoStreamWriter:
         self.remote_rtsp_url = remote_rtsp_url
         self.mic_device = mic_device
         self.mic_ac = mic_ac
+        self.mic_rnnoise = mic_rnnoise
 
         # FPS measurement
         self.frame_times = deque(maxlen=30)
@@ -106,7 +127,7 @@ class RTSPVideoStreamWriter:
             "-use_wallclock_as_timestamps", "1",  # Use wall clock for timestamps
             "-i", "-",
             # Audio input with larger buffer and error resilience
-            "-f", "alsa",
+            "-f", "pulse",
             "-ac", str(self.mic_ac),
             "-thread_queue_size", "2048",
             "-i", self.mic_device,
@@ -127,6 +148,7 @@ class RTSPVideoStreamWriter:
             "-ar", "48000",
             "-ac", "2",
             "-b:a", "128k",
+            "-af", "arnndn=m=" + self.mic_rnnoise if self.mic_rnnoise else "anull",
             "-async", "1",  # Audio sync compensation
             "-af", "highpass=f=120, lowpass=f=6000, afftdn=nt=w:nf=-40, equalizer=f=1000:t=q:w=1:g=-15",
         ]
