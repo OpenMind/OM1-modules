@@ -200,7 +200,7 @@ def main() -> None:
     ap.add_argument(
         "--rtsp-mic-device",
         default="default_mic_aec",
-        help="Audio capture device for RTSP (e.g. hw:3,0).",
+        help="Audio capture device for RTSP (e.g. default_mic_aec).",
     )
     ap.add_argument(
         "--rtsp-mic-ac", type=int, default=2, help="Audio channels for RTSP (e.g. 2)."
