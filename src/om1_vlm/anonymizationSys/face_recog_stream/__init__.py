@@ -9,5 +9,7 @@ __all__ = [
     "scrfd",
     "gallery",
     "io",
+    "http_api",
+    "who_tracker",
 ]
 __version__ = "0.1.0"
