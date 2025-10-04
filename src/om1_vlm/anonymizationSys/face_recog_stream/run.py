@@ -200,6 +200,7 @@ def main() -> None:
         models_dir, "scrfd_2.5g_bnkps_shape640x640.engine"
     )
     default_arc_engine = os.path.join(models_dir, "buffalo_m_w600k_r50.engine")
+    default_rnnoise = os.path.join(models_dir, "rnnoise.rnnn")
     default_gallery = os.path.join(script_dir, "..", "gallery")
 
     ap = argparse.ArgumentParser(
@@ -345,6 +346,11 @@ def main() -> None:
 
     # UI / perf
     ap.add_argument(
+        "--rtsp-mic-rnnoise",
+        default=default_rnnoise,
+        help="Path to RNNoise model (e.g. rnnoise.rnn).",
+    )
+    ap.add_argument(
         "--no-window", action="store_true", help="Disable display window (headless)."
     )
     ap.add_argument("--print-every", type=int, default=30, help="Log every N frames.")
@@ -437,6 +443,7 @@ def main() -> None:
         args.remote_rtsp,
         args.rtsp_mic_device,
         args.rtsp_mic_ac,
+        args.rtsp_mic_rnnoise,
     )
     log.info(
         "Publishing RTSP: local=%s%s",
