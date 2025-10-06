@@ -118,8 +118,7 @@ from .scrfd import TRTSCRFD
 from .utils import infer_arc_batched, pick_topk_indices
 from .who_tracker import WhoTracker
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("face_stream")
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------- Small shared states -------------------------- #
@@ -192,7 +191,7 @@ def main() -> None:
     -------
     None
     """
-    log.info("Starting realtime_stream...")
+    logger.info("Starting realtime_stream...")
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     models_dir = os.path.join(script_dir, "..", "models")
@@ -334,14 +333,11 @@ def main() -> None:
     )
     ap.add_argument(
         "--rtsp-mic-device",
-        default="hw:0,0",
-        help="ALSA device (e.g. hw:2,0 or plughw:2,0).",
+        default="default_mic_aec",
+        help="Audio capture device for RTSP (e.g. default_mic_aec).",
     )
     ap.add_argument(
-        "--rtsp-mic-ac",
-        type=int,
-        default=1,
-        help="Audio channels for RTSP (1=mono, 2=stereo).",
+        "--rtsp-mic-ac", type=int, default=2, help="Audio channels for RTSP (e.g. 2)."
     )
 
     # UI / perf
@@ -362,7 +358,7 @@ def main() -> None:
 
     # HTTP control
     ap.add_argument("--http-host", default="127.0.0.1", help="HTTP bind host.")
-    ap.add_argument("--http-port", type=int, default=6791, help="HTTP bind port.")
+    ap.add_argument("--http-port", type=int, default=6793, help="HTTP bind port.")
     ap.add_argument(
         "--http-lookback-sec",
         type=float,
@@ -421,7 +417,7 @@ def main() -> None:
         feats, id_labels = gm.get_identity_means()
         with gal_lock:
             gal_state.gal_feats, gal_state.gal_labels = feats, id_labels
-        log.info(
+        logger.info(
             "Gallery ready: identities=%d (aligned+%d, vectors+%d) time=%.2fs",
             len(id_labels),
             aligned_added,
@@ -445,7 +441,7 @@ def main() -> None:
         args.rtsp_mic_ac,
         args.rtsp_mic_rnnoise,
     )
-    log.info(
+    logger.info(
         "Publishing RTSP: local=%s%s",
         args.local_rtsp,
         f"  remote={args.remote_rtsp}" if args.remote_rtsp else "",
@@ -555,7 +551,7 @@ def main() -> None:
         frame_state=frame_state,
         frame_lock=frame_lock,
         run_job_sync=run_job_sync,
-        logger=log,
+        logger=logger,
     )
 
     # Run the server here
@@ -564,14 +560,14 @@ def main() -> None:
     http.register_message_callback(http_api._handle)
 
     http.start()
-    log.info("HTTP listening on http://%s:%d", args.http_host, args.http_port)
+    logger.info("HTTP listening on http://%s:%d", args.http_host, args.http_port)
 
     # Graceful shutdown
     running = True
 
     def handle_sigint(sig, frame):
         nonlocal running
-        log.info("SIGINT received, shutting down....")
+        logger.info("SIGINT received, shutting down....")
         running = False
 
     signal.signal(signal.SIGINT, handle_sigint)
@@ -595,7 +591,7 @@ def main() -> None:
 
             frame = cap.read_frame()
             if frame is None:
-                log.warning("[warn] Frame is None ")
+                logger.warning("[warn] Frame is None ")
                 time.sleep(0.02)
                 continue
 
@@ -623,7 +619,7 @@ def main() -> None:
             try:
                 dets, kpss = scrfd.detect(frame, conf=det_conf, max_num=max_num)
             except Exception as e:
-                log.warning("[warn] detection failed this frame: %s", e)
+                logger.warning("[warn] detection failed this frame: %s", e)
                 dets, kpss = np.zeros((0, 5), np.float32), None
 
             # Save CLEAN copy + dets/kpss for /selfie BEFORE any drawing/blur
@@ -724,7 +720,7 @@ def main() -> None:
 
                     names = names_full
                 except Exception as e:
-                    log.warning("[warn] recognition failed this frame: %s", e)
+                    logger.warning("[warn] recognition failed this frame: %s", e)
                     names = [None] * dets.shape[0]
                     known_mask = [False] * dets.shape[0]
             else:
@@ -825,7 +821,7 @@ def main() -> None:
             if total % max(1, args.print_every) == 0:
                 sec = max(1e-9, time.perf_counter() - t0)
                 fps_now = total / sec
-                log.info(
+                logger.info(
                     "[%05d] frame=%.2f ms  EMA=%.2f  FPS=%.1f  faces=%d",
                     total,
                     dt_ms,
@@ -855,4 +851,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     main()

@@ -45,7 +45,7 @@
 set -eE -o pipefail
 IFS=$'\n\t'
 
-FACE_HTTP="${FACE_HTTP:-http://127.0.0.1:6791}"
+FACE_HTTP="${FACE_HTTP:-http://127.0.0.1:6793}"
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "[ERR] '$1' is required"; exit 1; }; }
 need_cmd jq

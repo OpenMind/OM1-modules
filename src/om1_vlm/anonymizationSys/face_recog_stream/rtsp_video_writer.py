@@ -159,8 +159,8 @@ class RTSPVideoStreamWriter:
             "-vsync",
             "vfr",  # Variable frame rate sync
             # Rotation
-            # "-vf",
-            # "transpose=2",
+            "-vf",
+            "transpose=2",
             # Audio encoding with async compensation
             "-map",
             "1:a",
