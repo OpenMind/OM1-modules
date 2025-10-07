@@ -129,19 +129,24 @@ class RTSPVideoStreamWriter:
             "-r",
             str(self.current_fps),
             "-use_wallclock_as_timestamps",
-            "1",  # Use wall clock for timestamps
+            "1",
             "-i",
             "-",
-            # Audio input with larger buffer and error resilience
             "-f",
             "pulse",
             "-ac",
             str(self.mic_ac),
+            "-fragment_size",
+            "512",
             "-thread_queue_size",
-            "2048",
+            "512",
+            "-probesize",
+            "32",
+            "-fflags",
+            "nobuffer",
             "-i",
             self.mic_device,
-            # Video encoding - optimize for variable framerate
+            # Video encoding
             "-map",
             "0:v",
             "-c:v",
@@ -157,11 +162,11 @@ class RTSPVideoStreamWriter:
             "-keyint_min",
             str(max(5, int(self.current_fps / 2))),
             "-vsync",
-            "vfr",  # Variable frame rate sync
+            "vfr",
             # Rotation
             "-vf",
             "transpose=2",
-            # Audio encoding with async compensation
+            # Audio encoding with minimal latency
             "-map",
             "1:a",
             "-c:a",
@@ -172,12 +177,15 @@ class RTSPVideoStreamWriter:
             "2",
             "-b:a",
             "128k",
+            "-application",
+            "lowdelay",
+            "-frame_duration",
+            "20",
             "-af",
-            "arnndn=m=" + self.mic_rnnoise if self.mic_rnnoise else "anull",
-            "-async",
-            "1",  # Audio sync compensation
-            "-af",
-            "highpass=f=120, lowpass=f=6000, afftdn=nt=w:nf=-40, equalizer=f=1000:t=q:w=1:g=-15",
+            ("arnndn=m=" + self.mic_rnnoise + "," if self.mic_rnnoise else "")
+            + "highpass=f=120,lowpass=f=6000,afftdn=nt=w:nf=-40,equalizer=f=1000:t=q:w=1:g=-15",
+            "-max_muxing_queue_size",
+            "1024",
         ]
 
         if self.remote_rtsp_url:
