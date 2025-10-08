@@ -119,65 +119,45 @@ class RTSPVideoStreamWriter:
         cmd = [
             "ffmpeg",
             "-y",
-            # Video input - use variable framerate
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "bgr24",
-            "-s",
-            f"{self.width}x{self.height}",
-            "-r",
-            str(self.current_fps),
-            "-use_wallclock_as_timestamps",
-            "1",  # Use wall clock for timestamps
-            "-i",
-            "-",
-            # Audio input with larger buffer and error resilience
-            "-f",
-            "pulse",
-            "-ac",
-            str(self.mic_ac),
-            "-thread_queue_size",
-            "2048",
-            "-i",
-            self.mic_device,
-            # Video encoding - optimize for variable framerate
-            "-map",
-            "0:v",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-tune",
-            "zerolatency",
-            "-b:v",
-            f"{int(400 * self.current_fps / 15)}k",
-            "-g",
-            str(max(15, int(self.current_fps * 2))),
-            "-keyint_min",
-            str(max(5, int(self.current_fps / 2))),
-            "-vsync",
-            "vfr",  # Variable frame rate sync
-            # Rotation
-            "-vf",
-            "transpose=2",
-            # Audio encoding with async compensation
-            "-map",
-            "1:a",
-            "-c:a",
-            "libopus",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
-            "-b:a",
-            "128k",
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-s", f"{self.width}x{self.height}",
+            "-r", str(self.current_fps),
+            "-i", "-",
+
+            "-f", "pulse",
+            "-ac", str(self.mic_ac),
+            "-fragment_size", "512",
+            "-thread_queue_size", "512",
+            "-probesize", "32",
+            "-fflags", "nobuffer+genpts",
+            "-i", self.mic_device,
+
+            "-map", "0:v",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-b:v", f"{int(400 * self.current_fps / 15)}k",
+            "-g", str(max(15, int(self.current_fps * 2))),
+            "-keyint_min", str(max(5, int(self.current_fps / 2))),
+
+            "-vsync", "cfr",
+            "-r", str(self.current_fps),
+
+            "-vf", "transpose=2",
+
+            "-map", "1:a",
+            "-c:a", "libopus",
+            "-ar", "48000",
+            "-ac", "2",
+            "-b:a", "128k",
+            "-application", "lowdelay",
+            "-frame_duration", "20",
             "-af",
-            "arnndn=m=" + self.mic_rnnoise if self.mic_rnnoise else "anull",
-            "-async",
-            "1",  # Audio sync compensation
-            "-af",
-            "highpass=f=120, lowpass=f=6000, afftdn=nt=w:nf=-40, equalizer=f=1000:t=q:w=1:g=-15",
+            ("arnndn=m=" + self.mic_rnnoise + "," if self.mic_rnnoise else "")
+            + "highpass=f=120,lowpass=f=6000,afftdn=nt=w:nf=-40,equalizer=f=1000:t=q:w=1:g=-15,"
+            + "aresample=async=1:first_pts=0",
+            "-max_muxing_queue_size", "1024",
         ]
 
         if self.remote_rtsp_url:

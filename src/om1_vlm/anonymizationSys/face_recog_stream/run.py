@@ -24,7 +24,7 @@ python -m om1_vlm.anonymizationSys.face_recog_stream.run \
   --device /dev/video0 --width 1280 --height 720 --fps 30 \
   --detection --recognition --blur --blur-mode all \
   --draw-boxes --draw-names --show-fps \
-  --http-host 0.0.0.0 --http-port 6791 
+  --http-host 0.0.0.0 --http-port 6791
 
 # With remote RTSP relay and mic
 python -m om1_vlm.anonymizationSys.face_recog_stream.run \
@@ -33,9 +33,9 @@ python -m om1_vlm.anonymizationSys.face_recog_stream.run \
   --draw-boxes --draw-names --show-fps \
   --rtsp-mic-device plughw:2,0 --rtsp-mic-ac 1 \
   --remote-rtsp "rtsp://api-video-ingest.openmind.org:8554/<stream>?api_key=<KEY>" \
-  --http-host 0.0.0.0 --http-port 6791 
+  --http-host 0.0.0.0 --http-port 6791
 
-# Use teach_face.sh for simple 
+# Use teach_face.sh for simple
 # Query presence (who's been seen in last 2s)
 curl -s -X POST http://127.0.0.1:6791/who -d '{"recent_sec":2}' -H 'Content-Type: application/json'
 
@@ -575,8 +575,8 @@ def main() -> None:
     t0 = time.perf_counter()
     total = 0
     ema_ms: Optional[float] = None
-    target_frame_time_s = 1.0 / max(1, args.fps)
-    last_frame_time = time.perf_counter()
+    target_frame_time = 1.0 / max(1, args.fps)
+    next_frame_time = time.perf_counter()
 
     try:
         while running:
@@ -802,8 +802,8 @@ def main() -> None:
                     cv2.LINE_AA,
                 )
 
-            # Stream processed frame
-            rstp_writer.write_frame(frame)
+            if rstp_writer is not None:
+                rstp_writer.write_frame(frame)
 
             # Optional local preview
             if not args.no_window:
@@ -811,12 +811,14 @@ def main() -> None:
                 if cv2.waitKey(1) & 0xFF == 27:
                     break
 
-            # simple pacing
-            now_s = time.perf_counter()
-            elapsed = now_s - last_frame_time
-            if elapsed < target_frame_time_s:
-                time.sleep(target_frame_time_s - elapsed)
-            last_frame_time = time.perf_counter()
+            next_frame_time += target_frame_time
+            current_time = time.perf_counter()
+            sleep_time = next_frame_time - current_time
+
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            else:
+                next_frame_time = current_time
 
             if total % max(1, args.print_every) == 0:
                 sec = max(1e-9, time.perf_counter() - t0)
