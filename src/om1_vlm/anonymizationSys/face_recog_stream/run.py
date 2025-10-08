@@ -635,7 +635,7 @@ def main() -> None:
             skip_recognition = (
                 perf_mode
                 and ema_ms is not None
-                and ema_ms > (target_frame_time_s * 1000.0 * 0.8)
+                and ema_ms > (target_frame_time * 1000.0 * 0.8)
             )  # ema in ms vs 80% of frame budget
 
             with gal_lock:
