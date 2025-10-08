@@ -119,7 +119,7 @@ class RTSPVideoStreamWriter:
         cmd = [
             "ffmpeg",
             "-y",
-            # Video input - use variable framerate
+            # Video input
             "-f",
             "rawvideo",
             "-pix_fmt",
@@ -128,8 +128,6 @@ class RTSPVideoStreamWriter:
             f"{self.width}x{self.height}",
             "-r",
             str(self.current_fps),
-            "-use_wallclock_as_timestamps",
-            "1",
             "-i",
             "-",
             "-f",
@@ -143,7 +141,7 @@ class RTSPVideoStreamWriter:
             "-probesize",
             "32",
             "-fflags",
-            "nobuffer",
+            "nobuffer+genpts",  # Generate presentation timestamps
             "-i",
             self.mic_device,
             # Video encoding
@@ -163,8 +161,8 @@ class RTSPVideoStreamWriter:
             str(max(5, int(self.current_fps / 2))),
             "-vsync",
             "cfr",
-            "-async",
-            "1",
+            "-r",
+            str(self.current_fps),  # Explicitly set output framerate
             # Rotation
             "-vf",
             "transpose=2",
@@ -186,7 +184,7 @@ class RTSPVideoStreamWriter:
             "-af",
             ("arnndn=m=" + self.mic_rnnoise + "," if self.mic_rnnoise else "")
             + "highpass=f=120,lowpass=f=6000,afftdn=nt=w:nf=-40,equalizer=f=1000:t=q:w=1:g=-15,"
-            + "aresample=async=1",
+            + "aresample=async=1:first_pts=0",
             "-max_muxing_queue_size",
             "1024",
         ]
