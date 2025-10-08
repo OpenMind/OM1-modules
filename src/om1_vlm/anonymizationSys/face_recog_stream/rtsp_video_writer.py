@@ -162,7 +162,9 @@ class RTSPVideoStreamWriter:
             "-keyint_min",
             str(max(5, int(self.current_fps / 2))),
             "-vsync",
-            "vfr",
+            "cfr",
+            "-async",
+            "1",
             # Rotation
             "-vf",
             "transpose=2",
@@ -183,7 +185,8 @@ class RTSPVideoStreamWriter:
             "20",
             "-af",
             ("arnndn=m=" + self.mic_rnnoise + "," if self.mic_rnnoise else "")
-            + "highpass=f=120,lowpass=f=6000,afftdn=nt=w:nf=-40,equalizer=f=1000:t=q:w=1:g=-15",
+            + "highpass=f=120,lowpass=f=6000,afftdn=nt=w:nf=-40,equalizer=f=1000:t=q:w=1:g=-15,"
+            + "aresample=async=1",
             "-max_muxing_queue_size",
             "1024",
         ]
