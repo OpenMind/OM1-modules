@@ -70,8 +70,8 @@ class AudioOutputStream:
         self._pending_requests: Queue[Optional[str]] = Queue()
 
         # Slience audio for Bluetooth optimization
-        self._silence_audio = self._create_silence_audio(100)
-        self._silence_prefix = self._create_silence_audio(500)
+        self._silence_audio = self._create_silence_audio(50)
+        self._silence_prefix = self._create_silence_audio(50)
 
         # Running state and last audio time
         self.running: bool = True
