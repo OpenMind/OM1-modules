@@ -325,11 +325,12 @@ def main() -> None:
     # Outputs
     ap.add_argument(
         "--local-rtsp",
-        default="rtsp://localhost:8554/live",
-        help="RTSP URL to publish (e.g. rtsp://host:8554/stream).",
+        default="rtsp://localhost:8554/top_camera",
+        help="RTSP URL to publish (e.g. rtsp://host:8554/top_camera).",
     )
     ap.add_argument(
-        "--remote-rtsp", help="Remote RTSP URL to relay (e.g. rtsp://host:8554/stream)."
+        "--remote-rtsp",
+        help="Remote RTSP URL to relay (e.g. rtsp://host:8554/top_camera).",
     )
     ap.add_argument(
         "--rtsp-mic-device",
