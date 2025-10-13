@@ -118,6 +118,9 @@ class RTSPVideoStreamWriter:
             str(self.current_fps),
             "-i",
             "-",
+            # Map video stream
+            "-map",
+            "0:v",
             # Video encoding
             "-c:v",
             "libx264",
