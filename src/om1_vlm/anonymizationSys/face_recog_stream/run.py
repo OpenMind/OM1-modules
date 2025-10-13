@@ -26,12 +26,11 @@ python -m om1_vlm.anonymizationSys.face_recog_stream.run \
   --draw-boxes --draw-names --show-fps \
   --http-host 0.0.0.0 --http-port 6791
 
-# With remote RTSP relay and mic
+# With remote RTSP relay
 python -m om1_vlm.anonymizationSys.face_recog_stream.run \
   --device /dev/video0 --width 1280 --height 720 --fps 30 \
   --detection --recognition --blur --blur-mode unknown \
   --draw-boxes --draw-names --show-fps \
-  --rtsp-mic-device plughw:2,0 --rtsp-mic-ac 1 \
   --remote-rtsp "rtsp://api-video-ingest.openmind.org:8554/<stream>?api_key=<KEY>" \
   --http-host 0.0.0.0 --http-port 6791
 
@@ -199,7 +198,6 @@ def main() -> None:
         models_dir, "scrfd_2.5g_bnkps_shape640x640.engine"
     )
     default_arc_engine = os.path.join(models_dir, "buffalo_m_w600k_r50.engine")
-    default_rnnoise = os.path.join(models_dir, "rnnoise.rnnn")
     default_gallery = os.path.join(script_dir, "..", "gallery")
 
     ap = argparse.ArgumentParser(
@@ -332,21 +330,8 @@ def main() -> None:
         "--remote-rtsp",
         help="Remote RTSP URL to relay (e.g. rtsp://host:8554/top_camera).",
     )
-    ap.add_argument(
-        "--rtsp-mic-device",
-        default="default_mic_aec",
-        help="Audio capture device for RTSP (e.g. default_mic_aec).",
-    )
-    ap.add_argument(
-        "--rtsp-mic-ac", type=int, default=2, help="Audio channels for RTSP (e.g. 2)."
-    )
 
     # UI / perf
-    ap.add_argument(
-        "--rtsp-mic-rnnoise",
-        default=default_rnnoise,
-        help="Path to RNNoise model (e.g. rnnoise.rnn).",
-    )
     ap.add_argument(
         "--no-window", action="store_true", help="Disable display window (headless)."
     )
@@ -438,9 +423,6 @@ def main() -> None:
         cap.fps,
         args.local_rtsp,
         args.remote_rtsp,
-        args.rtsp_mic_device,
-        args.rtsp_mic_ac,
-        args.rtsp_mic_rnnoise,
     )
     logger.info(
         "Publishing RTSP: local=%s%s",
