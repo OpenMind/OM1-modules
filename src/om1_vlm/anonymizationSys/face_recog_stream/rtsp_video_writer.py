@@ -19,9 +19,6 @@ class RTSPVideoStreamWriter:
         estimated_fps: int = 15,
         local_rtsp_url: Optional[str] = "rtsp://localhost:8554/live",
         remote_rtsp_url: Optional[str] = None,
-        mic_device: str = "hw:3,0",
-        mic_ac: int = 2,
-        mic_rnnoise: Optional[str] = None,
     ):
         """
         Initialize the RTSP video stream writer.
@@ -38,12 +35,6 @@ class RTSPVideoStreamWriter:
             Local RTSP URL to stream to, by default "rtsp://localhost:8554/live".
         remote_rtsp_url : Optional[str], optional
             Remote RTSP URL to stream to, by default None.
-        mic_device : str, optional
-            Audio input device (e.g. ALSA device), by default "hw:3,0".
-        mic_ac : int, optional
-            Number of audio channels, by default 2.
-        mic_rnnoise : Optional[str], optional
-            Path to RNNoise model for noise suppression, by default None.
         """
         if not local_rtsp_url and not remote_rtsp_url:
             raise ValueError(
@@ -55,9 +46,6 @@ class RTSPVideoStreamWriter:
         self.estimated_fps = estimated_fps
         self.local_rtsp_url = local_rtsp_url
         self.remote_rtsp_url = remote_rtsp_url
-        self.mic_device = mic_device
-        self.mic_ac = mic_ac
-        self.mic_rnnoise = mic_rnnoise
 
         # FPS measurement
         self.frame_times = deque(maxlen=30)
@@ -119,6 +107,7 @@ class RTSPVideoStreamWriter:
         cmd = [
             "ffmpeg",
             "-y",
+            # Video input (raw frames)
             "-f",
             "rawvideo",
             "-pix_fmt",
@@ -129,22 +118,10 @@ class RTSPVideoStreamWriter:
             str(self.current_fps),
             "-i",
             "-",
-            "-f",
-            "pulse",
-            "-ac",
-            str(self.mic_ac),
-            "-fragment_size",
-            "512",
-            "-thread_queue_size",
-            "512",
-            "-probesize",
-            "32",
-            "-fflags",
-            "nobuffer+genpts",
-            "-i",
-            self.mic_device,
+            # Map video stream
             "-map",
             "0:v",
+            # Video encoding
             "-c:v",
             "libx264",
             "-preset",
@@ -163,24 +140,6 @@ class RTSPVideoStreamWriter:
             str(self.current_fps),
             "-vf",
             "transpose=2",
-            "-map",
-            "1:a",
-            "-c:a",
-            "libopus",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
-            "-b:a",
-            "128k",
-            "-application",
-            "lowdelay",
-            "-frame_duration",
-            "20",
-            "-af",
-            ("arnndn=m=" + self.mic_rnnoise + "," if self.mic_rnnoise else "")
-            + "highpass=f=120,lowpass=f=6000,afftdn=nt=w:nf=-40,equalizer=f=1000:t=q:w=1:g=-15,"
-            + "aresample=async=1:first_pts=0",
             "-max_muxing_queue_size",
             "1024",
         ]
