@@ -91,6 +91,9 @@ The helper script `teach_face.sh` is a thin wrapper around the HTTP API above
 # upload an existing image to raw, then refresh/align/embed
 ./teach_face.sh upload wendy /abs/path/to/image.jpg
 
+# delete multiple person identity from gallery
+./teach_face.sh delete wendy alice bob
+
 Notes
 -----
 - The script targets the same HTTP service this process starts (e.g. http://127.0.0.1:6791).
