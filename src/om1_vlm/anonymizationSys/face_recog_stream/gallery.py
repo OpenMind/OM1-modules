@@ -638,9 +638,9 @@ class GalleryManager:
         AssertionError
             If ``vecs`` does not have shape ``(K, dim)``.
         """
-        assert (
-            vecs.ndim == 2 and vecs.shape[1] == self._dim
-        ), f"expected (K,{self._dim}) got {vecs.shape}"
+        assert vecs.ndim == 2 and vecs.shape[1] == self._dim, (
+            f"expected (K,{self._dim}) got {vecs.shape}"
+        )
         prev_rows = 0
         if osp.exists(self.vectors_path):
             sz = osp.getsize(self.vectors_path)
