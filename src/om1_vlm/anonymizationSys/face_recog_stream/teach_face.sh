@@ -54,8 +54,13 @@ need_cmd curl
 _curl() { curl -sS --max-time 5 -H 'Content-Type: application/json' "$@"; }
 post_json()       { _curl -f -d "$1" "$FACE_HTTP$2"; }          # fail on HTTP errors
 post_json_soft()  { _curl    -d "$1" "$FACE_HTTP$2" || true; }  # ignore HTTP errors (polling)
+
 pretty() {
   local s="$1"
+  if [ -z "${s:-}" ]; then
+    echo "[WARN] empty response"
+    return 0
+  fi
   if jq . >/dev/null 2>&1 <<<"$s"; then
     jq . <<<"$s"
   else
@@ -68,6 +73,7 @@ usage() {
 Usage:
   $(basename "$0") selfie <name>
   $(basename "$0") upload <name> <abs_path>
+  $(basename "$0") delete <name>
   $(basename "$0") who [recent_sec]     # default 2
   $(basename "$0") config get
   $(basename "$0") config set key=value [key=value] ...
@@ -78,6 +84,7 @@ Env:
 Notes:
   - selfie: saves directly to gallery/<name>/aligned and embeds immediately.
   - upload: copies to gallery/<name>/raw, then refreshes (align+embed) right away.
+  - delete: removes gallery/<name>, rebuilds embeddings, refreshes in-memory means.
 EOF
 }
 
@@ -160,6 +167,19 @@ case "$cmd" in
     resp_ref="$(post_json '{}' '/gallery/refresh')"
     pretty "$resp_ref"
     echo "[OK] Raw uploaded, aligned cropped and embeddings updated."
+    ;;
+
+  delete)
+    name="${2-}"
+    [ -z "$name" ] && { echo "[ERR] delete requires <name>"; usage; exit 1; }
+    post_json '{}' '/ping' >/dev/null 2>&1 || { echo "[ERR] Cannot reach $FACE_HTTP/ping — is run.py running?"; exit 1; }
+
+    echo "[INFO] Deleting identity '$name' and rebuilding embeddings…"
+    resp_del="$(post_json "$(jq -n --arg id "$name" '{id:$id}')" '/gallery/delete')"
+    pretty "$resp_del"
+    ok="$(echo "$resp_del" | jq -r '.ok // false')"
+    [ "$ok" = "true" ] || { echo "[ERR] Delete failed."; exit 2; }
+    echo "[OK] Deleted '$name' and refreshed embeddings."
     ;;
 
   who)

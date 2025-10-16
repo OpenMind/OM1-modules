@@ -166,6 +166,9 @@ class HttpAPI:
             if path == "/selfie":
                 return self._handle_selfie(payload)
 
+            if path == "/gallery/delete":
+                return self._handle_gallery_delete(payload)
+
             return {"error": f"unknown path {path}"}
         except Exception as e:
             self.log.exception("HTTP error")
@@ -409,6 +412,41 @@ class HttpAPI:
             self.gallery_dir, rel
         )  # absolute path for convenience
         return {"ok": True, "saved_aligned": saved_aligned, "identities": int(n_id)}
+
+    def _handle_gallery_delete(self, payload: Dict):
+        """Delete one identity and rebuild the embed store.
+
+        payload: { "id": "<label>" }
+        returns: { ok, deleted, removed_gallery, identities, aligned_used, vectors_rebuilt, took_sec }
+        """
+        if not self.gm:
+            return {"error": "recognition disabled"}
+        if not payload or "id" not in payload:
+            return {"error": "missing 'id'"}
+        person = str(payload["id"])
+
+        t0 = time.time()
+
+        def _do():
+            removed_gallery, aligned_used, vectors_rebuilt, n_id = (
+                self.gm.delete_identity(person)
+            )
+            # refresh in-memory means for runtime recognition
+            feats, labels = self.gm.get_identity_means()
+            with self.gal_lock:
+                self.gal_state.gal_feats, self.gal_state.gal_labels = feats, labels
+            return removed_gallery, aligned_used, vectors_rebuilt, n_id
+
+        removed_gallery, aligned_used, vectors_rebuilt, n_id = self.run_job_sync(_do)
+        return {
+            "ok": True,
+            "deleted": person,
+            "removed_gallery": bool(removed_gallery),
+            "identities": int(n_id),
+            "aligned_used": int(aligned_used),
+            "vectors_rebuilt": int(vectors_rebuilt),
+            "took_sec": round(time.time() - t0, 3),
+        }
 
     # ---------------------------- helpers -------------------------- #
     @staticmethod
