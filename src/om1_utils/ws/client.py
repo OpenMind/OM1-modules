@@ -121,7 +121,7 @@ class Client:
             logger.info(f"Connected to {self.url}")
             return True
         except Exception as e:
-            logger.error(f"Connection error: {e}")
+            logger.error(f"Connection error: {e} - endpoint: {self.url}")
             self.connected = False
             return False
 
