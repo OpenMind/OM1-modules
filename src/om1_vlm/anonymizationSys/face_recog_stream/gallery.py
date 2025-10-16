@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import os.path as osp
+import shutil
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -306,6 +307,34 @@ class GalleryManager:
         self._save_index()
         self._recompute_stats()
         return rel
+
+    def delete_identity(self, label: str) -> tuple[bool, int, int, int]:
+        """
+        Delete one identity from the gallery and rebuild the embedding store.
+
+        Steps
+        -----
+        - Remove the folder `gallery/<label>/` (both raw/ and aligned/).
+        - Clear & rebuild the embed store from remaining `aligned/` photos.
+        - Recompute stats, so runtime recognition stops matching this label.
+
+        Returns
+        -------
+        (removed_gallery, aligned_used, vectors_rebuilt, identities_left)
+        """
+        # 1) remove gallery/<label>
+        p = osp.join(self.gallery_dir, label)
+        removed_gallery = False
+        if osp.isdir(p):
+            shutil.rmtree(p)
+            removed_gallery = True
+
+        # 2) rebuild embeddings from remaining aligned/
+        aligned_used, vectors_rebuilt = self.clear_and_rebuild()
+
+        # 3) report how many identities remain (based on stats)
+        feats, labels = self.get_identity_means()
+        return removed_gallery, aligned_used, vectors_rebuilt, len(labels)
 
     def get_all_vectors_and_labels(self) -> Tuple[np.ndarray, List[str]]:
         """

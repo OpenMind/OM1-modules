@@ -57,6 +57,17 @@ curl -s -X POST http://127.0.0.1:6791/gallery/add_raw \
 # Selfie enrollment from the last clean frame (must have exactly 1 face)
 curl -s -X POST http://127.0.0.1:6791/selfie -d '{"id":"alice"}' -H 'Content-Type: application/json'
 
+# Delete one person identity from gallery
+curl -sS -X POST 'http://127.0.0.1:6793/gallery/delete' \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"wendy"}' | jq .
+
+# Delete multiple person identity from gallery  
+curl -sS -X POST http://127.0.0.1:6793/gallery/delete \
+  -H 'Content-Type: application/json' \
+  -d '{"ids":["alice","bob","charlie"]}' | jq .
+
+
 Check teach_face.sh for quick usage
 -------------------------
 The helper script `teach_face.sh` is a thin wrapper around the HTTP API above
