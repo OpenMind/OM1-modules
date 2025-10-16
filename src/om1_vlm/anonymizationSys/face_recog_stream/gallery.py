@@ -318,21 +318,22 @@ class GalleryManager:
         - Clear & rebuild the embed store from remaining `aligned/` photos.
         - Recompute stats, so runtime recognition stops matching this label.
 
+        Parameters
+        -------
+        label: person name: wendy
+
         Returns
         -------
         (removed_gallery, aligned_used, vectors_rebuilt, identities_left)
         """
-        # 1) remove gallery/<label>
         p = osp.join(self.gallery_dir, label)
         removed_gallery = False
         if osp.isdir(p):
             shutil.rmtree(p)
             removed_gallery = True
 
-        # 2) rebuild embeddings from remaining aligned/
         aligned_used, vectors_rebuilt = self.clear_and_rebuild()
 
-        # 3) report how many identities remain (based on stats)
         feats, labels = self.get_identity_means()
         return removed_gallery, aligned_used, vectors_rebuilt, len(labels)
 
