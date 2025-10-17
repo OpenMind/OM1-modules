@@ -169,6 +169,9 @@ class HttpAPI:
             if path == "/gallery/delete":
                 return self._handle_gallery_delete(payload)
 
+            if path in ("/gallery/identities", "/gallery/list_identities"):
+                return self._handle_gallery_identities()
+
             return {"error": f"unknown path {path}"}
         except Exception as e:
             self.log.exception("HTTP error")
@@ -447,6 +450,63 @@ class HttpAPI:
             "vectors_rebuilt": int(vectors_rebuilt),
             "took_sec": round(time.time() - t0, 3),
         }
+
+    def _handle_gallery_identities(self):
+        """
+        List identity folders under the gallery with lightweight counts.
+
+        Returns
+        -------
+        dict
+            {
+            "ok": true,
+            "total": <int>,                # number of identities
+            "identities": [
+                {"id": "Alice", "aligned": 12, "raw": 3},
+                {"id": "Bob",   "aligned":  5, "raw": 0}
+            ]
+            }
+        """
+        import os
+        import os.path as osp
+
+        def _count_images(dir_path: str) -> int:
+            if not osp.isdir(dir_path):
+                return 0
+            exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+            try:
+                return sum(
+                    1
+                    for fn in os.listdir(dir_path)
+                    if osp.splitext(fn)[1].lower() in exts
+                )
+            except Exception:
+                return 0
+
+        gallery_root = self.gallery_dir
+        if not gallery_root or not osp.isdir(gallery_root):
+            return {"ok": True, "total": 0, "identities": []}
+
+        identities = []
+        try:
+            # List first-level folders as identities
+            for name in sorted(os.listdir(gallery_root)):
+                p = osp.join(gallery_root, name)
+                if not osp.isdir(p):
+                    continue
+                aligned_dir = osp.join(p, "aligned")
+                raw_dir = osp.join(p, "raw")
+                identities.append(
+                    {
+                        "id": name,
+                        "aligned": _count_images(aligned_dir),
+                        "raw": _count_images(raw_dir),
+                    }
+                )
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+        return {"ok": True, "total": len(identities), "identities": identities}
 
     # ---------------------------- helpers -------------------------- #
     @staticmethod

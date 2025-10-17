@@ -56,11 +56,19 @@ post_json()       { _curl -f -d "$1" "$FACE_HTTP$2"; }          # fail on HTTP e
 post_json_soft()  { _curl    -d "$1" "$FACE_HTTP$2" || true; }  # ignore HTTP errors (polling)
 
 pretty() {
-  local s="$1"
+  local s
+  if [ $# -gt 0 ]; then
+    s="$1"
+  else
+    # read from stdin if no argument
+    s="$(cat)"
+  fi
+
   if [ -z "${s:-}" ]; then
     echo "[WARN] empty response"
     return 0
   fi
+
   if jq . >/dev/null 2>&1 <<<"$s"; then
     jq . <<<"$s"
   else
@@ -77,6 +85,8 @@ Usage:
   $(basename "$0") who [recent_sec]     # default 2
   $(basename "$0") config get
   $(basename "$0") config set key=value [key=value] ...
+  $(basename "$0") list                   # list identities in the gallery
+  $(basename "$0") identities             # alias of 'list'
 
 Env:
   FACE_HTTP   default: $FACE_HTTP
@@ -197,6 +207,10 @@ case "$cmd" in
       exit 1
     fi
     pretty "$resp"
+    ;;
+
+  list|identities)
+    post_json '{}' '/gallery/identities' | pretty
     ;;
 
   config)

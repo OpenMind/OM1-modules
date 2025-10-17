@@ -67,6 +67,9 @@ curl -sS -X POST http://127.0.0.1:6793/gallery/delete \
   -H 'Content-Type: application/json' \
   -d '{"ids":["alice","bob","charlie"]}' | jq .
 
+# Check and list gallery identies  
+curl -sS -X POST http://127.0.0.1:6793/gallery/identities -H 'Content-Type: application/json' -d '{}' | jq .
+
 
 Check teach_face.sh for quick usage
 -------------------------
@@ -722,10 +725,10 @@ def main() -> None:
                     known_mask = [False] * dets.shape[0]
             else:
                 n = 0 if dets is None else int(dets.shape[0])
-                names = [None] * n
+                names = ["unkown"] * n
                 known_mask = [False] * n
-                if args.recognition and dets is not None and dets.shape[0] > crowd_thr:
-                    names = ["unknown"] * int(dets.shape[0])
+                # if args.recognition and dets is not None and dets.shape[0] > crowd_thr:
+                #     names = ["unknown"] * int(dets.shape[0])
 
             # Who-tracker (strip score suffix)
             def strip_score(nm: Optional[str]) -> Optional[str]:
