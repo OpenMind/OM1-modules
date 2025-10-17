@@ -725,7 +725,7 @@ def main() -> None:
                     known_mask = [False] * dets.shape[0]
             else:
                 n = 0 if dets is None else int(dets.shape[0])
-                names = ["unkown"] * n
+                names = ["unknown"] * n
                 known_mask = [False] * n
                 # if args.recognition and dets is not None and dets.shape[0] > crowd_thr:
                 #     names = ["unknown"] * int(dets.shape[0])
