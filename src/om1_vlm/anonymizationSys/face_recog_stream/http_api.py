@@ -26,7 +26,7 @@ import os
 import shutil
 import threading
 import time
-from typing import Any, Callable, Dict, Optional, List
+from typing import Any, Callable, Dict, List, Optional
 
 import cv2
 import numpy as np
@@ -467,7 +467,9 @@ class HttpAPI:
 
             for person in ids:
                 try:
-                    removed_gallery, aligned_used, vectors_rebuilt, _n_id = self.gm.delete_identity(person)
+                    removed_gallery, aligned_used, vectors_rebuilt, _n_id = (
+                        self.gm.delete_identity(person)
+                    )
                     if removed_gallery or aligned_used or vectors_rebuilt:
                         deleted.append(person)
                         removed_any = removed_any or bool(removed_gallery)
@@ -484,9 +486,18 @@ class HttpAPI:
             with self.gal_lock:
                 self.gal_state.gal_feats, self.gal_state.gal_labels = feats, labels
 
-            return deleted, failed, removed_any, total_aligned, total_vectors, len(labels)
+            return (
+                deleted,
+                failed,
+                removed_any,
+                total_aligned,
+                total_vectors,
+                len(labels),
+            )
 
-        deleted, failed, removed_any, total_aligned, total_vectors, n_id = self.run_job_sync(_do)
+        deleted, failed, removed_any, total_aligned, total_vectors, n_id = (
+            self.run_job_sync(_do)
+        )
         return {
             "ok": len(failed) == 0,  # true only if all succeeded
             "deleted": deleted if len(deleted) != 1 else deleted[0],
@@ -497,7 +508,6 @@ class HttpAPI:
             "vectors_rebuilt": int(total_vectors),
             "took_sec": round(time.time() - t0, 3),
         }
-
 
     def _handle_gallery_identities(self):
         """
