@@ -2,21 +2,8 @@
   "meta": {
     "model_sig": "arc-trt-l2-512",
     "dim": 512,
-    "created": "2025-10-03T18-08-44",
-    "updated": "2025-10-06T13-43-21"
+    "created": "2025-10-16T16-27-25",
+    "updated": "2025-10-17T22-53-27"
   },
-  "items": {
-    "boyuan/aligned/boyuan.jpg": {
-      "row": 0,
-      "label": "boyuan"
-    },
-    "john/aligned/john.jpg": {
-      "row": 1,
-      "label": "john"
-    },
-    "wendy/aligned/2025-10-03T18-09-19.jpg": {
-      "row": 2,
-      "label": "wendy"
-    }
-  }
+  "items": {}
 }

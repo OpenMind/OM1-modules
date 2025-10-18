@@ -26,7 +26,7 @@ import os
 import shutil
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, List
 
 import cv2
 import numpy as np
@@ -417,39 +417,87 @@ class HttpAPI:
         return {"ok": True, "saved_aligned": saved_aligned, "identities": int(n_id)}
 
     def _handle_gallery_delete(self, payload: Dict):
-        """Delete one identity and rebuild the embed store.
+        """Delete one or more identities and rebuild the embed store.
 
-        payload: { "id": "<label>" }
-        returns: { ok, deleted, removed_gallery, identities, aligned_used, vectors_rebuilt, took_sec }
+        Accepts:
+        {"id": "alice"}
+        {"ids": ["alice", "bob"]}
+        {"id": ["alice", "bob"]}
+
+        Returns (example):
+        {
+            "ok": true,
+            "deleted": ["alice"],
+            "failed": {"bob": "not found"},
+            "removed_gallery": true,
+            "identities": 0,
+            "aligned_used": 3,
+            "vectors_rebuilt": 3,
+            "took_sec": 0.112
+        }
         """
         if not self.gm:
             return {"error": "recognition disabled"}
-        if not payload or "id" not in payload:
-            return {"error": "missing 'id'"}
-        person = str(payload["id"])
+        if not payload:
+            return {"error": "missing 'id' or 'ids'"}
+
+        # normalize to list[str]
+        ids = []
+        if "ids" in payload and isinstance(payload["ids"], list):
+            ids = [str(x) for x in payload["ids"]]
+        elif "id" in payload:
+            if isinstance(payload["id"], list):
+                ids = [str(x) for x in payload["id"]]
+            else:
+                ids = [str(payload["id"])]
+        else:
+            return {"error": "missing 'id' or 'ids'"}
+
+        if not ids:
+            return {"error": "no identities provided"}
 
         t0 = time.time()
 
         def _do():
-            removed_gallery, aligned_used, vectors_rebuilt, n_id = (
-                self.gm.delete_identity(person)
-            )
-            # refresh in-memory means for runtime recognition
+            deleted: List[str] = []
+            failed: Dict[str, str] = {}
+            removed_any = False
+            total_aligned = 0
+            total_vectors = 0
+
+            for person in ids:
+                try:
+                    removed_gallery, aligned_used, vectors_rebuilt, _n_id = self.gm.delete_identity(person)
+                    if removed_gallery or aligned_used or vectors_rebuilt:
+                        deleted.append(person)
+                        removed_any = removed_any or bool(removed_gallery)
+                        total_aligned += int(aligned_used)
+                        total_vectors += int(vectors_rebuilt)
+                    else:
+                        # gm.delete_identity returned 0 changes: treat as not found
+                        failed[person] = "not found or no changes"
+                except Exception as e:
+                    failed[person] = str(e)
+
+            # always refresh means after batch
             feats, labels = self.gm.get_identity_means()
             with self.gal_lock:
                 self.gal_state.gal_feats, self.gal_state.gal_labels = feats, labels
-            return removed_gallery, aligned_used, vectors_rebuilt, n_id
 
-        removed_gallery, aligned_used, vectors_rebuilt, n_id = self.run_job_sync(_do)
+            return deleted, failed, removed_any, total_aligned, total_vectors, len(labels)
+
+        deleted, failed, removed_any, total_aligned, total_vectors, n_id = self.run_job_sync(_do)
         return {
-            "ok": True,
-            "deleted": person,
-            "removed_gallery": bool(removed_gallery),
+            "ok": len(failed) == 0,  # true only if all succeeded
+            "deleted": deleted if len(deleted) != 1 else deleted[0],
+            "failed": failed or None,
+            "removed_gallery": bool(removed_any),
             "identities": int(n_id),
-            "aligned_used": int(aligned_used),
-            "vectors_rebuilt": int(vectors_rebuilt),
+            "aligned_used": int(total_aligned),
+            "vectors_rebuilt": int(total_vectors),
             "took_sec": round(time.time() - t0, 3),
         }
+
 
     def _handle_gallery_identities(self):
         """

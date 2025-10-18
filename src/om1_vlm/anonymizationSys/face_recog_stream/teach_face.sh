@@ -180,17 +180,35 @@ case "$cmd" in
     ;;
 
   delete)
-    name="${2-}"
-    [ -z "$name" ] && { echo "[ERR] delete requires <name>"; usage; exit 1; }
+    shift
+    if [ $# -lt 1 ]; then
+      echo "[ERR] delete requires at least one <name>"
+      usage; exit 1
+    fi
     post_json '{}' '/ping' >/dev/null 2>&1 || { echo "[ERR] Cannot reach $FACE_HTTP/ping — is run.py running?"; exit 1; }
 
-    echo "[INFO] Deleting identity '$name' and rebuilding embeddings…"
-    resp_del="$(post_json "$(jq -n --arg id "$name" '{id:$id}')" '/gallery/delete')"
-    pretty "$resp_del"
-    ok="$(echo "$resp_del" | jq -r '.ok // false')"
-    [ "$ok" = "true" ] || { echo "[ERR] Delete failed."; exit 2; }
-    echo "[OK] Deleted '$name' and refreshed embeddings."
+    errs=0
+    for name in "$@"; do
+      echo "[INFO] Deleting identity '$name'…"
+      payload="$(jq -n --arg id "$name" '{id:$id}')"
+      resp_del="$(post_json "$payload" '/gallery/delete')"
+      pretty "$resp_del"
+      ok="$(echo "$resp_del" | jq -r '.ok // false')"
+      if [ "$ok" != "true" ]; then
+        echo "[ERR] Delete failed for '$name'"
+        errs=$((errs+1))
+      else
+        echo "[OK] Deleted '$name'."
+      fi
+    done
+
+    if [ $errs -gt 0 ]; then
+      echo "[WARN] Some deletions failed ($errs)."
+      exit 2
+    fi
     ;;
+
+
 
   who)
     # quick ping so we don’t silently fail

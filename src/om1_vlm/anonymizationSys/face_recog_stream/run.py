@@ -60,12 +60,12 @@ curl -s -X POST http://127.0.0.1:6791/selfie -d '{"id":"alice"}' -H 'Content-Typ
 # Delete one person identity from gallery
 curl -sS -X POST 'http://127.0.0.1:6793/gallery/delete' \
   -H 'Content-Type: application/json' \
-  -d '{"id":"wendy"}' | jq .
+  -d '{"id":"boyuan"}' | jq .
 
 # Delete multiple person identity from gallery  
 curl -sS -X POST http://127.0.0.1:6793/gallery/delete \
   -H 'Content-Type: application/json' \
-  -d '{"ids":["alice","bob","charlie"]}' | jq .
+  -d '{"ids":["wendy","boyuan"]}' | jq .
 
 # Check and list gallery identies  
 curl -sS -X POST http://127.0.0.1:6793/gallery/identities -H 'Content-Type: application/json' -d '{}' | jq .
