@@ -137,12 +137,12 @@ class AudioRTSPInputStream:
         The language for the ASR to listen. (default: en-US)
     rtsp_url : str, optional
         The RTSP URL of the audio stream. If None, uses device or device_name to determine the URL.
-        (default: "rtsp://localhost:8554/live")
+        (default: "rtsp://localhost:8554/audio")
     """
 
     def __init__(
         self,
-        rtsp_url: str = "rtsp://localhost:8554/live",
+        rtsp_url: str = "rtsp://localhost:8554/audio",
         rate: int = 16000,
         chunk: Optional[int] = None,
         audio_data_callback: Optional[Callable] = None,
