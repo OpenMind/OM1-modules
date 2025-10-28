@@ -19,6 +19,10 @@ class RTSPVideoStreamWriter:
         estimated_fps: int = 15,
         local_rtsp_url: Optional[str] = "rtsp://localhost:8554/live",
         remote_rtsp_url: Optional[str] = None,
+        mic_device: Optional[
+            str
+        ] = "plughw:1,0",  # e.g. "hw:3,0" to capture system mic; None -> silent audio
+        mic_ac: int = 2,  # audio channels when using ALSA mic
     ):
         """
         Initialize the RTSP video stream writer.
@@ -35,6 +39,11 @@ class RTSPVideoStreamWriter:
             Local RTSP URL to stream to, by default "rtsp://localhost:8554/live".
         remote_rtsp_url : Optional[str], optional
             Remote RTSP URL to stream to, by default None.
+        mic_device : Optional[str], optional
+            ALSA device string to capture audio (e.g., "hw:3,0"). If None, a silent audio
+            source is used to keep FFmpeg stable.
+        mic_ac : int, optional
+            Number of audio channels for the ALSA mic input, by default 2.
         """
         if not local_rtsp_url and not remote_rtsp_url:
             raise ValueError(
@@ -46,6 +55,8 @@ class RTSPVideoStreamWriter:
         self.estimated_fps = estimated_fps
         self.local_rtsp_url = local_rtsp_url
         self.remote_rtsp_url = remote_rtsp_url
+        self.mic_device = mic_device
+        self.mic_ac = int(mic_ac)
 
         # FPS measurement
         self.frame_times = deque(maxlen=30)
@@ -103,11 +114,11 @@ class RTSPVideoStreamWriter:
     def _build_ffmpeg_command(self):
         """
         Build the FFmpeg command array with current FPS.
+        Uses libx264 only, with optional ALSA mic or silent anullsrc.
         """
         cmd = [
             "ffmpeg",
             "-y",
-            # Video input (raw frames)
             "-f",
             "rawvideo",
             "-pix_fmt",
@@ -118,14 +129,53 @@ class RTSPVideoStreamWriter:
             str(self.current_fps),
             "-i",
             "-",
-            # Map video stream
+        ]
+
+        if self.mic_device:
+            cmd += [
+                "-f",
+                "alsa",
+                "-thread_queue_size",
+                "2048",
+                "-ac",
+                str(self.mic_ac),
+                "-i",
+                self.mic_device,
+            ]
+            audio_map = [
+                "-map",
+                "1:a",
+                "-c:a",
+                "aac",
+                "-ar",
+                "48000",
+                "-ac",
+                str(self.mic_ac),
+                "-b:a",
+                "128k",
+            ]
+        else:
+            cmd += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+            audio_map = [
+                "-map",
+                "1:a",
+                "-c:a",
+                "aac",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "-b:a",
+                "96k",
+            ]
+
+        cmd += [
             "-map",
             "0:v",
-            # Video encoding
             "-c:v",
             "libx264",
             "-preset",
-            "ultrafast",
+            "veryfast",
             "-tune",
             "zerolatency",
             "-b:v",
@@ -142,19 +192,18 @@ class RTSPVideoStreamWriter:
             "transpose=2",
             "-max_muxing_queue_size",
             "1024",
-        ]
+        ] + audio_map
 
+        # Outputs (tee to local + optional remote)
         if self.remote_rtsp_url:
-            cmd.extend(
-                [
-                    "-f",
-                    "tee",
-                    f"[f=rtsp:rtsp_transport=tcp]{self.local_rtsp_url}|"
-                    f"[f=rtsp:rtsp_transport=tcp:onfail=ignore]{self.remote_rtsp_url}",
-                ]
-            )
+            cmd += [
+                "-f",
+                "tee",
+                f"[f=rtsp:rtsp_transport=tcp]{self.local_rtsp_url}|"
+                f"[f=rtsp:rtsp_transport=tcp:onfail=ignore]{self.remote_rtsp_url}",
+            ]
         else:
-            cmd.extend(["-f", "rtsp", "-rtsp_transport", "tcp", self.local_rtsp_url])
+            cmd += ["-f", "rtsp", "-rtsp_transport", "tcp", self.local_rtsp_url]
 
         return cmd
 

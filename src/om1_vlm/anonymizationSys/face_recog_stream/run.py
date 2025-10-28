@@ -365,7 +365,7 @@ def main() -> None:
     ap.add_argument(
         "--http-lookback-sec",
         type=float,
-        default=2.0,
+        default=10.0,
         help="Default lookback window for /who.",
     )
 

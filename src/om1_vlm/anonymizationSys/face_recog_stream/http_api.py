@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import os.path as osp
 import shutil
 import threading
 import time
@@ -109,7 +110,7 @@ class HttpAPI:
             pass
 
     # ----------------------------- handlers ---------------------------- #
-    def _handle(self, payload: Dict, path: str):
+    def _handle(self, payload: Dict[str, Any], path: str) -> Dict[str, Any]:
         """Dispatch a POST request to the appropriate handler.
 
         Parameters
@@ -134,7 +135,6 @@ class HttpAPI:
         - `/gallery/add_aligned` → add a 112×112 aligned crop for an identity
         - `/gallery/add_raw`     → copy a raw image and refresh gallery
         - `/selfie`              → enroll from the last clean frame (aligned only)
-
         """
         try:
             if path == "/ping":
@@ -178,7 +178,7 @@ class HttpAPI:
             return {"error": str(e)}
 
     # -------------------------- /config --------------------------- #
-    def _handle_config(self, payload: Dict):
+    def _handle_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Get or set live runtime configuration.
 
         Parameters
@@ -223,7 +223,7 @@ class HttpAPI:
         }
 
     # ---------------------- /gallery/refresh ----------------------- #
-    def _handle_gallery_refresh(self):
+    def _handle_gallery_refresh(self) -> Dict[str, Any]:
         """Incrementally process new images and update in-memory centroids.
 
         Returns
@@ -232,11 +232,6 @@ class HttpAPI:
             `{ "ok": true, "identities": <int>, "aligned_added": <int>,
                "vectors_added": <int>, "took_sec": <float> }`
             or `{ "error": "recognition disabled" }` if `gm` is not set.
-
-        Notes
-        -----
-        The actual refresh (detect→align→embed) and centroid recomputation are
-        executed on
         """
         if not self.gm:
             return {"error": "recognition disabled"}
@@ -259,7 +254,7 @@ class HttpAPI:
         }
 
     # -------------------- /gallery/add_aligned --------------------- #
-    def _handle_gallery_add_aligned(self, payload: Dict):
+    def _handle_gallery_add_aligned(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Add a 112×112 aligned face to the gallery and update centroids.
 
         Parameters
@@ -273,10 +268,6 @@ class HttpAPI:
         dict
             On success: `{ "ok": true, "added": <rel_path>, "identities": <int> }`.
             On failure: `{ "error": "...") }` or `{ "ok": false, "error": "..." }`.
-
-        Notes
-        -----
-        The embed+store update runs on the main thread using `run_job_sync`.
         """
         if not self.gm:
             return {"error": "recognition disabled"}
@@ -304,7 +295,7 @@ class HttpAPI:
         return {"ok": True, "added": rel, "identities": int(n_id)}
 
     # ---------------------- /gallery/add_raw ----------------------- #
-    def _handle_gallery_add_raw(self, payload: Dict):
+    def _handle_gallery_add_raw(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Copy a raw image into gallery/<id>/raw and run full refresh (align+embed).
         Upload pathway -> RAW only. Alignment happens once during refresh.
@@ -353,13 +344,18 @@ class HttpAPI:
         return {"ok": True, "saved": dst, "identities": int(n_id)}
 
     # --------------------------- /selfie --------------------------- #
-    def _handle_selfie(self, payload: Dict):
+    def _handle_selfie(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Save a clean snapshot from the latest frame (no overlays) into ALIGNED ONLY,
         and embed immediately (no RAW for selfie).
-
+        Parameters
+        ----------
         payload: { "id": "alice" }
-        returns: { ok, saved_aligned, identities }
+
+        Returns
+        ----------
+        dict
+            { ok, saved_aligned, identities }
 
         Notes
         -----
@@ -416,7 +412,7 @@ class HttpAPI:
         )  # absolute path for convenience
         return {"ok": True, "saved_aligned": saved_aligned, "identities": int(n_id)}
 
-    def _handle_gallery_delete(self, payload: Dict):
+    def _handle_gallery_delete(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Delete one or more identities and rebuild the embed store.
 
         Accepts:
@@ -509,7 +505,7 @@ class HttpAPI:
             "took_sec": round(time.time() - t0, 3),
         }
 
-    def _handle_gallery_identities(self):
+    def _handle_gallery_identities(self) -> Dict[str, Any]:
         """
         List identity folders under the gallery with lightweight counts.
 
@@ -525,8 +521,6 @@ class HttpAPI:
             ]
             }
         """
-        import os
-        import os.path as osp
 
         def _count_images(dir_path: str) -> int:
             if not osp.isdir(dir_path):
@@ -566,7 +560,6 @@ class HttpAPI:
 
         return {"ok": True, "total": len(identities), "identities": identities}
 
-    # ---------------------------- helpers -------------------------- #
     @staticmethod
     def _load_112(
         image_path: Optional[str], image_b64: Optional[str]

@@ -38,6 +38,7 @@ class CameraReader:
         self.height = height
         self.fps = fps
         self.rotate_90_cw = rotate_90_cw
+
         self.cap: Optional[cv2.VideoCapture] = None
         self.open_camera()
 
@@ -49,38 +50,9 @@ class CameraReader:
         if self.cap is None or not self.cap.isOpened():
             raise RuntimeError(f"Failed to open camera on device {self.device}")
 
-    def read_frame(self) -> Optional[cv2.Mat]:
-        """
-        Read a frame from the camera.
-        Returns:
-            The captured frame as a cv2.Mat object, or None if reading failed.
-        """
-        if self.cap is None or not self.cap.isOpened():
-            logging.warning("Camera is not opened. Reopening...")
-            self.open_capture(self.device, self.width, self.height, self.fps)
-
-        ret, frame = self.cap.read()
-        if not ret:
-            logging.warning("Failed to read frame from camera.")
-            return None
-
-        return frame
-
-    def release(self):
-        """
-        Release the camera resource.
-        """
-        if self.cap is not None:
-            self.cap.release()
-            self.cap = None
-
     def open_capture(
-        self,
-        device: str,
-        width: int,
-        height: int,
-        fps: int,
-    ):
+        self, device: str, width: int = 1280, height: int = 720, fps: int = 60
+    ) -> None:
         """
         Open a UVC camera using a V4L2 pipeline.
 
@@ -93,8 +65,8 @@ class CameraReader:
         """
         if self.cap is not None:
             return
-
         try:
+            logging.info("Opening camera with OpenCV V4L2 on %s", device)
             self.cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
             self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -103,20 +75,23 @@ class CameraReader:
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
 
-            if self.cap.isOpened():
-                actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
-                logging.info(
-                    f"Opened camera {device} with MJPEG: {actual_width}x{actual_height} @ {actual_fps}fps"
-                )
+            if not self.cap or not self.cap.isOpened():
+                raise RuntimeError(f"Failed to open camera device {device}")
 
-                self.width = actual_width
-                self.height = actual_height
-                self.fps = actual_fps
+            actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual_fps = float(self.cap.get(cv2.CAP_PROP_FPS)) or float(fps)
+            logging.info(
+                "Camera opened: %s (%dx%d @ %.2f fps)",
+                device,
+                actual_width,
+                actual_height,
+                actual_fps,
+            )
+            self.width, self.height, self.fps = actual_width, actual_height, actual_fps
 
         except Exception as e:
-            logging.error(f"Error opening camera {device}: {e}")
+            logging.error("Error opening camera %s: %s", device, e)
             self.cap = None
 
     def is_opened(self) -> bool:
@@ -126,3 +101,30 @@ class CameraReader:
             True if the camera is opened, False otherwise.
         """
         return self.cap is not None and self.cap.isOpened()
+
+    def read_frame(self):
+        """
+        Read a frame from the camera.
+        Returns:
+            The captured frame as a cv2.Mat object, or None if reading failed.
+        """
+        if not self.is_opened():
+            logging.warning("Camera is not opened. Reopening...")
+            self.open_capture(self.device, self.width, self.height, int(self.fps or 30))
+
+        ret, frame = self.cap.read() if self.cap else (False, None)
+        if not ret:
+            logging.warning("Failed to read frame from camera.")
+            return None
+
+        if self.rotate_90_cw:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        return frame
+
+    def release(self) -> None:
+        """
+        Release the camera resource.
+        """
+        if self.cap:
+            self.cap.release()
+            self.cap = None

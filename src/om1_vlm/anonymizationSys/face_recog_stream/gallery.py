@@ -376,7 +376,6 @@ class GalleryManager:
             return np.zeros((0, self._dim), np.float32), []
         return np.stack(means, axis=0).astype(np.float32), labels
 
-    # ---------- legacy shim (optional) ----------
 
     def legacy_build_gallery_embeddings(
         self, det_conf: Optional[float] = None
