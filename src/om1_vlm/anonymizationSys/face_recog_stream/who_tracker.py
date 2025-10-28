@@ -31,7 +31,9 @@ class WhoTracker:
 
     def snapshot(self, recent_sec: Optional[float] = None) -> Dict:
         """Summarize who is here now and (for recent) use max-per-frame semantics.
-        EX: {"server_ts": 1761692303.4755309, "recent_sec": 4.0, "now": ["wendy"], "unknown_now": 0, "frames_recent": 57, "frames_with_unknown": 0, "recent_name_frames": {"wendy": 57}, "unknown_recent": 0}(
+        EX: {"server_ts": 1761692303.4755309, "recent_sec": 4.0, "now": ["wendy"], 
+            "unknown_now": 0, "frames_recent": 57, "frames_with_unknown": 0, 
+            "recent_name_frames": {"wendy": 57}, "unknown_recent": 0}
         """
         with self._lock:
             now_list = list(self._last_now)
