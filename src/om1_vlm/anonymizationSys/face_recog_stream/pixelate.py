@@ -1,9 +1,14 @@
 from __future__ import annotations
+
 from typing import Tuple
+
 import cv2
 import numpy as np
 
-def expand_clip(x1: int, y1: int, x2: int, y2: int, margin: float, W: int, H: int) -> Tuple[int, int, int, int]:
+
+def expand_clip(
+    x1: int, y1: int, x2: int, y2: int, margin: float, W: int, H: int
+) -> Tuple[int, int, int, int]:
     """Expand a box by margin and clip to image bounds.
 
     Parameters
@@ -30,15 +35,22 @@ def expand_clip(x1: int, y1: int, x2: int, y2: int, margin: float, W: int, H: in
     y2n = min(H - 1, int(cy + h * 0.5))
     return x1n, y1n, x2n, y2n
 
-def _blank_roi(img, x1: int, y1: int, x2: int, y2: int, value: int | Tuple[int,int,int] = 255) -> None:
+
+def _blank_roi(
+    img, x1: int, y1: int, x2: int, y2: int, value: int | Tuple[int, int, int] = 255
+) -> None:
     """Fill a rectangular ROI with a blank white color in-place."""
     if x2 - x1 < 1 or y2 - y1 < 1:
         return
     img[y1:y2, x1:x2] = value  # white fill (BGR)
 
+
 def pixelate_roi(
     img,
-    x1: int, y1: int, x2: int, y2: int,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
     blocks_on_short: int = 8,
     noise_sigma: float = 0.0,
 ) -> None:
