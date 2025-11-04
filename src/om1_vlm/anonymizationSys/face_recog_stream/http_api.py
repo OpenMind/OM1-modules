@@ -23,10 +23,11 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import os.path as osp
 import shutil
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import cv2
 import numpy as np
@@ -109,7 +110,7 @@ class HttpAPI:
             pass
 
     # ----------------------------- handlers ---------------------------- #
-    def _handle(self, payload: Dict, path: str):
+    def _handle(self, payload: Dict[str, Any], path: str) -> Dict[str, Any]:
         """Dispatch a POST request to the appropriate handler.
 
         Parameters
@@ -134,7 +135,6 @@ class HttpAPI:
         - `/gallery/add_aligned` → add a 112×112 aligned crop for an identity
         - `/gallery/add_raw`     → copy a raw image and refresh gallery
         - `/selfie`              → enroll from the last clean frame (aligned only)
-
         """
         try:
             if path == "/ping":
@@ -169,13 +169,16 @@ class HttpAPI:
             if path == "/gallery/delete":
                 return self._handle_gallery_delete(payload)
 
+            if path in ("/gallery/identities", "/gallery/list_identities"):
+                return self._handle_gallery_identities()
+
             return {"error": f"unknown path {path}"}
         except Exception as e:
             self.log.exception("HTTP error")
             return {"error": str(e)}
 
     # -------------------------- /config --------------------------- #
-    def _handle_config(self, payload: Dict):
+    def _handle_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Get or set live runtime configuration.
 
         Parameters
@@ -220,7 +223,7 @@ class HttpAPI:
         }
 
     # ---------------------- /gallery/refresh ----------------------- #
-    def _handle_gallery_refresh(self):
+    def _handle_gallery_refresh(self) -> Dict[str, Any]:
         """Incrementally process new images and update in-memory centroids.
 
         Returns
@@ -229,11 +232,6 @@ class HttpAPI:
             `{ "ok": true, "identities": <int>, "aligned_added": <int>,
                "vectors_added": <int>, "took_sec": <float> }`
             or `{ "error": "recognition disabled" }` if `gm` is not set.
-
-        Notes
-        -----
-        The actual refresh (detect→align→embed) and centroid recomputation are
-        executed on
         """
         if not self.gm:
             return {"error": "recognition disabled"}
@@ -256,7 +254,7 @@ class HttpAPI:
         }
 
     # -------------------- /gallery/add_aligned --------------------- #
-    def _handle_gallery_add_aligned(self, payload: Dict):
+    def _handle_gallery_add_aligned(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Add a 112×112 aligned face to the gallery and update centroids.
 
         Parameters
@@ -270,10 +268,6 @@ class HttpAPI:
         dict
             On success: `{ "ok": true, "added": <rel_path>, "identities": <int> }`.
             On failure: `{ "error": "...") }` or `{ "ok": false, "error": "..." }`.
-
-        Notes
-        -----
-        The embed+store update runs on the main thread using `run_job_sync`.
         """
         if not self.gm:
             return {"error": "recognition disabled"}
@@ -301,7 +295,7 @@ class HttpAPI:
         return {"ok": True, "added": rel, "identities": int(n_id)}
 
     # ---------------------- /gallery/add_raw ----------------------- #
-    def _handle_gallery_add_raw(self, payload: Dict):
+    def _handle_gallery_add_raw(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Copy a raw image into gallery/<id>/raw and run full refresh (align+embed).
         Upload pathway -> RAW only. Alignment happens once during refresh.
@@ -350,13 +344,18 @@ class HttpAPI:
         return {"ok": True, "saved": dst, "identities": int(n_id)}
 
     # --------------------------- /selfie --------------------------- #
-    def _handle_selfie(self, payload: Dict):
+    def _handle_selfie(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Save a clean snapshot from the latest frame (no overlays) into ALIGNED ONLY,
         and embed immediately (no RAW for selfie).
-
+        Parameters
+        ----------
         payload: { "id": "alice" }
-        returns: { ok, saved_aligned, identities }
+
+        Returns
+        ----------
+        dict
+            { ok, saved_aligned, identities }
 
         Notes
         -----
@@ -413,42 +412,154 @@ class HttpAPI:
         )  # absolute path for convenience
         return {"ok": True, "saved_aligned": saved_aligned, "identities": int(n_id)}
 
-    def _handle_gallery_delete(self, payload: Dict):
-        """Delete one identity and rebuild the embed store.
+    def _handle_gallery_delete(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Delete one or more identities and rebuild the embed store.
 
-        payload: { "id": "<label>" }
-        returns: { ok, deleted, removed_gallery, identities, aligned_used, vectors_rebuilt, took_sec }
+        Accepts:
+        {"id": "alice"}
+        {"ids": ["alice", "bob"]}
+        {"id": ["alice", "bob"]}
+
+        Returns (example):
+        {
+            "ok": true,
+            "deleted": ["alice"],
+            "failed": {"bob": "not found"},
+            "removed_gallery": true,
+            "identities": 0,
+            "aligned_used": 3,
+            "vectors_rebuilt": 3,
+            "took_sec": 0.112
+        }
         """
         if not self.gm:
             return {"error": "recognition disabled"}
-        if not payload or "id" not in payload:
-            return {"error": "missing 'id'"}
-        person = str(payload["id"])
+        if not payload:
+            return {"error": "missing 'id' or 'ids'"}
+
+        # normalize to list[str]
+        ids = []
+        if "ids" in payload and isinstance(payload["ids"], list):
+            ids = [str(x) for x in payload["ids"]]
+        elif "id" in payload:
+            if isinstance(payload["id"], list):
+                ids = [str(x) for x in payload["id"]]
+            else:
+                ids = [str(payload["id"])]
+        else:
+            return {"error": "missing 'id' or 'ids'"}
+
+        if not ids:
+            return {"error": "no identities provided"}
 
         t0 = time.time()
 
         def _do():
-            removed_gallery, aligned_used, vectors_rebuilt, n_id = (
-                self.gm.delete_identity(person)
-            )
-            # refresh in-memory means for runtime recognition
+            deleted: List[str] = []
+            failed: Dict[str, str] = {}
+            removed_any = False
+            total_aligned = 0
+            total_vectors = 0
+
+            for person in ids:
+                try:
+                    removed_gallery, aligned_used, vectors_rebuilt, _n_id = (
+                        self.gm.delete_identity(person)
+                    )
+                    if removed_gallery or aligned_used or vectors_rebuilt:
+                        deleted.append(person)
+                        removed_any = removed_any or bool(removed_gallery)
+                        total_aligned += int(aligned_used)
+                        total_vectors += int(vectors_rebuilt)
+                    else:
+                        # gm.delete_identity returned 0 changes: treat as not found
+                        failed[person] = "not found or no changes"
+                except Exception as e:
+                    failed[person] = str(e)
+
+            # always refresh means after batch
             feats, labels = self.gm.get_identity_means()
             with self.gal_lock:
                 self.gal_state.gal_feats, self.gal_state.gal_labels = feats, labels
-            return removed_gallery, aligned_used, vectors_rebuilt, n_id
 
-        removed_gallery, aligned_used, vectors_rebuilt, n_id = self.run_job_sync(_do)
+            return (
+                deleted,
+                failed,
+                removed_any,
+                total_aligned,
+                total_vectors,
+                len(labels),
+            )
+
+        deleted, failed, removed_any, total_aligned, total_vectors, n_id = (
+            self.run_job_sync(_do)
+        )
         return {
-            "ok": True,
-            "deleted": person,
-            "removed_gallery": bool(removed_gallery),
+            "ok": len(failed) == 0,  # true only if all succeeded
+            "deleted": deleted if len(deleted) != 1 else deleted[0],
+            "failed": failed or None,
+            "removed_gallery": bool(removed_any),
             "identities": int(n_id),
-            "aligned_used": int(aligned_used),
-            "vectors_rebuilt": int(vectors_rebuilt),
+            "aligned_used": int(total_aligned),
+            "vectors_rebuilt": int(total_vectors),
             "took_sec": round(time.time() - t0, 3),
         }
 
-    # ---------------------------- helpers -------------------------- #
+    def _handle_gallery_identities(self) -> Dict[str, Any]:
+        """
+        List identity folders under the gallery with lightweight counts.
+
+        Returns
+        -------
+        dict
+            {
+            "ok": true,
+            "total": <int>,                # number of identities
+            "identities": [
+                {"id": "Alice", "aligned": 12, "raw": 3},
+                {"id": "Bob",   "aligned":  5, "raw": 0}
+            ]
+            }
+        """
+
+        def _count_images(dir_path: str) -> int:
+            if not osp.isdir(dir_path):
+                return 0
+            exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+            try:
+                return sum(
+                    1
+                    for fn in os.listdir(dir_path)
+                    if osp.splitext(fn)[1].lower() in exts
+                )
+            except Exception:
+                return 0
+
+        gallery_root = self.gallery_dir
+        if not gallery_root or not osp.isdir(gallery_root):
+            return {"ok": True, "total": 0, "identities": []}
+
+        identities = []
+        try:
+            # List first-level folders as identities
+            for name in sorted(os.listdir(gallery_root)):
+                p = osp.join(gallery_root, name)
+                if not osp.isdir(p):
+                    continue
+                aligned_dir = osp.join(p, "aligned")
+                raw_dir = osp.join(p, "raw")
+                identities.append(
+                    {
+                        "id": name,
+                        "aligned": _count_images(aligned_dir),
+                        "raw": _count_images(raw_dir),
+                    }
+                )
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+        return {"ok": True, "total": len(identities), "identities": identities}
+
     @staticmethod
     def _load_112(
         image_path: Optional[str], image_b64: Optional[str]
