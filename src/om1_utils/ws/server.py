@@ -97,7 +97,7 @@ class Server:
         """
         while self.running:
             try:
-                message = self.global_queue.get()
+                message = self.global_queue.get_nowait()
                 for connection_id in self.connections:
                     await self.connections[connection_id].send(message)
                 self.global_queue.task_done()
@@ -121,7 +121,7 @@ class Server:
         while self.running and connection_id in self.connections:
             try:
                 queue = self.queues[connection_id]
-                message = queue.get()
+                message = queue.get_nowait()
                 websocket = self.connections[connection_id]
                 await websocket.send(message)
                 queue.task_done()
