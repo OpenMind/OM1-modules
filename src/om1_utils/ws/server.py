@@ -53,7 +53,6 @@ class Server:
         self.global_queue: Queue[str | bytes] = Queue()
         self.connection_callback: Optional[Callable] = None
         self.message_callbacks: Dict[str, Optional[Callable]] = {}
-        # Add a flag to enable health check
         self.enable_health_check = enable_health_check
 
         # Initialize health check server
