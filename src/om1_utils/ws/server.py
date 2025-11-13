@@ -31,12 +31,18 @@ class Server:
         The hostname to bind the server to, by default "localhost"
     port : int, optional
         The port number to listen on, by default 6789
+    enable_health_check : bool, optional
+        Whether to enable the health check server, by default False
     health_check_port : int, optional
         The port for the health check server, by default 9999
     """
 
     def __init__(
-        self, host: str = "localhost", port: int = 6789, health_check_port: int = 9999
+        self,
+        host: str = "localhost",
+        port: int = 6789,
+        enable_health_check: bool = False,
+        health_check_port: int = 9999,
     ):
         self.host = host
         self.port = port
@@ -47,9 +53,13 @@ class Server:
         self.global_queue: Queue[str | bytes] = Queue()
         self.connection_callback: Optional[Callable] = None
         self.message_callbacks: Dict[str, Optional[Callable]] = {}
+        # Add a flag to enable health check
+        self.enable_health_check = enable_health_check
 
         # Initialize health check server
-        self.health_check = HealthCheckServer(port=health_check_port)
+        self.health_check: Optional[HealthCheckServer] = None
+        if self.enable_health_check:
+            self.health_check = HealthCheckServer(port=health_check_port)
 
     def register_connection_callback(self, callback: Callable[[str, str], Any]):
         """
@@ -87,7 +97,7 @@ class Server:
         """
         while self.running:
             try:
-                message = self.global_queue.get_nowait()
+                message = self.global_queue.get()
                 for connection_id in self.connections:
                     await self.connections[connection_id].send(message)
                 self.global_queue.task_done()
@@ -271,8 +281,8 @@ class Server:
         """
         Start the WebSocket server in a separate thread.
         """
-        # Start health check server
-        self.health_check.start()
+        if self.enable_health_check and self.health_check:
+            self.health_check.start()
 
         self.server_thread = threading.Thread(target=self._run_server, daemon=True)
         self.server_thread.start()
@@ -320,5 +330,5 @@ class Server:
         """
         self.running = False
 
-        if self.health_check.is_running():
+        if self.enable_health_check and self.health_check.is_running() and self.health_check:
             self.health_check.stop()
