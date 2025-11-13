@@ -121,7 +121,7 @@ class Server:
         while self.running and connection_id in self.connections:
             try:
                 queue = self.queues[connection_id]
-                message = queue.get_nowait()
+                message = queue.get()
                 websocket = self.connections[connection_id]
                 await websocket.send(message)
                 queue.task_done()
@@ -330,5 +330,9 @@ class Server:
         """
         self.running = False
 
-        if self.enable_health_check and self.health_check.is_running() and self.health_check:
+        if (
+            self.enable_health_check
+            and self.health_check.is_running()
+            and self.health_check
+        ):
             self.health_check.stop()

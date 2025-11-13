@@ -249,10 +249,10 @@ async def test_healthcheck_disabled_by_default(server_config):
     server = Server(host=server_config["host"], port=server_config["port"])
     assert server.enable_health_check is False
     assert server.health_check is None
-    
+
     server.start()
     await asyncio.sleep(0.2)
-    
+
     server.stop()
     await asyncio.sleep(0.2)
 
@@ -269,13 +269,13 @@ async def test_healthcheck_enabled(server_config):
     )
     assert server.enable_health_check is True
     assert server.health_check is not None
-    
+
     server.start()
     await asyncio.sleep(0.2)
-    
+
     assert server.health_check.is_running() is True
-    
+
     server.stop()
     await asyncio.sleep(0.2)
-    
+
     assert server.health_check.is_running() is False
