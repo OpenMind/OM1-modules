@@ -241,3 +241,41 @@ async def test_format_message():
     formatted = server.format_message(long_msg, max_length=100)
     assert len(formatted) <= 100
     assert "..." in formatted
+
+
+@pytest.mark.asyncio
+async def test_healthcheck_disabled_by_default(server_config):
+    """Test that healthcheck is disabled by default."""
+    server = Server(host=server_config["host"], port=server_config["port"])
+    assert server.enable_health_check is False
+    assert server.health_check is None
+    
+    server.start()
+    await asyncio.sleep(0.2)
+    
+    server.stop()
+    await asyncio.sleep(0.2)
+
+
+@pytest.mark.asyncio
+async def test_healthcheck_enabled(server_config):
+    """Test that healthcheck can be enabled."""
+    health_check_port = get_free_port()
+    server = Server(
+        host=server_config["host"],
+        port=server_config["port"],
+        enable_health_check=True,
+        health_check_port=health_check_port,
+    )
+    assert server.enable_health_check is True
+    assert server.health_check is not None
+    
+    server.start()
+    await asyncio.sleep(0.2)
+    
+    assert server.health_check.is_running() is True
+    
+    server.stop()
+    await asyncio.sleep(0.2)
+    
+    assert server.health_check.is_running() is False
