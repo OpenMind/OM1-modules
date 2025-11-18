@@ -39,6 +39,7 @@ class VideoRTSPStream:
     jpeg_quality : int, optional
         JPEG quality for encoding frames, by default 70
     """
+
     # Per-URL singleton registry
     _instances: dict[str, "VideoRTSPStream"] = {}
     _instances_lock = threading.Lock()
@@ -65,9 +66,7 @@ class VideoRTSPStream:
             instance = super().__new__(cls)
             cls._instances[rtsp_url] = instance
             instance._refcount = 1
-            logger.info(
-                f"Created new VideoRTSPStream for {rtsp_url}, refcount=1"
-            )
+            logger.info(f"Created new VideoRTSPStream for {rtsp_url}, refcount=1")
             return instance
 
     def __init__(
@@ -107,7 +106,6 @@ class VideoRTSPStream:
                     f"fps={fps}, resolution={resolution}, jpeg_quality={jpeg_quality}"
                 )
             return
-
 
         self._initialized = True
 
