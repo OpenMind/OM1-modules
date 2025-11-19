@@ -307,7 +307,11 @@ class TRTSCRFD(TRTModule):
         for s in self.strides:
             scores = host_scores[s].reshape(-1)
             bboxes = host_bboxes[s].reshape(-1, 4) * float(s)
-            kps = host_kps[s].reshape(-1, 10) * float(s)
+            has_kps = s in d_kps
+            kps = None
+            if has_kps:
+                kps = host_kps[s].reshape(-1, 10) * float(s)
+                
             h = size // s
             w = size // s
             centers = np.stack(np.mgrid[:h, :w][::-1], axis=-1).astype(np.float32)
@@ -320,7 +324,8 @@ class TRTSCRFD(TRTModule):
             boxes_xyxy = distance2bbox(centers, bboxes)
             scores_list.append(scores[pos, None])
             bboxes_list.append(boxes_xyxy[pos])
-            kpss_list.append(distance2kps(centers, kps)[pos].reshape(-1, 5, 2))
+            if has_kps:
+                kpss_list.append(distance2kps(centers, kps)[pos].reshape(-1, 5, 2))
 
         if not scores_list:
             return np.zeros((0, 5), dtype=np.float32), None

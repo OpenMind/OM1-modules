@@ -101,12 +101,25 @@ def draw_overlays(
                 cv2.LINE_AA,
             )
 
-        # Keypoints
         if kpss is not None and i < len(kpss):
-            for kx, ky in kpss[i]:
+            # Force to (5, 2) float array so we don't iterate over weird shapes
+            pts = np.asarray(kpss[i], dtype=np.float32).reshape(-1, 2)
+            for kx, ky in pts:
+                # Skip non-finite points coming from bad SCRFD output
+                if not np.isfinite(kx) or not np.isfinite(ky):
+                    continue
+
+                # Convert safely to ints
+                kxi = int(round(float(kx)))
+                kyi = int(round(float(ky)))
+
+                # Skip if far outside the image (another sign of bad output)
+                if kxi < 0 or kxi >= W or kyi < 0 or kyi >= H:
+                    continue
+
                 cv2.circle(
                     img,
-                    (int(kx), int(ky)),
+                    (kxi, kyi),
                     max(1, t + 1),
                     kps_color,
                     -1,
