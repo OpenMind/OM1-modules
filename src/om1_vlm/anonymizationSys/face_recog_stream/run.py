@@ -211,10 +211,21 @@ def main() -> None:
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     models_dir = os.path.join(script_dir, "..", "models")
+    platform = os.environ.get("OM1_PLATFORM","").lower()
+    if platform == "thor":
+        scrfd_name = "thor_buffalo_m_w600k_r50.engine"
+        arc_name = "thor_buffalo_m_w600k_r50.engine"
+    elif platfrom == "orin":
+        scrfd_name = "orin_scrfd_2.5g_bnkps_shape640x640.engine"
+        arc_name = "orin_buffalo_m_w600k_r50.engine"
+    else:
+        scrfd_name = "thor_buffalo_m_w600k_r50.engine"
+        arc_name = "thor_buffalo_m_w600k_r50.engine"
+        
     default_scrfd_engine = os.path.join(
-        models_dir, "scrfd_2.5g_bnkps_shape640x640.engine"
+        models_dir, scrfd_name
     )
-    default_arc_engine = os.path.join(models_dir, "buffalo_m_w600k_r50.engine")
+    default_arc_engine = os.path.join(models_dir, arc_name)
     default_gallery = os.path.join(script_dir, "..", "gallery")
 
     ap = argparse.ArgumentParser(
