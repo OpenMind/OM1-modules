@@ -160,7 +160,7 @@ class RTSPVideoStreamWriter:
             f"keyint={gop}:min-keyint={gop}:scenecut=0:rc-lookahead=0:ref=1:bframes=0",
             "-pix_fmt",
             "yuv420p",
-            "-vsync",
+            "-fps_mode",
             "cfr",
             "-r",
             f"{self.current_fps:.3f}",
