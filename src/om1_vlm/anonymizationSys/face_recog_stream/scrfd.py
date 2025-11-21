@@ -311,7 +311,7 @@ class TRTSCRFD(TRTModule):
             kps = None
             if has_kps:
                 kps = host_kps[s].reshape(-1, 10) * float(s)
-                
+
             h = size // s
             w = size // s
             centers = np.stack(np.mgrid[:h, :w][::-1], axis=-1).astype(np.float32)
