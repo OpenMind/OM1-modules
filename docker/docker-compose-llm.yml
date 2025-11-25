@@ -1,13 +1,11 @@
 version: "3.9"
 
 services:
-  qwen30b-instruct:
+  nvidia_vllm:
     image: nvcr.io/nvidia/vllm:25.09-py3
     container_name: qwen30b-instruct
-
     network_mode: "host"
     ipc: "host"
-
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
@@ -16,16 +14,13 @@ services:
       - HUGGINGFACE_HUB_CACHE=/root/.cache/huggingface
       - TRANSFORMERS_CACHE=/root/.cache/huggingface
       - VLLM_ATTENTION_BACKEND=FLASHINFER
-
     shm_size: "16g"
     ulimits:
       memlock: -1
       stack: 67108864
-
     volumes:
       - ./hf-cache:/root/.cache/huggingface
       - ./vllm-cache:/root/.cache/vllm
-
     command: >
       vllm serve DevQuasar/Qwen.Qwen3-30B-A3B-Instruct-2507-W4A16-GPTQ
         --port 8000
@@ -36,5 +31,4 @@ services:
         --tensor-parallel-size 1
         --max-num-seqs 4
         --gpu-memory-utilization 0.3
-
     restart: unless-stopped
