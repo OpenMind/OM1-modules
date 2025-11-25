@@ -1,9 +1,0 @@
-FROM dustynv/nano_llm:r36.4.0
-
-WORKDIR /app
-
-COPY . .
-
-WORKDIR /app/src
-
-ENTRYPOINT ["python3", "-m", "om1_vlm"]
