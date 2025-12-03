@@ -1,17 +1,16 @@
 import asyncio
 import base64
+import inspect
 import json
 import logging
-import inspect
-import threading
 import time
 from typing import Callable, List, Optional, Tuple
 
+import cv2
 import numpy as np
 import zenoh
-import cv2
 
-from zenoh_msgs import open_zenoh_session, Image
+from zenoh_msgs import Image, open_zenoh_session
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
@@ -109,10 +108,7 @@ class VideoZenohStream:
             _, buffer = cv2.imencode(".jpg", frame, self.encode_quality)
             frame_base64 = base64.b64encode(buffer).decode("utf-8")
 
-            frame_data = json.dumps({
-                "timestamp": time.time(),
-                "frame": frame_base64
-            })
+            frame_data = json.dumps({"timestamp": time.time(), "frame": frame_base64})
 
             for frame_callback in self.frame_callbacks:
                 if inspect.iscoroutinefunction(frame_callback):
