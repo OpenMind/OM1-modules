@@ -1,10 +1,10 @@
 from .nv_nano_llm import VideoDeviceInput, VideoStreamInput, VLMProcessor
 from .processor import ConnectionProcessor
 from .video import (
-    GazeboVideoStream,
     VideoRTSPStream,
     VideoStream,
     VideoStreamBlurFace,
+    VideoZenohStream,
     enumerate_video_devices,
 )
 
@@ -15,7 +15,7 @@ __all__ = [
     "VideoStream",
     "VideoRTSPStream",
     "VideoStreamBlurFace",
-    "GazeboVideoStream",
+    "VideoZenohStream",
     "ConnectionProcessor",
     "enumerate_video_devices",
 ]
