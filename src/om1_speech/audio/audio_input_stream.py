@@ -9,6 +9,7 @@ import threading
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import pyaudio
+import zenoh
 
 from zenoh_msgs import AudioStatus, String, open_zenoh_session, prepare_header
 
@@ -184,13 +185,13 @@ class AudioInputStream:
             self._audio_interface.terminate()
             raise
 
-    def zenoh_audio_message(self, data: str):
+    def zenoh_audio_message(self, data: zenoh.Sample):
         """
         Callback function for Zenoh audio status messages.
 
         Parameters
         ----------
-        data : str
+        data : zenoh.Sample
             The audio data in base64 encoded string format.
         """
         self.audio_status = AudioStatus.deserialize(data.payload.to_bytes())
