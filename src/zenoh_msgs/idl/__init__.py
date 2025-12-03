@@ -1,3 +1,19 @@
+from .geometry_msgs import (
+    Accel,
+    AccelWithCovariance,
+    AccelWithCovarianceStamped,
+    Point,
+    Point32,
+    Pose,
+    PoseStamped,
+    PoseWithCovariance,
+    PoseWithCovarianceStamped,
+    Quaternion,
+    Twist,
+    TwistWithCovariance,
+    TwistWithCovarianceStamped,
+    Vector3,
+)
 from .sensor_msgs import (
     IMU,
     BatteryState,
@@ -20,6 +36,20 @@ from .status_msgs import AudioStatus, CameraStatus, MotionStatus
 from .std_msgs import ColorRGBA, Duration, Header, String, Time, prepare_header
 
 __all__ = [
+    "Accel",
+    "AccelWithCovariance",
+    "AccelWithCovarianceStamped",
+    "Point",
+    "Point32",
+    "Pose",
+    "PoseStamped",
+    "PoseWithCovariance",
+    "PoseWithCovarianceStamped",
+    "Quaternion",
+    "Twist",
+    "TwistWithCovariance",
+    "TwistWithCovarianceStamped",
+    "Vector3",
     "AudioStatus",
     "CameraStatus",
     "MotionStatus",
