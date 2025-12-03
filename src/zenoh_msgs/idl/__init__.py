@@ -1,3 +1,21 @@
+from .sensor_msgs import (
+    IMU,
+    BatteryState,
+    CameraInfo,
+    Detection,
+    DockStatus,
+    HazardDetection,
+    HazardDetectionVector,
+    Image,
+    LaserScan,
+    NavSatFix,
+    NavSatStatus,
+    Paths,
+    PointCloud,
+    PointCloud2,
+    PointField,
+    RegionOfInterest,
+)
 from .status_msgs import AudioStatus, CameraStatus, MotionStatus
 from .std_msgs import ColorRGBA, Duration, Header, String, Time, prepare_header
 
@@ -11,4 +29,20 @@ __all__ = [
     "Time",
     "Duration",
     "ColorRGBA",
+    "IMU",
+    "BatteryState",
+    "CameraInfo",
+    "Detection",
+    "DockStatus",
+    "HazardDetection",
+    "HazardDetectionVector",
+    "Image",
+    "LaserScan",
+    "NavSatFix",
+    "NavSatStatus",
+    "Paths",
+    "PointCloud",
+    "PointCloud2",
+    "PointField",
+    "RegionOfInterest",
 ]
