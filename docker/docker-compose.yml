@@ -1,34 +1,39 @@
-version: "3.9"
-
 services:
-  nvidia_vllm:
+  qwen30b-quantized:
     image: nvcr.io/nvidia/vllm:25.09-py3
-    container_name: qwen30b-instruct
+    container_name: qwen30b-quantized
+
     network_mode: "host"
     ipc: "host"
+
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - HF_HOME=/root/.cache/huggingface
-      - HUGGINGFACE_HUB_CACHE=/root/.cache/huggingface
-      - TRANSFORMERS_CACHE=/root/.cache/huggingface
       - VLLM_ATTENTION_BACKEND=FLASHINFER
+
     shm_size: "16g"
     ulimits:
       memlock: -1
       stack: 67108864
+
     volumes:
       - ./hf-cache:/root/.cache/huggingface
       - ./vllm-cache:/root/.cache/vllm
+
     command: >
-      vllm serve DevQuasar/Qwen.Qwen3-30B-A3B-Instruct-2507-W4A16-GPTQ
-        --port 8000
+      python -m vllm.entrypoints.openai.api_server
+        --model RedHatAI/Qwen3-30B-A3B-quantized.w4a16
         --host 0.0.0.0
-        --swap-space 16
-        --max-model-len 12000
-        --max-seq-len 12000
+        --port 8000
+        --dtype auto
         --tensor-parallel-size 1
-        --max-num-seqs 4
+        --max-model-len 4096
         --gpu-memory-utilization 0.3
+        --swap-space 16
+        --max-num-seqs 2
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+
     restart: unless-stopped
