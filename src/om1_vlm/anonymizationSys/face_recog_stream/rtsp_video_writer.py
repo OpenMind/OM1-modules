@@ -300,22 +300,6 @@ class RTSPVideoStreamWriter:
                 self.restart_needed = True
             self.last_fps_update = now
 
-        # Keep latency low: drop oldest if we’re falling behind
-        # try:
-        #     while self.frame_queue.qsize() >= 3:
-        #         try:
-        #             self.frame_queue.get_nowait()
-        #         except queue.Empty:
-        #             break
-        #     self.frame_queue.put_nowait(frame)
-        # except queue.Full:
-        #     try:
-        #         self.frame_queue.get_nowait()
-        #         self.frame_queue.put_nowait(frame)
-        #     except queue.Empty:
-        #         pass
-        # except Exception as e:
-        #     logging.error("Error queueing frame: %s", e)
         try:
             self.frame_queue.put(frame, block=True, timeout=0.05)
         except queue.Full:
@@ -325,6 +309,8 @@ class RTSPVideoStreamWriter:
                 self.frame_queue.put_nowait(frame)
             except (queue.Empty, queue.Full):
                 pass
+        except Exception as e:
+            logging.error("Error queueing frame: %s", e)
 
     def _writer_thread(self):
         """
