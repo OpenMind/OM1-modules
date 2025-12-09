@@ -11,6 +11,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - HF_HOME=/root/.cache/huggingface
+      - VLLM_CACHE_DIR=/root/.cache/vllm
       - VLLM_ATTENTION_BACKEND=FLASHINFER
 
     shm_size: "16g"
