@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   qwen30b_quantized:
     image: nvcr.io/nvidia/vllm:25.09-py3
