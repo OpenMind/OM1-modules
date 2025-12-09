@@ -16,7 +16,7 @@ class RTSPVideoStreamWriter:
         self,
         width: int,
         height: int,
-        estimated_fps: int = 18,
+        estimated_fps: int = 30,
         local_rtsp_url: Optional[str] = "rtsp://localhost:8554/live",
         remote_rtsp_url: Optional[str] = None,
     ):
@@ -148,6 +148,8 @@ class RTSPVideoStreamWriter:
             "ultrafast",
             "-tune",
             "zerolatency",
+            "-profile:v",
+            "baseline",
             "-crf",
             "30",
             "-maxrate",
@@ -299,21 +301,30 @@ class RTSPVideoStreamWriter:
             self.last_fps_update = now
 
         # Keep latency low: drop oldest if we’re falling behind
+        # try:
+        #     while self.frame_queue.qsize() >= 3:
+        #         try:
+        #             self.frame_queue.get_nowait()
+        #         except queue.Empty:
+        #             break
+        #     self.frame_queue.put_nowait(frame)
+        # except queue.Full:
+        #     try:
+        #         self.frame_queue.get_nowait()
+        #         self.frame_queue.put_nowait(frame)
+        #     except queue.Empty:
+        #         pass
+        # except Exception as e:
+        #     logging.error("Error queueing frame: %s", e)
         try:
-            while self.frame_queue.qsize() >= 3:
-                try:
-                    self.frame_queue.get_nowait()
-                except queue.Empty:
-                    break
-            self.frame_queue.put_nowait(frame)
+            self.frame_queue.put(frame, block=True, timeout=0.05)
         except queue.Full:
+            # Only drop oldest frame if absolutely necessary
             try:
                 self.frame_queue.get_nowait()
                 self.frame_queue.put_nowait(frame)
-            except queue.Empty:
+            except (queue.Empty, queue.Full):
                 pass
-        except Exception as e:
-            logging.error("Error queueing frame: %s", e)
 
     def _writer_thread(self):
         """
@@ -337,6 +348,7 @@ class RTSPVideoStreamWriter:
             try:
                 # type: ignore[union-attr]
                 self.process.stdin.write(frame.tobytes())
+                self.process.stdin.flush()
                 self._frames_written += 1
             except (BrokenPipeError, OSError) as e:
                 logging.error("Pipe error writing frame: %s", e)
