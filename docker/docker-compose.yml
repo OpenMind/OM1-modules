@@ -1,7 +1,7 @@
 services:
-  qwen30b-quantized:
+  qwen30b_quantized:
     image: nvcr.io/nvidia/vllm:25.09-py3
-    container_name: qwen30b-quantized
+    container_name: qwen30b_quantized
 
     network_mode: "host"
     ipc: "host"
