@@ -11,5 +11,8 @@ __all__ = [
     "io",
     "http_api",
     "who_tracker",
+    "yolo_pose",
+    "draw_pose",
+    "fall_detector",
 ]
 __version__ = "0.1.0"

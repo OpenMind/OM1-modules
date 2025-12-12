@@ -11,14 +11,29 @@ from typing import Optional
 logging.basicConfig(level=logging.INFO)
 
 
+def _check_nvenc_available() -> bool:
+    """Check if NVENC hardware encoder is available."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return "h264_nvenc" in result.stdout
+    except Exception:
+        return False
+
+
 class RTSPVideoStreamWriter:
     def __init__(
         self,
         width: int,
         height: int,
-        estimated_fps: int = 18,
+        estimated_fps: int = 30,
         local_rtsp_url: Optional[str] = "rtsp://localhost:8554/live",
         remote_rtsp_url: Optional[str] = None,
+        use_hwenc: bool = True,  # NEW: prefer hardware encoding
     ):
         """
         Initialize the RTSP video stream writer (video-only; no audio).
@@ -35,6 +50,9 @@ class RTSPVideoStreamWriter:
             Local RTSP URL to stream to, by default "rtsp://localhost:8554/live".
         remote_rtsp_url : Optional[str], optional
             Remote RTSP URL to stream to, by default None.
+        use_hwenc : bool
+            If True, try to use NVENC hardware encoder (Jetson/NVIDIA GPU).
+            Falls back to libx264 if unavailable.
         """
         if not local_rtsp_url and not remote_rtsp_url:
             raise ValueError(
@@ -46,6 +64,13 @@ class RTSPVideoStreamWriter:
         self.estimated_fps = float(estimated_fps)
         self.local_rtsp_url = local_rtsp_url
         self.remote_rtsp_url = remote_rtsp_url
+
+        # Check hardware encoder availability
+        self.use_nvenc = use_hwenc and _check_nvenc_available()
+        if use_hwenc and self.use_nvenc:
+            logging.info("Using NVENC hardware encoder")
+        elif use_hwenc:
+            logging.warning("NVENC not available, falling back to libx264")
 
         # FPS measurement
         self.frame_times = deque(maxlen=60)
@@ -65,8 +90,8 @@ class RTSPVideoStreamWriter:
         self.restart_needed = False
         self._start_process()
 
-        # Queue and threading for frame handling
-        self.frame_queue: "queue.Queue" = queue.Queue(maxsize=5)
+        # Queue and threading
+        self.frame_queue: "queue.Queue" = queue.Queue(maxsize=3)  # Smaller queue
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._writer_thread, daemon=True)
         self.thread.start()
@@ -113,14 +138,11 @@ class RTSPVideoStreamWriter:
         return fps_change > 0.30  # >30%
 
     def _build_ffmpeg_command(self):
-        """
-        Build the FFmpeg command array with current FPS.
-        Video-only (no audio) for maximum FPS and stability.
-        """
-        gop = max(1, int(round(self.current_fps)))  # 1-second GOP for low latency
-        vbv = "4M"  # small buffer to keep latency predictable
+        """Build FFmpeg command with hardware or software encoding."""
+        gop = max(1, int(round(self.current_fps)))  # 1-second keyframe interval
+        vbv = "2M"
 
-        # Base input: raw BGR frames over stdin
+        # Base input - raw BGR frames from stdin
         cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -136,36 +158,81 @@ class RTSPVideoStreamWriter:
             f"{self.current_fps:.3f}",
             "-use_wallclock_as_timestamps",
             "1",
+            "-thread_queue_size",
+            "16",  # Small input queue
             "-i",
             "-",
             "-map",
             "0:v",
-            "-vf",
-            "format=yuv420p",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-tune",
-            "zerolatency",
-            "-crf",
-            "30",
-            "-maxrate",
-            vbv,
-            "-bufsize",
-            vbv,
-            "-g",
-            str(gop),
-            "-x264-params",
-            f"keyint={gop}:min-keyint={gop}:scenecut=0:rc-lookahead=0:ref=1:bframes=0",
-            "-pix_fmt",
-            "yuv420p",
+        ]
+
+        if self.use_nvenc:
+            # NVENC hardware encoding (Jetson / NVIDIA GPU)
+            # Optimized for lowest latency streaming
+            cmd += [
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                "p1",  # p1=fastest, p7=best quality
+                "-tune",
+                "ll",  # Low latency tuning
+                "-profile:v",
+                "baseline",  # Most compatible, lowest latency
+                "-rc",
+                "cbr",  # Constant bitrate for stable streaming
+                "-b:v",
+                vbv,
+                "-maxrate",
+                vbv,
+                "-bufsize",
+                vbv,  # 1-second buffer
+                "-g",
+                str(gop),  # Keyframe every 1 second
+                "-bf",
+                "0",  # No B-frames (lower latency)
+                "-strict_gop",
+                "1",  # Force fixed GOP
+                "-delay",
+                "0",  # Zero encoding delay
+                "-zerolatency",
+                "1",  # Zero latency mode
+                "-pix_fmt",
+                "yuv420p",
+            ]
+        else:
+            # CPU software encoding (libx264) - fallback
+            cmd += [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-profile:v",
+                "baseline",
+                "-crf",
+                "28",
+                "-maxrate",
+                vbv,
+                "-bufsize",
+                vbv,
+                "-g",
+                str(gop),
+                "-x264-params",
+                f"keyint={gop}:min-keyint={gop}:scenecut=0:rc-lookahead=0:ref=1:bframes=0",
+                "-pix_fmt",
+                "yuv420p",
+            ]
+
+        # Output settings
+        cmd += [
             "-fps_mode",
             "cfr",
             "-r",
             f"{self.current_fps:.3f}",
         ]
 
+        # RTSP output
         if self.remote_rtsp_url:
             tee_arg = (
                 f"[f=rtsp:rtsp_transport=tcp]{self.local_rtsp_url}"
@@ -208,8 +275,10 @@ class RTSPVideoStreamWriter:
 
         # Launch fresh
         cmd = self._build_ffmpeg_command()
-        logging.info("Starting FFmpeg with FPS: %.2f", self.current_fps)
+        enc_type = "NVENC" if self.use_nvenc else "libx264"
+        logging.info("Starting FFmpeg (%s) with FPS: %.2f", enc_type, self.current_fps)
         logging.info("FFmpeg command: %s", " ".join(cmd))
+
         try:
             # Use a generous stdin buffer to reduce write stalls
             self.process = subprocess.Popen(
@@ -219,7 +288,11 @@ class RTSPVideoStreamWriter:
                 stderr=subprocess.PIPE,  # capture for logging
                 bufsize=self.width * self.height * 3 * 2,
             )
-            logging.info("Started FFmpeg subprocess with PID: %s", self.process.pid)
+            logging.info(
+                "Started FFmpeg subprocess (PID: %s, encoder: %s)",
+                self.process.pid,
+                enc_type,
+            )
             self.restart_needed = False
 
             # Start stderr logger thread
@@ -298,20 +371,16 @@ class RTSPVideoStreamWriter:
                 self.restart_needed = True
             self.last_fps_update = now
 
-        # Keep latency low: drop oldest if we’re falling behind
         try:
-            while self.frame_queue.qsize() >= 3:
+            # Non-blocking put with drop-oldest strategy
+            if self.frame_queue.full():
                 try:
-                    self.frame_queue.get_nowait()
+                    self.frame_queue.get_nowait()  # Drop oldest
                 except queue.Empty:
-                    break
+                    pass
             self.frame_queue.put_nowait(frame)
         except queue.Full:
-            try:
-                self.frame_queue.get_nowait()
-                self.frame_queue.put_nowait(frame)
-            except queue.Empty:
-                pass
+            pass  # Drop frame if still full
         except Exception as e:
             logging.error("Error queueing frame: %s", e)
 
@@ -335,8 +404,8 @@ class RTSPVideoStreamWriter:
 
             # Write raw BGR24
             try:
-                # type: ignore[union-attr]
                 self.process.stdin.write(frame.tobytes())
+                self.process.stdin.flush()
                 self._frames_written += 1
             except (BrokenPipeError, OSError) as e:
                 logging.error("Pipe error writing frame: %s", e)
@@ -350,7 +419,8 @@ class RTSPVideoStreamWriter:
                 elapsed = now - self._last_log_t
                 fps = self._frames_written / elapsed if elapsed > 0 else 0.0
                 qsz = self.frame_queue.qsize()
-                logging.info("[RTSP out] ~%.1f fps (queue=%d, enc=libx264)", fps, qsz)
+                enc = "nvenc" if self.use_nvenc else "x264"
+                logging.info("[RTSP out] ~%.1f fps (queue=%d, enc=%s)", fps, qsz, enc)
                 self._last_log_t = now
                 self._frames_written = 0
 
