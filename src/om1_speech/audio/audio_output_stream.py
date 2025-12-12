@@ -11,7 +11,7 @@ from typing import Callable, Dict, Optional
 
 import requests
 
-from zenoh_msgs import AudioStatus, String, open_zenoh_session, prepare_header
+from zenoh_msgs import AudioStatus, String, open_zenoh_session, prepare_header, TTSInterrupt
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
@@ -62,6 +62,7 @@ class AudioOutputStream:
             self.session = open_zenoh_session()
             self.pub = self.session.declare_publisher(self.topic)
             self.session.declare_subscriber(self.topic, self.zenoh_audio_message)
+            self.session.declare_subscriber("robot/tts/interrupt", self._on_tts_interrupt)
         except Exception as e:
             logger.error(f"Failed to declare Zenoh subscriber: {e}")
             self.session = None
@@ -76,6 +77,10 @@ class AudioOutputStream:
         # Running state and last audio time
         self.running: bool = True
         self._last_audio_time = time.time()
+
+        # TTS process
+        self.current_proc = None
+        self._proc_lock = threading.Lock()
 
     def zenoh_audio_message(self, data: str):
         """
@@ -95,6 +100,24 @@ class AudioOutputStream:
         ):
             pending_message = json.loads(self.audio_status.sentence_to_speak.data)
             self.add_request(pending_message)
+
+    def _on_tts_interrupt(self, data: str):
+        """
+        Callback for TTS interrupt messages.
+        """
+        try:
+            TTSInterrupt.deserialize(data.payload.to_bytes())
+            logger.debug("Received TTS interrupt request")
+            
+            with self._pending_requests.mutex:
+                self._pending_requests.queue.clear()
+            
+            with self._proc_lock:
+                if self.current_proc:
+                    self.current_proc.kill()
+                    logger.debug("Killed current TTS process")
+        except Exception as e:
+            logger.error(f"Error handling TTS interrupt: {e}")
 
     def set_tts_state_callback(self, callback: Callable):
         """
@@ -248,11 +271,22 @@ class AudioOutputStream:
             stdin=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        
+        with self._proc_lock:
+            self.current_proc = proc
+
         proc.communicate(input=audio_bytes)
+        
+        with self._proc_lock:
+            self.current_proc = None
+
         exit_code = proc.poll()
 
         if exit_code != 0 and not is_keepalive:
-            logger.error(f"Error playing audio: {exit_code}")
+            if exit_code == -9:
+                logger.debug(f"Audio playback interrupted (exit code: {exit_code})")
+            else:
+                logger.error(f"Error playing audio: {exit_code}")
 
         if not is_keepalive:
             self._tts_callback(False)

@@ -56,3 +56,9 @@ class MotionStatus(IdlStruct, typename="MotionStatus"):
     control: int8
     attitude: int8
     state: int8
+
+
+@dataclass
+class TTSInterrupt(IdlStruct, typename="TTSInterrupt"):
+    """Message type for TTS interrupt requests."""
+    header: Header

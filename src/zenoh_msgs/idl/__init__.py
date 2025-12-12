@@ -32,7 +32,7 @@ from .sensor_msgs import (
     PointField,
     RegionOfInterest,
 )
-from .status_msgs import AudioStatus, CameraStatus, MotionStatus
+from .status_msgs import AudioStatus, CameraStatus, MotionStatus, TTSInterrupt
 from .std_msgs import ColorRGBA, Duration, Header, String, Time, prepare_header
 
 __all__ = [
@@ -53,6 +53,7 @@ __all__ = [
     "AudioStatus",
     "CameraStatus",
     "MotionStatus",
+    "TTSInterrupt",
     "Header",
     "String",
     "prepare_header",

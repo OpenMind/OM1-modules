@@ -148,6 +148,7 @@ class AudioRTSPInputStream:
         audio_data_callback: Optional[Callable] = None,
         audio_data_callbacks: Optional[List[Callable]] = None,
         language_code: Optional[str] = None,
+        disable_tts_mute: bool = False,
     ):
         self._rate = rate
 
@@ -168,6 +169,9 @@ class AudioRTSPInputStream:
 
         # Flag to indicate if TTS is active
         self._is_tts_active: bool = False
+
+        # Flag to indicate if interrupt mode is on
+        self._disable_tts_mute = disable_tts_mute
 
         # Thread-safe buffer for audio data
         self._buff = mp.Queue()
@@ -220,19 +224,23 @@ class AudioRTSPInputStream:
         self.audio_status = AudioStatus.deserialize(data.payload.to_bytes())
 
         if self.audio_status.status_speaker == AudioStatus.STATUS_SPEAKER.ACTIVE.value:
-            with self._lock:
-                if not self._is_tts_active:
-                    state = AudioStatus(
-                        header=prepare_header(),
-                        status_mic=self.audio_status.status_mic,
-                        status_speaker=AudioStatus.STATUS_SPEAKER.ACTIVE.value,
-                        sentence_to_speak=String(""),
-                    )
+            if self._disable_tts_mute:
+                with self._lock:
+                    self._is_tts_active = False
+            else:
+                with self._lock:
+                    if not self._is_tts_active:
+                        state = AudioStatus(
+                            header=prepare_header(),
+                            status_mic=self.audio_status.status_mic,
+                            status_speaker=AudioStatus.STATUS_SPEAKER.ACTIVE.value,
+                            sentence_to_speak=String(""),
+                        )
 
-                    if self.pub:
-                        self.pub.put(state.serialize())
+                        if self.pub:
+                            self.pub.put(state.serialize())
 
-                    self._is_tts_active = True
+                        self._is_tts_active = True
 
         if self.audio_status.status_speaker == AudioStatus.STATUS_SPEAKER.READY.value:
             with self._lock:
