@@ -127,12 +127,15 @@ from om1_utils.http import Server  # lightweight HTTP server
 from .arcface import TRTArcFace, warp_face_by_5p
 from .camera_reader import CameraReader
 from .draw import draw_overlays
+from .draw_pose import draw_fall_alert, draw_pose_overlays
+from .fall_detector import FallDetector
 from .gallery import GalleryManager
 from .http_api import HttpAPI
 from .rtsp_video_writer import RTSPVideoStreamWriter
 from .scrfd import TRTSCRFD
 from .utils import infer_arc_batched, pick_topk_indices
-from .who_tracker import WhoTracker
+from .who_tracker import WhoTracker, match_falls_to_faces
+from .yolo_pose import TRTYOLOPose
 
 logger = logging.getLogger(__name__)
 
@@ -211,18 +214,37 @@ def main() -> None:
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     models_dir = os.path.join(script_dir, "..", "models")
-    scrfd_name = "thor_scrfd_2.5g_bnkps_shape640x640.engine"
-    arc_name = "thor_buffalo_m_w600k_r50.engine"
+    scrfd_name = "om1-modules_scrfd_2.5g_bnkps_shape640x640.engine"
+    arc_name = "om1-modules_buffalo_m_w600k_r50.engine"
+    pose_name = "yolo11s-pose.engine"
 
     default_scrfd_engine = os.path.join(models_dir, scrfd_name)
     default_arc_engine = os.path.join(models_dir, arc_name)
     default_gallery = os.path.join(script_dir, "..", "gallery")
+    default_pose_engine = os.path.join(models_dir, pose_name)
 
     ap = argparse.ArgumentParser(
         "Jetson real-time detection + recognition + blur + RTSP + HTTP"
     )
 
     # Engines
+    ap.add_argument(
+        "--pose",
+        action="store_true",
+        default=False,
+        help="Enable YOLO11 pose detection.",
+    )
+    ap.add_argument(
+        "--pose-engine",
+        default=default_pose_engine,
+        help="Path to YOLO11-pose TensorRT engine.",
+    )
+    ap.add_argument(
+        "--fall-detection",
+        action="store_true",
+        default=False,
+        help="Enable fall detection using pose keypoints.",
+    )
     ap.add_argument(
         "--scrfd-engine",
         default=default_scrfd_engine,
@@ -268,7 +290,7 @@ def main() -> None:
     ap.add_argument(
         "--blur",
         action="store_true",
-        default=True,
+        default=False,
         help="Enable pixelation blur on faces.",
     )
     ap.add_argument(
@@ -298,6 +320,24 @@ def main() -> None:
     ap.add_argument("--draw-boxes", action="store_true", help="Draw detection boxes.")
     ap.add_argument(
         "--draw-names", action="store_true", help="Draw recognized names/scores."
+    )
+    ap.add_argument(
+        "--draw-skeleton",
+        action="store_true",
+        default=False,
+        help="Draw skeleton keypoints on detected people.",
+    )
+    ap.add_argument(
+        "--draw-pose-boxes",
+        action="store_true",
+        default=False,
+        help="Draw pose bounding boxes.",
+    )
+    ap.add_argument(
+        "--draw-fall-status",
+        action="store_true",
+        default=False,
+        help="Draw fall status overlays.",
     )
     ap.add_argument(
         "--show-fps", action="store_true", help="Overlay per-frame time and FPS."
@@ -386,6 +426,8 @@ def main() -> None:
         if not os.path.exists(args.gallery_dir):
             raise SystemExit(f"Gallery directory not found: {args.gallery_dir}")
         os.makedirs(args.embeds_dir, exist_ok=True)
+    if args.pose and not os.path.exists(args.pose_engine):
+        raise SystemExit(f"Pose engine not found: {args.pose_engine}")
 
     # Engines
     scrfd = TRTSCRFD(args.scrfd_engine, input_name=args.scrfd_input, size=args.size)
@@ -402,6 +444,30 @@ def main() -> None:
             arc_max_bs = max(1, int(arc.max_batch))  # type: ignore[attr-defined]
         except Exception:
             arc_max_bs = 4
+
+    # Load pose detection engine
+    pose_detector: Optional[TRTYOLOPose] = None
+    fall_detector: Optional[FallDetector] = None
+
+    if args.pose:
+        pose_detector = TRTYOLOPose(
+            args.pose_engine,
+            size=640,
+            conf_thresh=0.5,
+            nms_thresh=0.45,
+        )
+        logger.info("Loaded YOLO pose engine: %s", args.pose_engine)
+
+        if args.fall_detection:
+            fall_detector = FallDetector(
+                horizontal_ratio_thr=0.3,
+                height_ratio_thr=0.3,
+                aspect_ratio_thr=1.2,
+                kp_conf_thr=0.5,
+                temporal_frames=8,
+                fall_frame_ratio=0.4,
+            )
+            logger.info("Fall detection enabled")
 
     # Gallery state + lock
     gal_state = _GalState()
@@ -467,6 +533,13 @@ def main() -> None:
         "pixel_blocks": int(args.pixel_blocks),
         "pixel_margin": float(args.pixel_margin),
         "pixel_noise": float(args.pixel_noise),
+        "pose": bool(args.pose),
+        "pose_conf": 0.5,
+        "pose_max_num": 10,
+        "fall_detection": bool(args.fall_detection),
+        "draw_skeleton": bool(args.draw_skeleton),
+        "draw_pose_boxes": bool(args.draw_pose_boxes),
+        "draw_fall_status": bool(args.draw_fall_status),
     }
 
     # Last clean frame & detections for /selfie
@@ -610,6 +683,13 @@ def main() -> None:
                 # pixel_blocks = int(cfg["pixel_blocks"])
                 # pixel_margin = float(cfg["pixel_margin"])
                 # pixel_noise = float(cfg["pixel_noise"])
+                do_pose = bool(cfg["pose"])
+                pose_conf = float(cfg["pose_conf"])
+                pose_max_num = int(cfg["pose_max_num"])
+                do_fall = bool(cfg["fall_detection"])
+                draw_skel = bool(cfg["draw_skeleton"])
+                draw_pbox = bool(cfg["draw_pose_boxes"])
+                draw_fstat = bool(cfg["draw_fall_status"])
 
             total += 1
             t_start = time.perf_counter()
@@ -732,6 +812,7 @@ def main() -> None:
                 #     names = ["unknown"] * int(dets.shape[0])
 
             # Who-tracker (strip score suffix)
+            # Strip score suffix helper
             def strip_score(nm: Optional[str]) -> Optional[str]:
                 if nm is None:
                     return None
@@ -740,7 +821,61 @@ def main() -> None:
                 p = nm.find(" (")
                 return nm[:p] if p > 0 else nm
 
-            who.update_now([strip_score(nm) for nm in names])
+            # Strip scores from names for tracking
+            names_stripped = [strip_score(nm) for nm in names]
+
+            # Pose detection + fall detection (BEFORE who.update_now)
+            pose_dets: Optional[np.ndarray] = None
+            pose_kps: Optional[np.ndarray] = None
+            fall_statuses: Optional[List] = None
+            fall_infos: Optional[List] = None
+
+            if do_pose and pose_detector is not None:
+                try:
+                    pose_dets, pose_kps = pose_detector.detect(
+                        frame, conf=pose_conf, max_num=pose_max_num
+                    )
+
+                    if (
+                        do_fall
+                        and fall_detector is not None
+                        and pose_dets is not None
+                        and len(pose_dets) > 0
+                    ):
+                        fall_statuses = fall_detector.detect_batch(pose_dets, pose_kps)
+
+                        # Match falls to face identities using head keypoints
+                        fall_infos = match_falls_to_faces(
+                            fall_statuses=fall_statuses,
+                            pose_keypoints=pose_kps,
+                            face_bboxes=dets,
+                            face_names=names_stripped,
+                        )
+
+                except Exception as e:
+                    logger.warning("[warn] pose detection failed: %s", e)
+                    pose_dets, pose_kps = None, None
+
+            # Update who tracker WITH fall info (AFTER fall detection)
+            who.update_now(names_stripped, fall_infos=fall_infos)
+
+            # Draw Pose (BEFORE blur)
+            if pose_dets is not None and len(pose_dets) > 0:
+                frame = draw_pose_overlays(
+                    frame,
+                    pose_dets,
+                    pose_kps,
+                    fall_statuses=fall_statuses,
+                    draw_skeleton=draw_skel,
+                    draw_boxes=draw_pbox,
+                    draw_fall_status=draw_fstat,
+                )
+
+                # Draw global fall alert
+                if fall_statuses:
+                    fall_count = sum(1 for s in fall_statuses if s.is_fallen)
+                    if fall_count > 0:
+                        draw_fall_alert(frame, fall_count)
 
             # Blur
             if do_blur and dets is not None and dets.shape[0] > 0:
