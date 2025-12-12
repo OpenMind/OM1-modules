@@ -1,4 +1,3 @@
-# face_recog_stream/yolo_pose.py
 """
 TensorRT YOLO11 Pose detector for human keypoint estimation.
 
