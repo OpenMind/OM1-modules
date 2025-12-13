@@ -11,7 +11,7 @@ from typing import Callable, Dict, Optional
 
 import requests
 
-from zenoh_msgs import ASRText, AudioStatus, String, open_zenoh_session, prepare_header
+from zenoh_msgs import AudioStatus, String, open_zenoh_session, prepare_header
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
@@ -116,9 +116,9 @@ class AudioOutputStream:
                 and self.audio_status.status_speaker
                 == AudioStatus.STATUS_SPEAKER.ACTIVE.value
             ):
-                asr_msg = ASRText.deserialize(data.payload.to_bytes())
-                if asr_msg.text and len(asr_msg.text.strip()) > 0:
-                    logger.debug(f"Interrupting TTS due to ASR: {asr_msg.text}")
+                asr_payload = data.payload.to_bytes()
+                if asr_payload and len(asr_payload) > 0:
+                    logger.debug("Interrupting TTS due to ASR detection")
                     with self._pending_requests.mutex:
                         self._pending_requests.queue.clear()
                     with self._proc_lock:
