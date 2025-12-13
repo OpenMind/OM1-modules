@@ -64,6 +64,9 @@ class VideoDeviceInput:
         RuntimeError
             If video device initialization fails
         """
+        if VideoSource is None or VideoOutput is None:
+            raise ModuleNotFoundError("nano_llm package is not available")
+
         devices = enumerate_video_devices()
         camindex = "/dev/video" + str(devices[0][0]) if devices else "/dev/video0"
         logger.info(f"Using camera: {camindex}")

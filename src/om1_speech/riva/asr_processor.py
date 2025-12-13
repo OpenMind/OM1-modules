@@ -14,6 +14,9 @@ except ModuleNotFoundError:
 
 from ..interfaces import ASRProcessorInterface
 
+root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
+logger = logging.getLogger(root_package_name)
+
 
 class ASRProcessor(ASRProcessorInterface):
     """
@@ -30,8 +33,8 @@ class ASRProcessor(ASRProcessorInterface):
     def __init__(
         self, model_args: argparse.Namespace, callback: Optional[Callable] = None
     ):
-        self.model: Optional[ASRService] = None
-        self.model_config: Optional[StreamingRecognitionConfig] = None
+        self.model: Optional[ASRService] = None  # type: ignore
+        self.model_config: Optional[StreamingRecognitionConfig] = None  # type: ignore
         self.args = model_args
         self.callback = callback
         self.running: bool = True
@@ -50,6 +53,12 @@ class ASRProcessor(ASRProcessorInterface):
         the recognition parameters including audio encoding, language,
         punctuation, and various thresholds.
         """
+        if client is None:
+            logger.error(
+                "Riva client module not available. Make sure riva-client is installed."
+            )
+            return
+
         auth = client.Auth(
             self.args.ssl_cert, self.args.use_ssl, self.args.server, self.args.metadata
         )
@@ -139,6 +148,9 @@ class ASRProcessor(ASRProcessorInterface):
         audio_source : Any
             Source object that provides audio chunks for processing
         """
+        if self.model is None or self.model_config is None:
+            raise RuntimeError("ASR model is not initialized.")
+
         responses = self.model.streaming_response_generator(
             audio_chunks=self._yield_audio_chunks(audio_source),
             streaming_config=self.model_config,

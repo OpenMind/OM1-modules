@@ -90,8 +90,10 @@ class ConnectionProcessor:
         """
         asr_processor = self.asr_processor_class(
             self.args,
-            callback=lambda message: self.ws_server.handle_response(
-                connection_id, message
+            callback=lambda message: (
+                self.ws_server.handle_response(connection_id, message)
+                if self.ws_server
+                else None
             ),
         )
 
@@ -103,12 +105,13 @@ class ConnectionProcessor:
         self.audio_sources[connection_id] = audio_source
 
         # Register message callback for audio stream
-        self.ws_server.register_message_callback(
-            connection_id,
-            lambda conn_id, message: audio_source.handle_ws_incoming_message(
-                conn_id, message
-            ),
-        )
+        if self.ws_server:
+            self.ws_server.register_message_callback(
+                connection_id,
+                lambda conn_id, message: audio_source.handle_ws_incoming_message(
+                    conn_id, message
+                ),
+            )
 
         processing_thread = threading.Thread(
             target=asr_processor.process_audio,

@@ -286,7 +286,8 @@ class TRTSCRFD(TRTModule):
             self.context.execute_async_v3(self.stream.handle)
             if self.v10_api
             else self.context.execute_async_v2(
-                bindings=bindings, stream_handle=self.stream.handle
+                bindings=bindings,  # type: ignore
+                stream_handle=self.stream.handle,
             )
         )
         if not ok:
@@ -314,7 +315,7 @@ class TRTSCRFD(TRTModule):
 
             h = size // s
             w = size // s
-            centers = np.stack(np.mgrid[:h, :w][::-1], axis=-1).astype(np.float32)
+            centers = np.stack(np.mgrid[:h, :w][::-1], axis=-1).astype(np.float32)  # type: ignore
             centers = (centers * s).reshape(-1, 2)
             if self.num_anchors > 1:
                 centers = np.repeat(centers, self.num_anchors, axis=0)
@@ -325,7 +326,7 @@ class TRTSCRFD(TRTModule):
             scores_list.append(scores[pos, None])
             bboxes_list.append(boxes_xyxy[pos])
             if has_kps:
-                kpss_list.append(distance2kps(centers, kps)[pos].reshape(-1, 5, 2))
+                kpss_list.append(distance2kps(centers, kps)[pos].reshape(-1, 5, 2))  # type: ignore
 
         if not scores_list:
             return np.zeros((0, 5), dtype=np.float32), None

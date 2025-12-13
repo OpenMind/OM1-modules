@@ -43,9 +43,9 @@ class VLMProcessor:
         model_args: argparse.Namespace,
         callback: Optional[Callable[[str], None]] = None,
     ):
-        self.model: nano_llm.NanoLLM = self._initialize_model(model_args)
+        self.model: nano_llm.NanoLLM = self._initialize_model(model_args)  # type: ignore
         self.model_args = model_args
-        self.chat_history: nano_llm.ChatHistory = self._initialize_chat_history(
+        self.chat_history: nano_llm.ChatHistory = self._initialize_chat_history(  # type: ignore
             model_args
         )
         self.callback = callback
@@ -53,7 +53,7 @@ class VLMProcessor:
         self.num_images: int = 0
         self.raw_response: str = "test"
         self.response: str = ""
-        self.font: Any = cudaFont()
+        self.font: Any = cudaFont() if cudaFont is not None else None
         self.running: bool = True
 
         # Warm up the model
@@ -78,6 +78,10 @@ class VLMProcessor:
         AssertionError
             If the model does not have vision capabilities
         """
+        if NanoLLM is None:
+            logger.error("NanoLLM class is not available.")
+            raise AssertionError("NanoLLM class is not available.")
+
         model = NanoLLM.from_pretrained(
             args.model,
             api=args.api,
@@ -104,6 +108,10 @@ class VLMProcessor:
         nano_llm.ChatHistory
             Initialized chat history instance
         """
+        if ChatHistory is None:
+            logger.error("ChatHistory class is not available.")
+            return
+
         return ChatHistory(self.model, args.chat_template, args.system_prompt)
 
     def _warmup_model(self):
@@ -135,7 +143,9 @@ class VLMProcessor:
         str
             Cleaned and formatted response text
         """
-        response = remove_special_tokens(text)
+        response = (
+            remove_special_tokens(text) if remove_special_tokens is not None else text
+        )
         response = response.lower()
         response = response.replace(
             "the most interesting aspect of this series of images is", "You see"
@@ -168,21 +178,25 @@ class VLMProcessor:
         Any
             Annotated video frame
         """
-        self.last_image = cudaMemcpy(image)
+        if cudaMemcpy is not None:
+            self.last_image = cudaMemcpy(image)
+        else:
+            self.last_image = image
 
         annotation = "Accumulating:" + str(self.num_images)
         if self.num_images >= 5:
             annotation = "VLM:" + self.response
 
-        wrap_text(
-            self.font,
-            image,
-            text=annotation,
-            x=5,
-            y=5,
-            color=(255, 0, 0),
-            background=self.font.Gray50,
-        )
+        if wrap_text is not None:
+            wrap_text(
+                self.font,
+                image,
+                text=annotation,
+                x=5,
+                y=5,
+                color=(255, 0, 0),
+                background=self.font.Gray50,
+            )
         return image
 
     def process_frames(self, video_output: Any, video_source: Any):

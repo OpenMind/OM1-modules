@@ -180,7 +180,7 @@ class Application:
         self.http_server = http.Server(
             host=self.args.http_host, port=self.args.http_port
         )
-        self.http_server.register_message_callback(self.tts_processor.process_tts)
+        self.http_server.register_message_callback(self.tts_processor.process_tts)  # type: ignore
         self.http_server.start()
 
         # I assume that tts service is not required to be run in a separate thread

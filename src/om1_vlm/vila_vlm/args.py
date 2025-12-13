@@ -49,7 +49,7 @@ class VILAArgParser(argparse.ArgumentParser):
                 help="Frames per second for video processing",
             )
 
-    def parse_args(self, **kwargs):
+    def parse_args(self, **kwargs):  # type: ignore
         """
         Parse command-line arguments with additional configuration.
         """

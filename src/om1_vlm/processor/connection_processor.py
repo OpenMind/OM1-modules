@@ -90,11 +90,14 @@ class ConnectionProcessor:
         connection_id : str
             Unique identifier for the new connection
         """
+        if self.ws_server is None:
+            logger.error("WebSocket server not initialized")
+            return
+
+        ws_server = self.ws_server
         vlm_processor = self.vlm_processor_class(
             self.args,
-            callback=lambda message: self.ws_server.handle_response(
-                connection_id, message
-            ),
+            callback=lambda message: ws_server.handle_response(connection_id, message),
         )
 
         self.vlm_processors[connection_id] = vlm_processor

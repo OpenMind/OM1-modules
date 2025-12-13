@@ -10,6 +10,7 @@ from queue import Queue
 from typing import Callable, Dict, Optional
 
 import requests
+import zenoh
 
 from zenoh_msgs import AudioStatus, String, open_zenoh_session, prepare_header
 
@@ -72,7 +73,7 @@ class AudioOutputStream:
             self.session = None
 
         # Pending requests queue
-        self._pending_requests: Queue[Optional[str]] = Queue()
+        self._pending_requests: Queue[Optional[Dict[str, str]]] = Queue()
 
         # Slience audio for Bluetooth optimization
         self._silence_audio = self._create_silence_audio(50)
@@ -86,14 +87,14 @@ class AudioOutputStream:
         self.current_proc = None
         self._proc_lock = threading.Lock()
 
-    def zenoh_audio_message(self, data: str):
+    def zenoh_audio_message(self, data: zenoh.Sample):
         """
         Callback function for Zenoh audio status messages.
 
         Parameters
         ----------
-        data : str
-            The audio data in base64 encoded string format.
+        data : zenoh.Sample
+            The Zenoh sample containing audio status data.
         """
         self.audio_status = AudioStatus.deserialize(data.payload.to_bytes())
         if (
@@ -105,7 +106,7 @@ class AudioOutputStream:
             pending_message = json.loads(self.audio_status.sentence_to_speak.data)
             self.add_request(pending_message)
 
-    def _on_asr_text(self, data):
+    def _on_asr_text(self, data: zenoh.Sample):
         """
         Callback for ASR text messages. Interrupts TTS when speech detected during playback.
 
@@ -390,7 +391,7 @@ def main():
     )
     args = parser.parse_args()
 
-    audio_output = AudioOutputStream(args.tts_url, device=args.device, rate=args.rate)
+    audio_output = AudioOutputStream(args.tts_url, rate=args.rate)
     audio_output.start()
     audio_output.run_interactive()
     audio_output.stop()

@@ -8,7 +8,7 @@ import platform
 import threading
 import time
 from queue import Empty, Full
-from typing import Callable, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -63,7 +63,9 @@ def proc_capture(
     logging_config : Optional[LoggingConfig], optional
         logging configuration for this process.
     """
-    setup_logging("odom_processor", logging_config=logging_config)
+    setup_logging(
+        "odom_processor", logging_config=logging_config or get_logging_config()
+    )
     cv2.setNumThreads(1)
     cap = None
 
@@ -159,7 +161,9 @@ def proc_anonymize(
     logging_config : Optional[LoggingConfig], optional
         logging configuration for this process.
     """
-    setup_logging("odom_processor", logging_config=logging_config)
+    setup_logging(
+        "odom_processor", logging_config=logging_config or get_logging_config()
+    )
     cv2.setNumThreads(1)
 
     anonymizer = None
@@ -170,7 +174,7 @@ def proc_anonymize(
         logging.error("[anon] pycuda not found, disabling anonymization.")
 
     try:
-        if blur_enabled and scrfd_cfg.get("engine_path"):
+        if blur_enabled and scrfd_cfg.get("engine_path") and cuda is not None:
             try:
                 cuda.init()
                 dev_id = int(os.environ.get("OM1_CUDA_DEVICE", "0"))
@@ -256,7 +260,7 @@ def _build_anonymizer(cfg: dict):
     """
 
     class _Anon:
-        def __init__(self, cfg):
+        def __init__(self, cfg: Dict):
             self.inf = TRTInfer(
                 engine_path=cfg["engine_path"],
                 input_name=cfg.get("input_name", "input.1"),
@@ -271,9 +275,9 @@ def _build_anonymizer(cfg: dict):
             self.max_dets = int(cfg.get("max_dets", MAX_DETS))
 
         def __call__(self, frame_bgr):
-            self.inf.conf_thres = self.conf
-            self.inf.topk_per_level = self.topk
-            self.inf.max_dets = self.max_dets
+            self.inf.conf_thres = self.conf  # type: ignore
+            self.inf.topk_per_level = self.topk  # type: ignore
+            self.inf.max_dets = self.max_dets  # type: ignore
             dets, gpu_ms = self.inf.infer(frame_bgr)
             if dets is not None and len(dets) > 0:
                 apply_pixelation(
@@ -645,7 +649,7 @@ class VideoStreamBlurFace:
 
             try:
                 _, buffer = cv2.imencode(".jpg", frame, self.encode_quality)
-                self._dispatch(base64.b64encode(buffer).decode("utf-8"))
+                self._dispatch(base64.b64encode(buffer.tobytes()).decode("utf-8"))
             except Exception as e:
                 logger.error(
                     f"[main] error encoding/dispatching frame: {e}", exc_info=True

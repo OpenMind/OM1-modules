@@ -94,7 +94,7 @@ class VideoZenohStream:
 
         try:
             image_data = Image.deserialize(sample.payload.to_bytes())
-            image_array = np.frombuffer(image_data.data, dtype=np.uint8)
+            image_array = np.frombuffer(image_data.data, dtype=np.uint8)  # type: ignore
 
             if image_data.encoding == "rgb8":
                 frame = image_array.reshape((image_data.height, image_data.width, 3))
@@ -106,7 +106,7 @@ class VideoZenohStream:
                 return
 
             _, buffer = cv2.imencode(".jpg", frame, self.encode_quality)
-            frame_base64 = base64.b64encode(buffer).decode("utf-8")
+            frame_base64 = base64.b64encode(buffer.tobytes()).decode("utf-8")
 
             frame_data = json.dumps({"timestamp": time.time(), "frame": frame_base64})
 
@@ -121,13 +121,13 @@ class VideoZenohStream:
         except Exception as e:
             logger.error(f"Error processing zenoh video message: {e}")
 
-    def register_frame_callback(self, frame_callback: Callable[[str], None]):
+    def register_frame_callback(self, frame_callback: Optional[Callable[[str], None]]):
         """
         Register a callback function for processed frames.
 
         Parameters
         ----------
-        frame_callback : Callable[[str], None]
+        frame_callback : Optional[Callable[[str], None]]
             Function to be called with base64 encoded frame data
         """
         if frame_callback is None:

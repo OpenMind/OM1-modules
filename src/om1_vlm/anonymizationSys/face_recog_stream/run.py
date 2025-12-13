@@ -62,12 +62,12 @@ curl -sS -X POST 'http://127.0.0.1:6793/gallery/delete' \
   -H 'Content-Type: application/json' \
   -d '{"id":"boyuan"}' | jq .
 
-# Delete multiple person identity from gallery  
+# Delete multiple person identity from gallery
 curl -sS -X POST http://127.0.0.1:6793/gallery/delete \
   -H 'Content-Type: application/json' \
   -d '{"ids":["wendy","boyuan"]}' | jq .
 
-# Check and list gallery identies  
+# Check and list gallery identies
 curl -sS -X POST http://127.0.0.1:6793/gallery/identities -H 'Content-Type: application/json' -d '{}' | jq .
 
 
@@ -117,7 +117,7 @@ import signal
 import threading
 import time
 from queue import Empty, Queue
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
@@ -504,7 +504,7 @@ def main() -> None:
     rstp_writer = RTSPVideoStreamWriter(
         cap.width,
         cap.height,
-        cap.fps,
+        int(cap.fps),
         args.local_rtsp,
         args.remote_rtsp,
     )
@@ -519,7 +519,7 @@ def main() -> None:
 
     # Runtime config (HTTP-settable)
     cfg_lock = threading.Lock()
-    cfg: Dict[str, object] = {
+    cfg: Dict[str, Any] = {
         "blur": bool(args.blur),
         "blur_mode": str(args.blur_mode),
         "sim_thr": float(args.sim_thr),

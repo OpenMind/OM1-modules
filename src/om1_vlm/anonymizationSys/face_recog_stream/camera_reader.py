@@ -46,7 +46,7 @@ class CameraReader:
         """
         Open the camera using the specified device and settings.
         """
-        self.open_capture(self.device, self.width, self.height, self.fps)
+        self.open_capture(self.device, self.width, self.height, int(self.fps))
         if self.cap is None or not self.cap.isOpened():
             raise RuntimeError(f"Failed to open camera on device {self.device}")
 
@@ -68,7 +68,7 @@ class CameraReader:
         try:
             logging.info("Opening camera with OpenCV V4L2 on %s", device)
             self.cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))  # type: ignore
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             self.cap.set(cv2.CAP_PROP_FPS, fps)
@@ -117,7 +117,7 @@ class CameraReader:
             logging.warning("Failed to read frame from camera.")
             return None
 
-        if self.rotate_90_cw:
+        if self.rotate_90_cw and frame is not None:
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
         return frame
 

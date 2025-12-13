@@ -54,7 +54,7 @@ class AudioInputStream:
         rate: Optional[int] = None,
         chunk: Optional[int] = None,
         device: Optional[Union[str, int, float, Any]] = None,
-        device_name: str = None,
+        device_name: Optional[str] = None,
         audio_data_callback: Optional[Callable] = None,
         audio_data_callbacks: Optional[List[Callable]] = None,
         language_code: Optional[str] = None,
@@ -128,7 +128,7 @@ class AudioInputStream:
 
             if self._device is not None:
                 input_device = self._audio_interface.get_device_info_by_index(
-                    self._device
+                    int(self._device)
                 )
                 logger.info(
                     f"Selected input device: {input_device['name']} ({self._device})"
@@ -141,7 +141,7 @@ class AudioInputStream:
                 available_devices = []
                 for i in range(device_count):
                     device_info = self._audio_interface.get_device_info_by_index(i)
-                    device_name = device_info["name"]
+                    device_name = str(device_info["name"])
                     available_devices.append({"name": device_name, "index": i})
                     if self._device_name.lower() in device_name.lower():
                         input_device = device_info
@@ -248,13 +248,13 @@ class AudioInputStream:
             self._is_tts_active = is_active
             logger.info(f"TTS active state changed to: {is_active}")
 
-    def register_audio_data_callback(self, audio_callback: Callable):
+    def register_audio_data_callback(self, audio_callback: Optional[Callable]):
         """
         Registers a callback function for audio data processing.
 
         Parameters
         ----------
-        callback : Callable
+        callback : Optional[Callable]
             Function to be called with audio data chunks
         """
         if audio_callback is None:
@@ -292,14 +292,20 @@ class AudioInputStream:
         try:
             if not self.remote_input:
                 logger.info("Remote input is disabled, initializing audio input stream")
+                if self._rate is None:
+                    self._rate = 16000
+                if self._chunk is None:
+                    self._chunk = int(self._rate * 0.2)
                 self._audio_stream = self._audio_interface.open(
                     format=pyaudio.paInt16,
-                    input_device_index=self._device,
+                    input_device_index=(
+                        int(self._device) if self._device is not None else None
+                    ),
                     channels=1,
                     rate=self._rate,
                     input=True,
                     frames_per_buffer=self._chunk,
-                    stream_callback=self._fill_buffer,
+                    stream_callback=self._fill_buffer,  # type: ignore
                 )
 
             # Start the audio processing thread

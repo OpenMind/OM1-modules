@@ -4,7 +4,7 @@ from queue import Empty, Queue
 from typing import Callable, Optional, Union
 
 import websockets
-from websockets.sync.client import connect
+from websockets.sync.client import ClientConnection, connect
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
@@ -29,7 +29,7 @@ class Client:
         self.running: bool = True
         self.is_policy_violation: bool = False
         self.connected: bool = False
-        self.websocket: Optional[websockets.WebSocketClientProtocol] = None
+        self.websocket: Optional[ClientConnection] = None
         self.message_callback: Optional[Callable] = None
         self.message_queue: Queue = Queue()
         self.receiver_thread: Optional[threading.Thread] = None
@@ -44,6 +44,9 @@ class Client:
         """
         while self.running and self.connected:
             try:
+                if not self.websocket:
+                    self.connected = False
+                    break
                 message = self.websocket.recv()
                 formatted_msg = self.format_message(message)
                 logger.debug(f"Received WS Message: {formatted_msg}")
@@ -195,6 +198,8 @@ class Client:
             The formatted message string
         """
         try:
+            if isinstance(msg, bytes):
+                msg = msg.decode("utf-8")
             if len(msg) <= max_length:
                 return msg
             preview_size = max_length // 2 - 20
@@ -222,7 +227,7 @@ class Client:
         self.running = False
         if self.websocket:
             try:
-                self.websocket.close()
+                self.websocket.close()  # type: ignore
                 logger.info("WebSocket connection closed")
             except Exception as _:
                 pass

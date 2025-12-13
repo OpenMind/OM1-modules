@@ -468,7 +468,7 @@ class NanoLLMArgParser(argparse.ArgumentParser):
                 help="override the default title of the web template",
             )
 
-    def parse_args(self, **kwargs):
+    def parse_args(self, **kwargs):  # type: ignore
         """
         Override for parse_args() that does some additional configuration
         """
