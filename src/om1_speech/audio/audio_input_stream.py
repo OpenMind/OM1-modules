@@ -59,7 +59,7 @@ class AudioInputStream:
         audio_data_callbacks: Optional[List[Callable]] = None,
         language_code: Optional[str] = None,
         remote_input: bool = False,
-        disable_tts_mute: bool = False,
+        enable_tts_interrupt: bool = False,
     ):
         self._rate = rate
         self._chunk = chunk
@@ -81,8 +81,8 @@ class AudioInputStream:
         # Flag to indicate if TTS is active
         self._is_tts_active: bool = False
 
-        # Flag to disable muting during TTS
-        self._disable_tts_mute = disable_tts_mute
+        # Flag to enable TTS interrupt
+        self._enable_tts_interrupt = enable_tts_interrupt
 
         # Thread-safe buffer for audio data
         self._buff: queue.Queue[Optional[bytes]] = queue.Queue()
@@ -201,7 +201,7 @@ class AudioInputStream:
         self.audio_status = AudioStatus.deserialize(data.payload.to_bytes())
 
         if self.audio_status.status_speaker == AudioStatus.STATUS_SPEAKER.ACTIVE.value:
-            if self._disable_tts_mute:
+            if self._enable_tts_interrupt:
                 return
             with self._lock:
                 if not self._is_tts_active:

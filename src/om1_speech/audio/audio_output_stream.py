@@ -32,6 +32,8 @@ class AudioOutputStream:
         (default: None)
     headers : Optional[Dict[str, str]], optional
         Additional headers to include in the HTTP request (default: None)
+    enable_tts_interrupt : bool, optional
+        If True, enables TTS interrupt when ASR detects speech (default: False)
     """
 
     def __init__(
@@ -40,9 +42,11 @@ class AudioOutputStream:
         rate: int = 8000,
         tts_state_callback: Optional[Callable] = None,
         headers: Optional[Dict[str, str]] = None,
+        enable_tts_interrupt: bool = False,
     ):
         self._url = url
         self._rate = rate
+        self._enable_tts_interrupt = enable_tts_interrupt
 
         # Process headers
         self._headers = headers or {}
@@ -112,15 +116,14 @@ class AudioOutputStream:
         """
         try:
             if (
-                self.audio_status
+                self._enable_tts_interrupt
+                and self.audio_status
                 and self.audio_status.status_speaker
                 == AudioStatus.STATUS_SPEAKER.ACTIVE.value
             ):
                 asr_payload = data.payload.to_bytes()
                 if asr_payload and len(asr_payload) > 0:
                     logger.debug("Interrupting TTS due to ASR detection")
-                    with self._pending_requests.mutex:
-                        self._pending_requests.queue.clear()
                     with self._proc_lock:
                         if self.current_proc:
                             self.current_proc.kill()
