@@ -95,7 +95,10 @@ def mock_camera():
 def mock_video_dependencies(mock_camera):
     with (
         patch("cv2.VideoCapture", mock_camera),
-        patch("cv2.imencode", return_value=(True, b"fake_frame_data")),
+        patch(
+            "cv2.imencode",
+            return_value=(True, np.frombuffer(b"fake_frame_data", dtype=np.uint8)),
+        ),
         patch(
             "om1_vlm.video.video_stream.enumerate_video_devices",
             return_value=[(0, "Mock Camera")],
@@ -169,7 +172,10 @@ def test_frame_callback():
 
         with (
             patch("cv2.VideoCapture", return_value=mock_cap) as mock_capture,
-            patch("cv2.imencode", return_value=(True, b"fake_image_data")),
+            patch(
+                "cv2.imencode",
+                return_value=(True, np.frombuffer(b"fake_image_data", dtype=np.uint8)),
+            ),
         ):
             # Create and start the video stream
             stream = VideoStream(frame_callback=callback)
@@ -225,7 +231,10 @@ def test_frame_callback_coroutine():
 
         with (
             patch("cv2.VideoCapture", return_value=mock_cap) as mock_capture,
-            patch("cv2.imencode", return_value=(True, b"fake_image_data")),
+            patch(
+                "cv2.imencode",
+                return_value=(True, np.frombuffer(b"fake_image_data", dtype=np.uint8)),
+            ),
         ):
             # Create and start the video stream
             stream = VideoStream(frame_callback=async_frame_callback)
@@ -328,7 +337,10 @@ def test_frame_timestamp():
 
         with (
             patch("cv2.VideoCapture", return_value=mock_cap),
-            patch("cv2.imencode", return_value=(True, b"fake_image_data")),
+            patch(
+                "cv2.imencode",
+                return_value=(True, np.frombuffer(b"fake_image_data", dtype=np.uint8)),
+            ),
         ):
             # Create and start the video stream
             stream = VideoStream(frame_callback=callback)
@@ -379,7 +391,10 @@ def test_device_index_default():
         ),
         patch("platform.system", return_value="Linux"),
         patch("cv2.VideoCapture", side_effect=mock_video_capture),
-        patch("cv2.imencode", return_value=(True, b"fake_image_data")),
+        patch(
+            "cv2.imencode",
+            return_value=(True, np.frombuffer(b"fake_image_data", dtype=np.uint8)),
+        ),
     ):
         # Test default device_index (0)
         stream = VideoStream(device_index=0)
@@ -413,7 +428,10 @@ def test_device_index_custom_linux():
         ),
         patch("platform.system", return_value="Linux"),
         patch("cv2.VideoCapture", side_effect=mock_video_capture),
-        patch("cv2.imencode", return_value=(True, b"fake_image_data")),
+        patch(
+            "cv2.imencode",
+            return_value=(True, np.frombuffer(b"fake_image_data", dtype=np.uint8)),
+        ),
     ):
         # Test custom device_index (2)
         stream = VideoStream(device_index=2)
@@ -447,7 +465,10 @@ def test_device_index_custom_macos():
         ),
         patch("platform.system", return_value="Darwin"),
         patch("cv2.VideoCapture", side_effect=mock_video_capture),
-        patch("cv2.imencode", return_value=(True, b"fake_image_data")),
+        patch(
+            "cv2.imencode",
+            return_value=(True, np.frombuffer(b"fake_image_data", dtype=np.uint8)),
+        ),
     ):
         # Test custom device_index (1)
         stream = VideoStream(device_index=1)
@@ -481,7 +502,10 @@ def test_device_index_zero_macos():
         ),
         patch("platform.system", return_value="Darwin"),
         patch("cv2.VideoCapture", side_effect=mock_video_capture),
-        patch("cv2.imencode", return_value=(True, b"fake_image_data")),
+        patch(
+            "cv2.imencode",
+            return_value=(True, np.frombuffer(b"fake_image_data", dtype=np.uint8)),
+        ),
     ):
         # Test device_index 0 on macOS
         stream = VideoStream(device_index=0)
@@ -516,7 +540,10 @@ def test_device_index_no_devices_available():
         ),
         patch("platform.system", return_value="Linux"),
         patch("cv2.VideoCapture", side_effect=mock_video_capture),
-        patch("cv2.imencode", return_value=(True, b"fake_image_data")),
+        patch(
+            "cv2.imencode",
+            return_value=(True, np.frombuffer(b"fake_image_data", dtype=np.uint8)),
+        ),
     ):
         # Test with custom device_index when no devices are available
         stream = VideoStream(device_index=1)
