@@ -161,6 +161,14 @@ class VILAProcessor:
                 time.sleep(0.1)
 
     def generate_with_images(self, images: List[bytes], prompt: str):
+        if self.model is None:
+            logger.error("Model is not initialized")
+            return
+
+        if Image is None:
+            logger.error("llava module not available, cannot process images")
+            return
+
         temp_files = []
         try:
             # Prepare multi-modal prompt

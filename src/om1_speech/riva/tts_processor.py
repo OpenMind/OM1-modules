@@ -36,7 +36,7 @@ class TTSProcessor:
     """
 
     def __init__(self, model_args: argparse.Namespace):
-        self.model: Optional[SpeechSynthesisService] = None
+        self.model: Optional[SpeechSynthesisService] = None  # type: ignore
         self.args = model_args
         self.running: bool = True
 
@@ -54,6 +54,12 @@ class TTSProcessor:
         Exception
             If there are errors during model initialization
         """
+        if client is None:
+            logger.error(
+                "Riva client module not available. Make sure riva-client is installed."
+            )
+            return
+
         auth = client.Auth(
             self.args.ssl_cert, self.args.use_ssl, self.args.server, self.args.metadata
         )
@@ -84,6 +90,9 @@ class TTSProcessor:
         The synthesis is performed with the configured voice, language,
         sample rate, and quality settings specified in model_args.
         """
+        if self.model is None:
+            raise RuntimeError("TTS model is not initialized.")
+
         return self.model.synthesize(
             text,
             self.args.voice,
@@ -117,12 +126,12 @@ class TTSProcessor:
         """
         try:
             if isinstance(tts_input, dict):
-                tts_input = tts_input["text"]
+                text = tts_input["text"]
             else:
                 return None
 
-            logger.info(f"Processing TTS: {tts_input}")
-            result = self.generate_tts(tts_input)
+            logger.info(f"Processing TTS: {text}")
+            result = self.generate_tts(text)
             audio_b64 = base64.b64encode(result.audio).decode("utf-8")
 
             return {"response": audio_b64, "content_type": "audio/mp3"}

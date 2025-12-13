@@ -24,7 +24,7 @@ logger = logging.getLogger(root_package_name)
 @singleton
 class VILAModelSingleton:
     def __init__(self):
-        self._lock: threading = threading.Lock()
+        self._lock: threading.Lock = threading.Lock()
         self._model = None
         self._is_initialized: bool = False
 

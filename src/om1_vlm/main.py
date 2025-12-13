@@ -42,15 +42,13 @@ class Application:
 
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        self.ws_server: ws.Server = None
+        self.ws_server: Optional[ws.Server] = None
 
         self.config_manager = ConfigManager()
 
         self.connection_processor: Optional[ConnectionProcessor] = None
-        self.video_device_processor: Optional[
-            self.config_manager.video_device_input
-        ] = None
-        self.vlm_processor: Optional[self.config_manager.vlm_processor] = None
+        self.video_device_processor = self.config_manager.video_stream_input()
+        self.vlm_processor: Optional[Any] = None
 
         self.video_stream: Optional[VideoStream] = None
         self.video_source: Optional[Any] = None
@@ -144,19 +142,20 @@ class Application:
             self.vlm_processor = self.config_manager.vlm_processor(
                 self.args, self.ws_server.handle_global_response
             )
-            self.video_device_processor = self.config_manager.video_stream_input()
             self.video_source, self.video_output = (
                 self.video_device_processor.setup_video_devices(
-                    self.args, self.vlm_processor.on_video
+                    self.args,
+                    self.vlm_processor.on_video if self.vlm_processor else None,
                 )
             )
 
-            vlm_thread = threading.Thread(
-                target=self.vlm_processor.process_frames,
-                args=(self.video_output, self.video_source),
-                daemon=True,
-            )
-            vlm_thread.start()
+            if self.vlm_processor:
+                vlm_thread = threading.Thread(
+                    target=self.vlm_processor.process_frames,
+                    args=(self.video_output, self.video_source),
+                    daemon=True,
+                )
+                vlm_thread.start()
 
         self.ws_server.start()
 

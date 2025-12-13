@@ -100,16 +100,16 @@ class HttpAPI:
         self.frame_lock = frame_lock
         self.run_job_sync = run_job_sync
         self.log = logger or logging.getLogger("http_api")
+        self.server = None
 
-    # ------------------------------ public ------------------------------ #
     def stop(self) -> None:
         """Stop an attached HTTP server if present."""
         try:
-            self.server.stop()
+            if self.server:
+                self.server.stop()
         except Exception:
             pass
 
-    # ----------------------------- handlers ---------------------------- #
     def _handle(self, payload: Dict[str, Any], path: str) -> Dict[str, Any]:
         """Dispatch a POST request to the appropriate handler.
 
@@ -177,7 +177,6 @@ class HttpAPI:
             self.log.exception("HTTP error")
             return {"error": str(e)}
 
-    # -------------------------- /config --------------------------- #
     def _handle_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Get or set live runtime configuration.
 
@@ -212,7 +211,7 @@ class HttpAPI:
                         changed[k] = v
                 # hot-apply SCRFD NMS if changed
                 try:
-                    self.scrfd.nms_thresh = float(self.cfg["nms"])
+                    self.scrfd.nms_thresh = float(self.cfg["nms"])  # type: ignore
                 except Exception:
                     pass
             return {"ok": True, "changed": changed}
@@ -222,7 +221,6 @@ class HttpAPI:
             "config_keys": list(self.cfg.keys()),
         }
 
-    # ---------------------- /gallery/refresh ----------------------- #
     def _handle_gallery_refresh(self) -> Dict[str, Any]:
         """Incrementally process new images and update in-memory centroids.
 
@@ -294,7 +292,6 @@ class HttpAPI:
         rel, n_id = self.run_job_sync(_do_add)
         return {"ok": True, "added": rel, "identities": int(n_id)}
 
-    # ---------------------- /gallery/add_raw ----------------------- #
     def _handle_gallery_add_raw(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Copy a raw image into gallery/<id>/raw and run full refresh (align+embed).
@@ -343,7 +340,6 @@ class HttpAPI:
         n_id = self.run_job_sync(_do_refresh)
         return {"ok": True, "saved": dst, "identities": int(n_id)}
 
-    # --------------------------- /selfie --------------------------- #
     def _handle_selfie(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Save a clean snapshot from the latest frame (no overlays) into ALIGNED ONLY,

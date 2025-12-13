@@ -63,9 +63,9 @@ class VideoStream:
 
         self.running: bool = True
 
-        self.fps = fps
-        self.frame_delay = 1.0 / fps  # Calculate delay between frames
-        self.resolution = resolution
+        self.fps = fps if fps is not None else 30
+        self.frame_delay = 1.0 / self.fps  # Calculate delay between frames
+        self.resolution = resolution if resolution is not None else (640, 480)
         self.encode_quality = [
             cv2.IMWRITE_JPEG_QUALITY,
             jpeg_quality,
@@ -132,7 +132,7 @@ class VideoStream:
             pass
 
         try:
-            self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))  # type: ignore
         except Exception:
             pass
 
@@ -152,7 +152,7 @@ class VideoStream:
 
                 if elapsed <= 1.5 * frame_time and self.frame_callbacks:
                     _, buffer = cv2.imencode(".jpg", frame, self.encode_quality)
-                    frame_base64 = base64.b64encode(buffer).decode("utf-8")
+                    frame_base64 = base64.b64encode(buffer.tobytes()).decode("utf-8")
 
                     frame_data = json.dumps(
                         {"timestamp": time.time(), "frame": frame_base64}
@@ -190,13 +190,13 @@ class VideoStream:
             self._video_thread.start()
             logger.info("Started video processing thread")
 
-    def register_frame_callback(self, frame_callback: Callable[[str], None]):
+    def register_frame_callback(self, frame_callback: Optional[Callable[[str], None]]):
         """
         Register a callback function for processed frames.
 
         Parameters
         ----------
-        frame_callback : Callable[[str], None]
+        frame_callback : Optional[Callable[[str], None]]
             Function to be called with base64 encoded frame data
         """
         if frame_callback is None:

@@ -36,7 +36,7 @@ class VideoStreamInput:
     """
 
     def __init__(self):
-        self.video_output: nano_llm.plugins.VideoOutput = None
+        self.video_output: nano_llm.plugins.VideoOutput = None  # type: ignore
         self.running: bool = True
         self.frame_callback: Optional[Callable] = None
         self.eos: bool = False
@@ -70,6 +70,16 @@ class VideoStreamInput:
 
             if frame is None:
                 logger.error("Failed to decode image from WebSocket message")
+                return
+
+            if (
+                cudaFromNumpy is None
+                or cudaAllocMapped is None
+                or cudaConvertColor is None
+            ):
+                logger.error(
+                    "CUDA utilities not available. nano_llm and jetson_utils packages are required"
+                )
                 return
 
             # Convert OpenCV image (numpy array) to CUDA memory (in BGR format)
@@ -124,6 +134,11 @@ class VideoStreamInput:
             If required Jetson packages are not available
         """
         logger.info("Initializing WebSocket video stream handler")
+
+        if VideoOutput is None:
+            raise ModuleNotFoundError(
+                "nano_llm and jetson_utils packages are required for video streaming"
+            )
 
         self.frame_callback = frame_callback
 

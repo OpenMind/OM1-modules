@@ -39,6 +39,9 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction --with dev
 
+      - name: Run Pyright
+        run: poetry run pyright --project ./pyrightconfig.json
+
       - name: Run Ruff
         run: poetry run ruff check .
 

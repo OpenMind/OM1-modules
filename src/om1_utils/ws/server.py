@@ -5,8 +5,8 @@ import uuid
 from queue import Empty, Queue
 from typing import Any, Callable, Dict, Optional, Union
 
-from websockets import ConnectionClosed, WebSocketClientProtocol
-from websockets.asyncio.server import serve
+from websockets import ConnectionClosed
+from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import InvalidHandshake, InvalidUpgrade
 
 from ..healthcheck import HealthCheckServer
@@ -47,7 +47,7 @@ class Server:
         self.host = host
         self.port = port
         self.running: bool = True
-        self.connections: Dict[str, WebSocketClientProtocol] = {}
+        self.connections: Dict[str, ServerConnection] = {}
         self.queues: Dict[str, Queue[str | bytes]] = {}
         # This queue is used to send messages to all connections
         self.global_queue: Queue[str | bytes] = Queue()
@@ -134,23 +134,22 @@ class Server:
                 )
                 break
 
-    async def receive_messages(
-        self, websocket: WebSocketClientProtocol, connection_id: str
-    ):
+    async def receive_messages(self, websocket: ServerConnection, connection_id: str):
         """
         Handle incoming messages for a specific connection.
 
         Parameters
         ----------
-        websocket : WebSocketClientProtocol
+        websocket : ServerConnection
             The WebSocket connection to receive messages from
         connection_id : str
             The ID of the connection
         """
         try:
             async for message in websocket:
-                if connection_id in self.message_callbacks:
-                    self.message_callbacks[connection_id](connection_id, message)
+                callback = self.message_callbacks.get(connection_id)
+                if callback is not None:
+                    callback(connection_id, message)
         except ConnectionClosed:
             logger.info(f"Connection closed: {connection_id}")
             pass
@@ -159,7 +158,7 @@ class Server:
                 f"Error receiving message from connection {connection_id}: {e}"
             )
 
-    async def handle_connection(self, websocket: WebSocketClientProtocol):
+    async def handle_connection(self, websocket: ServerConnection):
         """
         Handle a new WebSocket connection.
 
@@ -168,7 +167,7 @@ class Server:
 
         Parameters
         ----------
-        websocket : WebSocketClientProtocol
+        websocket : ServerConnection
             The WebSocket connection to handle
         """
         connection_id = str(uuid.uuid4())
@@ -304,11 +303,14 @@ class Server:
             The formatted message string
         """
         try:
-            if len(msg) <= max_length:
-                return msg
+            msg_str = (
+                msg if isinstance(msg, str) else msg.decode("utf-8", errors="replace")
+            )
+            if len(msg_str) <= max_length:
+                return msg_str
 
             preview_size = max_length // 2 - 20
-            return f"{msg[:preview_size]}...{msg[-preview_size:]}"
+            return f"{msg_str[:preview_size]}...{msg_str[-preview_size:]}"
         except Exception as e:
             return f"<Error formatting message: {e}>"
 
@@ -331,6 +333,7 @@ class Server:
 
         if (
             self.enable_health_check
+            and self.health_check
             and self.health_check.is_running()
             and self.health_check
         ):

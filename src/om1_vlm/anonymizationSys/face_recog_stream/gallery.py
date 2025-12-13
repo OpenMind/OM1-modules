@@ -500,6 +500,9 @@ class GalleryManager:
         For every gallery/<id>/raw/*.jpg, if there isn't a corresponding file
         under gallery/<id>/aligned/, detect & align and save it.
         """
+        if self.scrfd is None:
+            return
+
         ids = self._iter_identities(self.gallery_dir)
         if not ids:
             return
@@ -518,7 +521,7 @@ class GalleryManager:
                     continue
                 crop = _align_largest_face_bgr(
                     img, self.scrfd, self.det_conf, self.aligned_size
-                )  # type: ignore[arg-type]
+                )
                 if crop is None:
                     continue
                 cv2.imwrite(tgt, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])

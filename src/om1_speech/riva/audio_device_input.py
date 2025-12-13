@@ -75,7 +75,9 @@ class AudioDeviceInput:
                 logger.error(f"Error getting default input device: {e}")
                 self._device = None
         else:
-            device_info = self._audio_interface.get_device_info_by_index(self._device)
+            device_info = self._audio_interface.get_device_info_by_index(
+                int(self._device)
+            )
             logger.info(
                 f"Selected input device: {device_info['name']} ({self._device})"
             )
@@ -83,12 +85,14 @@ class AudioDeviceInput:
         try:
             self._audio_stream = self._audio_interface.open(
                 format=pyaudio.paInt16,
-                input_device_index=self._device,
+                input_device_index=(
+                    int(self._device) if self._device is not None else None
+                ),
                 channels=1,
                 rate=self._rate,
                 input=True,
                 frames_per_buffer=self._chunk,
-                stream_callback=self._fill_buffer,
+                stream_callback=self._fill_buffer,  # type: ignore
             )
 
             logger.info(f"Started audio stream with device {self._device}")
@@ -148,7 +152,7 @@ class AudioDeviceInput:
         self._buff.put(in_data)
         return None, pyaudio.paContinue
 
-    def get_audio_chunk(self) -> Optional[Dict[str, Union[bytes, int]]]:
+    def get_audio_chunk(self) -> Optional[Dict[str, Union[str, int]]]:
         """
         Get the next chunk of audio data from the buffer.
 
@@ -157,8 +161,8 @@ class AudioDeviceInput:
 
         Returns
         -------
-        Optional[bytes]
-            Combined audio data chunks or None if the stream is terminated
+        Optional[Dict[str, Union[str, int]]]
+            Dictionary containing base64-encoded audio data and sample rate, or None if the stream is terminated
         """
         while self.running:
             chunk = self._buff.get()

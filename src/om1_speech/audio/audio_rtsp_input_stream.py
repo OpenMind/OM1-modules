@@ -10,6 +10,7 @@ from typing import Callable, Dict, Generator, List, Optional, Union
 
 import av
 import numpy as np
+import zenoh
 
 from om1_utils import LoggingConfig, get_logging_config, setup_logging
 from zenoh_msgs import AudioStatus, String, open_zenoh_session, prepare_header
@@ -48,7 +49,7 @@ def rtsp_audio_processor(
     """
     setup_logging("rtsp_audio_processor", logging_config=logging_config)
 
-    resampler = av.audio.resampler.AudioResampler(
+    resampler = av.audio.resampler.AudioResampler(  # type: ignore
         format="s16",
         layout="mono",
         rate=rate,
@@ -178,7 +179,9 @@ class AudioRTSPInputStream:
         self._control_queue = mp.Queue()
 
         # Audio processing thread
-        self._rtsp_audio_processor_thread: Optional[threading.Thread] = None
+        self._rtsp_audio_processor_thread: Optional[
+            Union[threading.Thread, mp.Process]
+        ] = None
 
         # Audio callback thread
         self._audio_callback_thread: Optional[threading.Thread] = None
@@ -212,16 +215,16 @@ class AudioRTSPInputStream:
                 f"Using specified chunk size: {self._chunk} frames ({chunk_duration_ms:.2f} ms)"
             )
 
-    def zenoh_audio_message(self, data: str):
+    def zenoh_audio_message(self, sample: zenoh.Sample):
         """
         Callback function for Zenoh audio status messages.
 
         Parameters
         ----------
-        data : str
-            The audio data in base64 encoded string format.
+        sample : zenoh.Sample
+            The Zenoh sample containing audio status data.
         """
-        self.audio_status = AudioStatus.deserialize(data.payload.to_bytes())
+        self.audio_status = AudioStatus.deserialize(sample.payload.to_bytes())
 
         if self.audio_status.status_speaker == AudioStatus.STATUS_SPEAKER.ACTIVE.value:
             if self._enable_tts_interrupt:
@@ -271,13 +274,13 @@ class AudioRTSPInputStream:
             self._is_tts_active = is_active
             logger.info(f"TTS active state changed to: {is_active}")
 
-    def register_audio_data_callback(self, audio_callback: Callable):
+    def register_audio_data_callback(self, audio_callback: Optional[Callable]):
         """
         Registers a callback function for audio data processing.
 
         Parameters
         ----------
-        callback : Callable
+        callback : Optional[Callable]
             Function to be called with audio data chunks
         """
         if audio_callback is None:

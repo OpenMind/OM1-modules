@@ -78,7 +78,7 @@ class AudioStreamInput(AudioStreamInputInterface):
         """
         return self
 
-    def get_audio_chunk(self) -> Optional[Dict[str, Any]]:
+    def get_audio_chunk(self) -> Optional[Dict[str, Any]]:  # type: ignore
         try:
             data = self.audio_queue.get_nowait()
             return data

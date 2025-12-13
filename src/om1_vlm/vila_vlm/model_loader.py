@@ -43,7 +43,7 @@ class VILAModelLoader:
         self.args = args
 
         # Initialize model instance
-        self._model: Optional[PreTrainedModel] = None
+        self._model: Optional[PreTrainedModel] = None  # type: ignore
 
         # Load the model
         self._model = self._load_model()
@@ -62,10 +62,14 @@ class VILAModelLoader:
         Exception
             If model loading fails.
         """
+        if llava is None:
+            raise Exception(
+                "llava module is not available. Please install required dependencies."
+            )
         try:
             model = llava.load(self.args.vila_model_path)
             model.to("cuda")
-            clib.default_conversation = clib.conv_templates["vicuna_v1"].copy()
+            clib.default_conversation = clib.conv_templates["vicuna_v1"].copy()  # type: ignore
             assert model
             return model
         except Exception as e:

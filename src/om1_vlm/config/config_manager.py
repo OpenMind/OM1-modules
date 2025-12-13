@@ -1,5 +1,5 @@
 import argparse
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Type
 
 from om1_utils import singleton
 
@@ -9,7 +9,6 @@ from .config import (
     VIDEO_DEVICE_INPUT,
     VIDEO_STREAM_INPUT,
     VLM_PROCESSOR,
-    T_Parser,
 )
 
 
@@ -25,7 +24,7 @@ class ConfigManager:
 
     def __init__(self):
         self.model_configs: Dict[str, List[str]] = MODEL_CONFIGS
-        self.model_parsers: Dict[str, type[T_Parser]] = MODEL_PARSERS
+        self.model_parsers: Dict[str, Type[argparse.ArgumentParser]] = MODEL_PARSERS
         self.model_name: Optional[str] = None
 
     def get_parser_for_model(self, model_name: str) -> argparse.ArgumentParser:
@@ -52,7 +51,7 @@ class ConfigManager:
 
         self.model_name = model_name
         extras = self.model_configs[model_name]
-        return self.model_parsers[model_name](extras=extras)
+        return self.model_parsers[model_name](extras=extras)  # type: ignore
 
     def parse_model_arguments(self) -> argparse.ArgumentParser:
         """Parse command line arguments to determine model and get its parser.

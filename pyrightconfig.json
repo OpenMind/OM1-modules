@@ -4,7 +4,7 @@
     "**/__pycache__",
     "**/tests",
   ],
-  "typeCheckingMode": "basic",
+  "typeCheckingMode": "standard",
   "reportMissingImports": "warning",
   "pythonVersion": "3.11"
 }

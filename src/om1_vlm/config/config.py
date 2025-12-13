@@ -24,21 +24,21 @@ MODEL_CONFIGS: Dict[str, List[str]] = {
     "nano_llm": ["model", "chat", "generation"],
 }
 
-MODEL_PARSERS: Dict[str, Type[T_Parser]] = {
+MODEL_PARSERS: Dict[str, Type[argparse.ArgumentParser]] = {
     "vila": VILAArgParser,
     "nano_llm": NanoLLMArgParser,
 }
 
-VLM_PROCESSOR: Dict[str, Type[T_Processor]] = {
+VLM_PROCESSOR: Dict[str, Type] = {
     "vila": VILAProcessor,
     "nano_llm": NanoLLMProcessor,
 }
 
-VIDEO_DEVICE_INPUT: Dict[str, Type[T_VideoDeviceInput]] = {
+VIDEO_DEVICE_INPUT: Dict[str, Type] = {
     "nano_llm": NanoLLMVideoDeviceInput,
 }
 
-VIDEO_STREAM_INPUT: Dict[str, Type[T_VideoStreamInput]] = {
+VIDEO_STREAM_INPUT: Dict[str, Type] = {
     "vila": VILAVideoStreamInput,
     "nano_llm": NanoLLMVideoStreamInput,
 }

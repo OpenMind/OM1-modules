@@ -404,9 +404,10 @@ class RTSPVideoStreamWriter:
 
             # Write raw BGR24
             try:
-                self.process.stdin.write(frame.tobytes())
-                self.process.stdin.flush()
-                self._frames_written += 1
+                if self.process and self.process.stdin:
+                    self.process.stdin.write(frame.tobytes())
+                    self.process.stdin.flush()
+                    self._frames_written += 1
             except (BrokenPipeError, OSError) as e:
                 logging.error("Pipe error writing frame: %s", e)
                 self.restart_needed = True
