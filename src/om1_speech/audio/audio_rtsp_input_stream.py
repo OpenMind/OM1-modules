@@ -148,6 +148,7 @@ class AudioRTSPInputStream:
         audio_data_callback: Optional[Callable] = None,
         audio_data_callbacks: Optional[List[Callable]] = None,
         language_code: Optional[str] = None,
+        disable_tts_mute: bool = False,
     ):
         self._rate = rate
 
@@ -168,6 +169,9 @@ class AudioRTSPInputStream:
 
         # Flag to indicate if TTS is active
         self._is_tts_active: bool = False
+
+        # Flag to disable muting during TTS
+        self._disable_tts_mute = disable_tts_mute
 
         # Thread-safe buffer for audio data
         self._buff = mp.Queue()
@@ -220,6 +224,8 @@ class AudioRTSPInputStream:
         self.audio_status = AudioStatus.deserialize(data.payload.to_bytes())
 
         if self.audio_status.status_speaker == AudioStatus.STATUS_SPEAKER.ACTIVE.value:
+            if self._disable_tts_mute:
+                return
             with self._lock:
                 if not self._is_tts_active:
                     state = AudioStatus(
