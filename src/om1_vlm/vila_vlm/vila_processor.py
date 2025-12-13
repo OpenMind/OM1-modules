@@ -27,6 +27,7 @@ except ModuleNotFoundError:
     clib = None
     Image = None
     Video = None
+    GenerationConfig = None
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
@@ -80,16 +81,20 @@ class VILAProcessor:
 
         # Create a dedicated CUDA stream for this processor
         self.cuda_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
-
         try:
-            self.model_config = GenerationConfig(
-                max_new_tokens=48,
-                temperature=0.7,
-                top_p=0.95,
-                do_sample=True,
-            )
+            if GenerationConfig is not None:
+                self.model_config = GenerationConfig(
+                    max_new_tokens=48,
+                    temperature=0.7,
+                    top_p=0.95,
+                    do_sample=True,
+                )
+            else:
+                logger.warning("GenerationConfig not available, using None")
+                self.model_config = None
         except Exception as e:
             logger.error(f"Error initializing model configuration: {e}")
+            raise
             raise
 
     def on_video(self, image: bytes) -> Any:
