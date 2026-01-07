@@ -68,6 +68,12 @@ line-length = 88
 indent-width = 4
 exclude = ["src/om1_vlm/gz/msgs"]
 
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "D"]
 ignore = ["E203", "E501", "D100", "D104", "D200", "D205", "D401", "D404"]
