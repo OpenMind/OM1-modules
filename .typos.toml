@@ -1,0 +1,8 @@
+[default]
+extend-ignore-re = []
+
+[default.extend-words]
+thr="thr"
+
+[files]
+extend-exclude = [  ]
