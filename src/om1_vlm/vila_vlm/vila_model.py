@@ -10,12 +10,11 @@ from .model_loader import VILAModelLoader
 try:
     import llava
     from llava import conversation as clib
-    from llava.media import Image, Video
+    from llava.media import Image
 except ModuleNotFoundError:
     llava = None
     clib = None
     Image = None
-    Video = None
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
@@ -23,13 +22,17 @@ logger = logging.getLogger(root_package_name)
 
 @singleton
 class VILAModelSingleton:
+    """
+    Singleton class to manage VILAModel instance.
+    """
+
     def __init__(self):
         self._lock: threading.Lock = threading.Lock()
         self._model = None
         self._is_initialized: bool = False
 
     def initialize_model(self, model_args):
-        """Thread-safe model initialization"""
+        """Thread-safe model initialization."""
         with self._lock:
             if not self._is_initialized:
                 try:
@@ -42,12 +45,12 @@ class VILAModelSingleton:
                     raise
 
     def _warmup_model(self, model_args):
-        """Warm up the model with dummy data to ensure it's ready for inference"""
+        """Warm up the model with dummy data to ensure it's ready for inference."""
         pass
 
     @property
     def model(self):
-        """Get the initialized model"""
+        """Get the initialized model."""
         if not self._is_initialized:
             raise RuntimeError("Model not initialized. Call initialize_model first.")
         return self._model

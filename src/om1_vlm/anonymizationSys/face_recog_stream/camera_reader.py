@@ -9,6 +9,10 @@ logging.basicConfig(level=logging.INFO)
 
 
 class CameraReader:
+    """
+    Camera reader using OpenCV with V4L2 backend.
+    """
+
     def __init__(
         self,
         device: str,
@@ -97,7 +101,9 @@ class CameraReader:
     def is_opened(self) -> bool:
         """
         Check if the camera is opened.
-        Returns:
+
+        Returns
+        -------
             True if the camera is opened, False otherwise.
         """
         return self.cap is not None and self.cap.isOpened()
@@ -105,7 +111,9 @@ class CameraReader:
     def read_frame(self):
         """
         Read a frame from the camera.
-        Returns:
+
+        Returns
+        -------
             The captured frame as a cv2.Mat object, or None if reading failed.
         """
         if not self.is_opened():

@@ -8,7 +8,7 @@ face gallery (/gallery/refresh, /gallery/add_aligned, /gallery/add_raw, /selfie)
 while the main video loop keeps running.
 
 Notes
-------------
+-----
 - The HTTP server runs on its own thread. Handlers in this module never call
   CUDA/TensorRT directly; instead they use `run_job_sync(fn)` to enqueue work
   onto the main thread's job queue so GPU/model operations are serialized.
@@ -87,7 +87,6 @@ class HttpAPI:
         logger: Optional[logging.Logger] = None,
     ):
         """Initialize the HTTP API wrapper."""
-
         self.who = who
         self.scrfd = scrfd
         self.gm = gm
@@ -295,8 +294,9 @@ class HttpAPI:
     def _handle_gallery_add_raw(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Copy a raw image into gallery/<id>/raw and run full refresh (align+embed).
+
         Upload pathway -> RAW only. Alignment happens once during refresh.
-        Response: { ok, saved, identities }
+        Response: { ok, saved, identities }.
 
         Parameters
         ----------
@@ -344,12 +344,13 @@ class HttpAPI:
         """
         Save a clean snapshot from the latest frame (no overlays) into ALIGNED ONLY,
         and embed immediately (no RAW for selfie).
+
         Parameters
         ----------
         payload: { "id": "alice" }
 
         Returns
-        ----------
+        -------
         dict
             { ok, saved_aligned, identities }
 

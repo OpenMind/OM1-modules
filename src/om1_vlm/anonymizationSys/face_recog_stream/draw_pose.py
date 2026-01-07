@@ -323,7 +323,20 @@ def _draw_skeleton_internal(
     radius: int,
 ) -> None:
     """
-    Internal skeleton drawing helper
+    Internal skeleton drawing helper.
+
+    Parameters
+    ----------
+    img : ndarray
+        BGR image (modified in-place).
+    kps : ndarray (17, 3)
+        Keypoints [x, y, conf] for one person.
+    kp_conf_thr : float
+        Minimum confidence to draw a keypoint.
+    thickness : int
+        Line thickness for skeleton.
+    radius : int
+        Keypoint circle radius.
     """
     # Draw skeleton lines
     for i, (p1_idx, p2_idx) in enumerate(SKELETON):

@@ -11,6 +11,25 @@ def add_asr_config_argparse_parameters(
     profanity_filter: bool = False,
     word_time_offsets: bool = False,
 ) -> argparse.ArgumentParser:
+    """
+    Add common ASR configuration arguments to an argparse parser.
+
+    Parameters
+    ----------
+    parser : argparse.ArgumentParser
+        The argument parser to which the ASR configuration parameters will be added.
+    max_alternatives : bool, optional
+        Whether to include the max_alternatives parameter (default: False).
+    profanity_filter : bool, optional
+        Whether to include the profanity_filter parameter (default: False).
+    word_time_offsets : bool, optional
+        Whether to include the word_time_offsets parameter (default: False).
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        The updated argument parser with ASR configuration parameters added.
+    """
     parser.add_argument(
         "--asr-sample-rate-hz",
         default=16000,
@@ -127,6 +146,19 @@ def add_asr_config_argparse_parameters(
 def add_tts_argparse_parameters(
     parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
+    """
+    Add common TTS arguments to an argparse parser.
+
+    Parameters
+    ----------
+    parser : argparse.ArgumentParser
+        The argument parser to which the TTS parameters will be added.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        The updated argument parser with TTS parameters added.
+    """
     parser.add_argument(
         "--voice",
         help="A voice name to use. If this parameter is missing, then the server will try a first available model "
@@ -154,6 +186,19 @@ def add_tts_argparse_parameters(
 def add_connection_argparse_parameters(
     parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
+    """
+    Add common gRPC connection arguments to an argparse parser.
+
+    Parameters
+    ----------
+    parser : argparse.ArgumentParser
+        The argument parser to which the connection parameters will be added.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        The updated argument parser with connection parameters added.
+    """
     parser.add_argument(
         "--server", default="localhost:50051", help="URI to GRPC server endpoint."
     )

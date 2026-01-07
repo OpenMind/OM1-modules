@@ -50,3 +50,14 @@ jobs:
 
       - name: Run isort
         run: poetry run isort --check-only .
+
+      - name: Run vulture
+        run: poetry run vulture src/
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Run pre-commit hooks
+        id: pre-commit
+        run: |
+          pre-commit run --all-files --show-diff-on-failure

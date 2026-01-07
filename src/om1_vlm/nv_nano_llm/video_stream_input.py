@@ -149,7 +149,7 @@ class VideoStreamInput:
         return self, self.video_output
 
     def register_frame_callback(
-        self, frame_callback: Optional[Callable], threaded: bool = False
+        self, frame_callback: Optional[Callable], _threaded: bool = False
     ):
         """
         Register a callback function for frame processing.
@@ -159,7 +159,7 @@ class VideoStreamInput:
         frame_callback : Optional[Callable]
             Function to process video frames.
             Takes CUDA memory buffer as input
-        threaded : bool, optional
+        _threaded : bool, optional
             Flag for threaded processing.
             Currently not implemented.
             By default False

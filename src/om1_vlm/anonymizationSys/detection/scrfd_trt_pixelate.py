@@ -1,5 +1,6 @@
-# -*- coding: utf-8 -*-
 """
+SCRFD TensorRT + Pixelation Anonymization System.
+
 SCRFD TensorRT on Jetson Orin + Pixelation anonymization
 - TRT 10.x tensor API (set_tensor_address + execute_async_v3)
 - Pinned host buffers, async H2D/D2H, CUDA event timing

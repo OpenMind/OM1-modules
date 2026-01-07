@@ -18,7 +18,7 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-from . import time_pb2 as gz_dot_msgs_dot_time__pb2
+# from . import time_pb2 as gz_dot_msgs_dot_time__pb2
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
     b'\n\x14gz/msgs/header.proto\x12\x07gz.msgs\x1a\x12gz/msgs/time.proto"l\n\x06Header\x12\x1c\n\x05stamp\x18\x01 \x01(\x0b\x32\r.gz.msgs.Time\x12!\n\x04\x64\x61ta\x18\x02 \x03(\x0b\x32\x13.gz.msgs.Header.Map\x1a!\n\x03Map\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x03(\tB\x1b\n\x0b\x63om.gz.msgsB\x0cHeaderProtosb\x06proto3'

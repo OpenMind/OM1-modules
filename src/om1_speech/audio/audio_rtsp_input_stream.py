@@ -454,7 +454,7 @@ class AudioRTSPInputStream:
             yield response
 
     def on_audio(self):
-        """Audio processing loop"""
+        """Audio processing loop."""
         for _ in self.generator():
             if not self.running:
                 break

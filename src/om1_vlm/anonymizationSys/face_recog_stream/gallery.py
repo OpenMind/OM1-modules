@@ -14,7 +14,8 @@ Typical usage:
   /gallery/add_raw, /selfie), refresh the gallery and fetch identity means.
 - At inference time, compare a face embedding to the returned per-identity means.
 
-Notes:
+Notes
+-----
 - Embeddings are float32; vectors are L2-normalized before similarity.
 - Batch size respects the ArcFace TensorRT optimization profile (`arc_max_bs`).
 """
@@ -73,7 +74,6 @@ def make_model_sig(arc: TRTArcFace, extra: Optional[str] = None) -> str:
     str
         Signature string like ``"{name}-trt-l2-{dim}[-{extra}]"``.
     """
-
     name = getattr(arc, "name", None) or getattr(arc, "model_name", None) or "arc"
     dim = int(getattr(arc, "embedding_dim", 512))
     backend = "trt"
@@ -123,6 +123,8 @@ def _align_largest_face_bgr(
 
 class GalleryManager:
     """
+    Gallery manager for face recognition.
+
     Manages a face gallery with aligned crops and an embedding store. It supports incremental refresh from
     ``raw/`` and ``aligned/``, batched embedding respecting the ArcFace TensorRT max batch size, and per-identity statistics (counts and mean vectors)
 
@@ -218,7 +220,8 @@ class GalleryManager:
         process_raw : bool, optional
             Whether to detect→align images from ``raw/`` into ``aligned/``, by default ``True``.
 
-        Returns:
+        Returns
+        -------
           (num_aligned_added, num_vectors_appended)
         """
         if process_raw and self.scrfd is None:
@@ -319,7 +322,7 @@ class GalleryManager:
         - Recompute stats, so runtime recognition stops matching this label.
 
         Parameters
-        -------
+        ----------
         label: person name: wendy
 
         Returns
@@ -340,6 +343,7 @@ class GalleryManager:
     def get_all_vectors_and_labels(self) -> Tuple[np.ndarray, List[str]]:
         """
         Load the whole vectors file into RAM and return (vectors, labels_per_row).
+
         Returns
         -------
         tuple[np.ndarray, list[str]]
@@ -358,6 +362,7 @@ class GalleryManager:
         """
         Return per-identity mean vectors (N_id × dim) and label list.
         Mirrors your old build_gallery_embeddings() contract.
+
         Returns
         -------
         tuple[np.ndarray, list[str]]
@@ -383,6 +388,7 @@ class GalleryManager:
         Backward-compatible shim for older call sites:
             feats, labels = build_gallery_embeddings(gallery, scrfd, arc, det_conf)
         Under the hood, we refresh and return per-identity means.
+
         Parameters
         ----------
         det_conf : float, optional
@@ -529,7 +535,11 @@ class GalleryManager:
     def _embed_new_aligned(self) -> Tuple[int, int]:
         """
         Scan aligned/ for images not in index; embed and append to vectors.
-        Returns (num_aligned_found, num_vectors_appended)
+
+        Returns
+        -------
+        tuple[int, int]
+            ``(num_aligned_added, total_vectors_now)``.
         """
         ids = self._iter_identities(self.gallery_dir)
         if not ids:
@@ -688,6 +698,7 @@ def build_gallery_embeddings(
     """
     One-shot builder that returns per-identity means (old API).
     It builds/refreshes an embed store under embeds/<model_sig>/ next to gallery/.
+
     Parameters
     ----------
     gallery_root : str

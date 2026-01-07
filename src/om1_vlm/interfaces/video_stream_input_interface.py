@@ -38,20 +38,24 @@ class VideoStreamInputInterface(ABC):
             frame_callback: Callback function for frame processing
             cuda_stream: CUDA stream identifier
 
-        Returns:
+        Returns
+        -------
             Tuple of (self, video_output)
         """
         pass
 
     @abstractmethod
     def register_frame_callback(
-        self, frame_callback: Optional[Callable], threaded: bool = False
+        self, _frame_callback: Optional[Callable], _threaded: bool = False
     ):
         """Register a callback function for processing video frames.
 
-        Args:
-            frame_callback: Callback function that will be called for each frame
-            threaded: Whether to run the callback in a separate thread
+        Parameters
+        ----------
+        frame_callback : Optional[Callable]
+            Function to call with each video frame.
+        threaded : bool
+            Whether to run the callback in a separate thread.
         """
         pass
 

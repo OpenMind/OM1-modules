@@ -26,6 +26,10 @@ def _check_nvenc_available() -> bool:
 
 
 class RTSPVideoStreamWriter:
+    """
+    RTSP video stream writer using FFmpeg with optional NVENC hardware encoding.
+    """
+
     def __init__(
         self,
         width: int,

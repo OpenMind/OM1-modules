@@ -27,7 +27,8 @@ class VLMProcessorInterface(ABC):
         Args:
             image: Input image/frame to process
 
-        Returns:
+        Returns
+        -------
             Processed image/frame
         """
         pass

@@ -94,7 +94,6 @@ class VideoStream:
         Exception
             If video streaming encounters an error
         """
-
         devices = enumerate_video_devices()
         if platform.system() == "Darwin":
             camindex = 0 if devices else 0

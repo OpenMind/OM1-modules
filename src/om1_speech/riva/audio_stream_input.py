@@ -79,6 +79,14 @@ class AudioStreamInput(AudioStreamInputInterface):
         return self
 
     def get_audio_chunk(self) -> Optional[Dict[str, Any]]:  # type: ignore
+        """
+        Retrieve the next chunk of audio data from the queue.
+
+        Returns
+        -------
+        Optional[Dict[str, Any]]
+            A dictionary containing audio data and rate, or None if no data is available
+        """
         try:
             data = self.audio_queue.get_nowait()
             return data

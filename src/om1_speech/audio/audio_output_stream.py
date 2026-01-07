@@ -376,6 +376,19 @@ class AudioOutputStream:
 
 
 def is_installed(lib_name: str) -> bool:
+    """
+    Check if a library is installed on the system.
+
+    Parameters
+    ----------
+    lib_name : str
+        The name of the library to check
+
+    Returns
+    -------
+    bool
+        True if the library is installed, False otherwise
+    """
     return shutil.which(lib_name) is not None
 
 
