@@ -69,9 +69,14 @@ exclude = ["src/om1_vlm/gz/msgs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
-ignore = ["E203", "E501"]
-
+ignore = ["E203", "E501", "D100", "D104", "D200", "D205", "D401", "D404"]
 fixable = ["ALL"]
 unfixable = []
-
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
+"system_hw_test/**" = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"

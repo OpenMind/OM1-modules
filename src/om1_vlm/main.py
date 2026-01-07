@@ -78,7 +78,7 @@ class Application:
         config_manager = ConfigManager()
         parser: argparse.ArgumentParser = config_manager.parse_model_arguments()
 
-        # Add other agruments for WebSocket server and video streaming
+        # Add other arguments for WebSocket server and video streaming
         parser.add_argument(
             "--ws-host", type=str, default="localhost", help="WebSocket server host"
         )

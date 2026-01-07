@@ -67,7 +67,7 @@ curl -sS -X POST http://127.0.0.1:6793/gallery/delete \
   -H 'Content-Type: application/json' \
   -d '{"ids":["wendy","boyuan"]}' | jq .
 
-# Check and list gallery identies
+# Check and list gallery identities
 curl -sS -X POST http://127.0.0.1:6793/gallery/identities -H 'Content-Type: application/json' -d '{}' | jq .
 
 

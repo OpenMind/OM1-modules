@@ -75,7 +75,7 @@ class AudioOutputStream:
         # Pending requests queue
         self._pending_requests: Queue[Optional[Dict[str, str]]] = Queue()
 
-        # Slience audio for Bluetooth optimization
+        # Silence audio for Bluetooth optimization
         self._silence_audio = self._create_silence_audio(50)
         self._silence_prefix = self._create_silence_audio(50)
 

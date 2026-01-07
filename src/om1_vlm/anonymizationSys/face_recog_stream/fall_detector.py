@@ -431,7 +431,7 @@ class FallDetector:
 
         # Build reason string
         active_reasons = [s[3] for s in signals if s[0]]
-        reason = "; ".join(active_reasons) if active_reasons else "noraml"
+        reason = "; ".join(active_reasons) if active_reasons else "normal"
 
         # Temporal smoothing
         if track_id >= 0:
