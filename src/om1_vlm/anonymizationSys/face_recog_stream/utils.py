@@ -8,7 +8,7 @@ import numpy as np
 
 
 def pick_topk_indices(
-    dets: np.ndarray, topk: int, H: int, W: int, mode: str = "score_area"
+    dets: np.ndarray, topk: int, H: int, W: int, _mode: str = "score_area"
 ) -> np.ndarray:
     """
     Select indices of the top-K detections to run recognition on.
@@ -23,7 +23,7 @@ def pick_topk_indices(
         Maximum number of indices to return.
     H, W : int
         Image height and width (kept for future use/expansion).
-    mode : str
+    _mode : str
         Ranking mode. Currently supports "score_area" (recommended).
 
     Returns

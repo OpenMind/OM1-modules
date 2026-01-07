@@ -332,7 +332,7 @@ class AudioInputStream:
             logger.info("Started audio processing thread")
 
     def _fill_buffer(
-        self, in_data: bytes, frame_count: int, time_info: dict, status_flags: int
+        self, in_data: bytes, _frame_count: int, _time_info: dict, _status_flags: int
     ) -> Tuple[None, int]:
         """
         Callback function for the PyAudio stream to fill the audio buffer.
@@ -344,11 +344,11 @@ class AudioInputStream:
         ----------
         in_data : bytes
             The captured audio data
-        frame_count : int
+        _frame_count : int
             Number of frames in the audio data
-        time_info : dict
+        _time_info : dict
             Timing information from PyAudio
-        status_flags : int
+        _status_flags : int
             Status flags from PyAudio
 
         Returns
@@ -437,7 +437,7 @@ class AudioInputStream:
             yield response
 
     def on_audio(self):
-        """Audio processing loop"""
+        """Audio processing loop."""
         for _ in self.generator():
             if not self.running:
                 break

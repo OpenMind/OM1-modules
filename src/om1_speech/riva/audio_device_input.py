@@ -126,9 +126,9 @@ class AudioDeviceInput:
     def _fill_buffer(
         self,
         in_data: bytes,
-        frame_count: int,
-        time_info: Dict[str, Any],
-        status_flags: int,
+        _frame_count: int,
+        _time_info: Dict[str, Any],
+        _status_flags: int,
     ) -> Tuple[None, int]:
         """
         Callback function for the PyAudio stream to fill the audio buffer.
@@ -137,11 +137,11 @@ class AudioDeviceInput:
         ----------
         in_data : bytes
             The captured audio data
-        frame_count : int
+        _frame_count : int
             Number of frames in the audio data
-        time_info : Dict[str, Any]
+        _time_info : Dict[str, Any]
             Timing information from PyAudio
-        status_flags : int
+        _status_flags : int
             Status flags from PyAudio
 
         Returns

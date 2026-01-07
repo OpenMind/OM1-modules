@@ -36,8 +36,16 @@ DefaultCompletionPrompts = [
 # This function comes from https://github.com/dusty-nv/clip_trt/blob/main/clip_trt/utils/prompts.py
 def load_prompts(prompts, concat=False):
     """
-    Load prompts from a list of txt or json files
-    (or if these are strings, just return the strings)
+    Load prompts from strings or files.
+
+    Parameters
+    ----------
+    prompts : Union[str, List[str], None]
+        A single prompt string, a list of prompt strings, or None. If a string ends with
+        '.json' or '.txt', it is treated as a file path to load prompts from.
+    concat : bool, optional
+        If True, concatenate all loaded prompts into a single string separated by spaces.
+        Default is False.
     """
     if prompts is None:
         return None

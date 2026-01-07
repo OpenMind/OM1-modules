@@ -18,7 +18,7 @@ from .vila_model import VILAModelSingleton
 try:
     import llava
     from llava import conversation as clib
-    from llava.media import Image, Video
+    from llava.media import Image
 
     # PreTrainedModel doesn't work on Mac M chips
     from transformers import GenerationConfig
@@ -26,7 +26,6 @@ except ModuleNotFoundError:
     llava = None
     clib = None
     Image = None
-    Video = None
     GenerationConfig = None
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
@@ -95,7 +94,6 @@ class VILAProcessor:
         except Exception as e:
             logger.error(f"Error initializing model configuration: {e}")
             raise
-            raise
 
     def on_video(self, image: bytes) -> Any:
         """
@@ -161,6 +159,16 @@ class VILAProcessor:
                 time.sleep(0.1)
 
     def generate_with_images(self, images: List[bytes], prompt: str):
+        """
+        Generate text response from VLM given images and prompt.
+
+        Parameters
+        ----------
+        images : List[bytes]
+            List of image byte arrays
+        prompt : str
+            Text prompt to guide the model generation
+        """
         if self.model is None:
             logger.error("Model is not initialized")
             return

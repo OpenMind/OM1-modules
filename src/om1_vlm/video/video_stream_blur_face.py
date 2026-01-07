@@ -293,38 +293,10 @@ def _build_anonymizer(cfg: dict):
     return _Anon(cfg)
 
 
-# ---------------------------------------------------------------------
-# Main API
-# ---------------------------------------------------------------------
 class VideoStreamBlurFace:
     """
-    Two-process pipeline:
-      - Capture process → pushes (ts, frame_bgr) to q_raw
-      - Anonymize process (optional) → pulls from q_raw, pixelates, pushes to q_proc
-      - Drain thread (main process) → raw preview callbacks + JPEG/base64 callbacks
-    Parameters
-    ----------
-    frame_callbacks: Callback(s) receiving **base64 JPEG strings** per frame
-        (e.g., to send over WebSocket).
-    fps: Target output FPS.
-    resolution: Frame size `(width, height)` for capture.
-    jpeg_quality: JPEG quality (0–100) for encoded outputs.
-    device_index: Camera index (e.g., 0, 1) or platform path selector.
-    blur_enabled: Enable face anonymization (pixelation) if an engine is provided.
-    blur_conf: SCRFD detection confidence threshold.
-    scrfd_engine: Path to SCRFD TensorRT engine; if None, disables anonymization.
-    scrfd_size: SCRFD model input size (square).
-    scrfd_input: SCRFD engine input tensor name.
-    pixel_blocks: Pixelation block size (larger = coarser blur).
-    pixel_margin: Extra margin around face boxes (fraction of box size).
-    pixel_max_faces: Max faces to anonymize per frame.
-    pixel_noise: Stddev of Gaussian noise added to pixelated regions (0 = off).
-    draw_boxes: Draw detection boxes for debugging.
-    queue_size_raw: Max queued frames from capture→anonymize (use 1 to keep freshest).
-    queue_size_proc: Max queued frames from anonymize→main (use 1 to keep freshest).
-    buffer_frames: Desired capture buffer size (driver hint).
-    raw_frame_callbacks: Callback(s) receiving **np.ndarray (BGR)** frames
-        per frame (already anonymized but not encoded). Ideal for local preview/recording. Optional.
+    Video stream handler that captures video from a camera, applies face anonymization,
+    and dispatches frames via callbacks.
     """
 
     def __init__(
@@ -349,6 +321,33 @@ class VideoStreamBlurFace:
         buffer_frames: int = 1,
         raw_frame_callbacks: Optional[Iterable[Callable[[np.ndarray], None]]] = None,
     ):
+        """
+        Initialize the VideoStreamBlurFace instance.
+
+        Parameters
+        ----------
+        frame_callbacks: Callback(s) receiving **base64 JPEG strings** per frame
+            (e.g., to send over WebSocket).
+        fps: Target output FPS.
+        resolution: Frame size `(width, height)` for capture.
+        jpeg_quality: JPEG quality (0–100) for encoded outputs.
+        device_index: Camera index (e.g., 0, 1) or platform path selector.
+        blur_enabled: Enable face anonymization (pixelation) if an engine is provided.
+        blur_conf: SCRFD detection confidence threshold.
+        scrfd_engine: Path to SCRFD TensorRT engine; if None, disables anonymization.
+        scrfd_size: SCRFD model input size (square).
+        scrfd_input: SCRFD engine input tensor name.
+        pixel_blocks: Pixelation block size (larger = coarser blur).
+        pixel_margin: Extra margin around face boxes (fraction of box size).
+        pixel_max_faces: Max faces to anonymize per frame.
+        pixel_noise: Stddev of Gaussian noise added to pixelated regions (0 = off).
+        draw_boxes: Draw detection boxes for debugging.
+        queue_size_raw: Max queued frames from capture→anonymize (use 1 to keep freshest).
+        queue_size_proc: Max queued frames from anonymize→main (use 1 to keep freshest).
+        buffer_frames: Desired capture buffer size (driver hint).
+        raw_frame_callbacks: Callback(s) receiving **np.ndarray (BGR)** frames
+            per frame (already anonymized but not encoded). Ideal for local preview/recording. Optional.
+        """
         self.fps = int(fps)
         cv2.setNumThreads(1)
         self.resolution = (int(resolution[0]), int(resolution[1]))
@@ -628,13 +627,8 @@ class VideoStreamBlurFace:
 
     def _drain_loop(self) -> None:
         """
-        Main-process drain loop:
-        - Pull processed frames, drain queue to newest
-        - Dispatch raw frame (no encoding) for local preview (optional)
-        - JPEG encode + base64 for standard callbacks
-        - Logs output FPS and latency stats
+        Drain loop running in a dedicated thread in the main process.
         """
-
         while self._running.value:
             try:
                 ts, frame = self.q_proc.get(timeout=max(0.005, 1.0 / max(1, self.fps)))

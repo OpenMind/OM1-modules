@@ -639,7 +639,7 @@ def main() -> None:
     # Graceful shutdown
     running = True
 
-    def handle_sigint(sig, frame):
+    def handle_sigint(_sig, _frame):
         nonlocal running
         logger.info("SIGINT received, shutting down....")
         running = False

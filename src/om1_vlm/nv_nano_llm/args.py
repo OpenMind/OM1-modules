@@ -470,7 +470,12 @@ class NanoLLMArgParser(argparse.ArgumentParser):
 
     def parse_args(self, **kwargs):  # type: ignore
         """
-        Override for parse_args() that does some additional configuration
+        Override for parse_args() that does some additional configuration.
+
+        Parameters
+        ----------
+        kwargs : dict
+            Additional keyword arguments to pass to the base class parse_args method
         """
         args = super().parse_args(**kwargs)
 
@@ -486,13 +491,14 @@ class NanoLLMArgParser(argparse.ArgumentParser):
     @staticmethod
     def parse_prompt_args(prompts, chat=True):
         """
-        Parse prompt command-line argument and return list of prompts.
-        It's assumed that the argparse argument was created like this::
+        Parse prompt arguments, loading defaults if specified.
 
-          parser.add_argument('--prompt', action='append', nargs='*')
-
-        If the prompt text is 'default', then default chat prompts will
-        be assigned if ``chat=True`` (otherwise default completion prompts)
+        Parameters
+        ----------
+        prompts : List[List[str]]
+            List of prompt arguments from command line
+        chat : bool, optional
+            Whether to use chat prompts or completion prompts, by default True
         """
         if prompts is None:
             return None

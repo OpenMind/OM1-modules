@@ -31,6 +31,7 @@ eclipse-zenoh = "^1.4.0"
 pycdr2 = "^1.0.0"
 torch = { url = "https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl", optional = true }
 av = "^15.1.0"
+vulture = "^2.14"
 
 
 [tool.poetry.extras]
@@ -68,7 +69,7 @@ indent-width = 4
 exclude = ["src/om1_vlm/gz/msgs"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
+select = ["E", "F", "I", "D"]
 ignore = ["E203", "E501", "D100", "D104", "D200", "D205", "D401", "D404"]
 fixable = ["ALL"]
 unfixable = []
@@ -80,3 +81,8 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
+
+[tool.vulture]
+exclude = ["src/unitree/", "src/ubtech/", "system_hw_test/"]
+min_confidence = 80
+paths = ["src"]
