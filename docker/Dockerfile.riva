@@ -4,7 +4,7 @@ RUN apt-get update && \
     apt-get install -y curl python3-pyaudio pulseaudio pulseaudio-utils alsa-utils libasound2t64 libasound2-plugins netcat-openbsd && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
-RUN pip install --upgrade pyaudio websockets numpy opencv-python requests protobuf google eclipse-zenoh pycdr2 av vulture
+RUN pip install --upgrade pyaudio websockets numpy opencv-python requests protobuf google eclipse-zenoh pycdr2 av vulture openai
 
 RUN mkdir /app
 
