@@ -1,5 +1,4 @@
 import argparse
-import base64
 import json
 import logging
 import shutil
@@ -99,7 +98,7 @@ class AudioOutputLiveStream:
 
         # Persistent ffplay process for streaming
         self._ffplay_proc = None
-        self._ffplay_lock = threading.Lock()
+        self._ffplay_lock = threading.RLock()
         self._ffplay_initialized = False
 
     def zenoh_audio_message(self, data: zenoh.Sample):
@@ -371,7 +370,7 @@ class AudioOutputLiveStream:
         """
         samples = int(self._rate * duration_ms / 1000)
         silence_bytes = b"\x00" * (samples * 2)
-        return base64.b64encode(silence_bytes)
+        return silence_bytes
 
     def _keepalive_worker(self):
         """
@@ -380,30 +379,11 @@ class AudioOutputLiveStream:
         while self.running:
             current_time = time.time()
             if current_time - self._last_audio_time >= 60:
-                self._write_audio_bytes(self._silence_audio, is_keepalive=True)
+                self._write_audio_bytes(self._silence_audio)
                 self._last_audio_time = current_time
             time.sleep(10)
 
-    def _write_audio(self, audio_data: bytes):
-        """
-        Write audio data to the output stream with Bluetooth optimization.
-
-        Parameters
-        ----------
-        audio_data : bytes
-            The audio data to be written to the output stream
-        """
-        self._last_audio_time = time.time()
-
-        # For backward compatibility, decode if base64 encoded
-        try:
-            decoded_data = base64.b64decode(audio_data)
-            self._stream_audio_chunk(decoded_data)
-        except Exception:
-            # If not base64, assume raw audio data
-            self._stream_audio_chunk(audio_data)
-
-    def _write_audio_bytes(self, audio_data: bytes, is_keepalive: bool = False):
+    def _write_audio_bytes(self, audio_data: bytes):
         """
         Write audio data to the persistent ffplay process.
 
@@ -411,17 +391,13 @@ class AudioOutputLiveStream:
         ----------
         audio_data : bytes
             The audio data to be written to the output stream
-        is_keepalive : bool
-            Whether this is a keepalive sound (suppresses callbacks)
         """
         if not self._initialize_ffplay():
             logger.error("Failed to initialize ffplay for keepalive")
             return
 
         try:
-            # Decode base64 audio data
-            decoded_data = base64.b64decode(audio_data)
-            self._stream_audio_chunk(decoded_data)
+            self._stream_audio_chunk(audio_data)
         except Exception as e:
             logger.error(f"Error writing keepalive audio: {e}")
 
