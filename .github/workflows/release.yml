@@ -1,0 +1,79 @@
+name: Release Riva Speech Server ARM64 Image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+  workflow_dispatch:
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-22.04-arm
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      metadata: ${{ steps.meta.outputs.json }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: openmindagi/riva-speech-server
+          tags: |
+            type=semver,pattern={{version}},prefix=v
+            type=semver,pattern={{major}}.{{minor}},prefix=v
+            type=ref,event=branch
+            type=sha
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=2.24.0-l4t-aarch64
+
+      - name: Build and push ARM64 image by digest
+        id: build
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./docker/gpu/Dockerfile
+          platforms: linux/arm64
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=openmindagi/riva-speech-server,push-by-digest=true,name-canonical=true,push=true
+
+  create-manifest:
+    runs-on: ubuntu-latest
+    needs: [build-arm64]
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        run: |
+          # Get the metadata from arm64 build to extract tags
+          tags=$(echo '${{ needs.build-arm64.outputs.metadata }}' | jq -r '.tags[]')
+
+          # Create manifest for each tag
+          for tag in $tags; do
+            echo "Creating manifest for: $tag"
+
+            docker buildx imagetools create \
+              --tag $tag \
+              openmindagi/riva-speech-server@${{ needs.build-arm64.outputs.image-digest }}
+          done
