@@ -41,9 +41,9 @@ services:
 
     restart: unless-stopped
 
-  riva-speech:
+  riva_speech:
     image: openmindagi/riva-speech-server:2.24.0-l4t-aarch64
-    container_name: riva-speech
+    container_name: riva_speech
     restart: unless-stopped
 
     ipc: host
