@@ -1,0 +1,18 @@
+FROM openmindagi/riva-speech:2.24.0-l4t-aarch64 as BASE
+
+RUN apt-get update && \
+    apt-get install -y curl python3-pyaudio pulseaudio pulseaudio-utils alsa-utils libasound2t64 libasound2-plugins netcat-openbsd \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+RUN pip install --upgrade pyaudio websockets
+
+RUN mkdir /app
+
+COPY ./src/om1_speech /app/om1_speech
+COPY ./src/utils /app/om1_utils
+
+COPY ./docker/scripts/start_riva.sh /app/start_riva.sh
+
+RUN chmod +x /app/start_riva.sh
+
+CMD ["/app/start_riva.sh"]
