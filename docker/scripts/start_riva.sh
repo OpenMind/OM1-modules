@@ -13,4 +13,4 @@ echo "Port 50051 is ready. "
 # Run Python script
 echo "Starting Python scripts..."
 cd /app
-python3 -m om1_speech ${PYTHON_ARGS}
+python3 -m om1_speech ${PYTHON_ARGS:---server-mode}
