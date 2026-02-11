@@ -40,6 +40,8 @@ class AudioOutputLiveStream:
         (default: None)
     enable_tts_interrupt : bool, optional
         If True, enables TTS interrupt when ASR detects speech (default: False)
+    extra_body : Dict[str, Any], optional
+        Extra body to include in the TTS request (default: {})
     """
 
     def __init__(
