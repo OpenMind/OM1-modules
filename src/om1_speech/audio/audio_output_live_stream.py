@@ -52,6 +52,8 @@ class AudioOutputLiveStream:
         api_key: Optional[str] = "",
         tts_state_callback: Optional[Callable] = None,
         enable_tts_interrupt: bool = False,
+        extra_headers: Optional[Dict[str, str]] = None,
+        extra_body: Optional[Dict[str, str]] = None,
     ):
         self._url = url
         self._tts_model = tts_model
@@ -60,11 +62,14 @@ class AudioOutputLiveStream:
         self._rate = rate
         self._api_key = api_key
         self._enable_tts_interrupt = enable_tts_interrupt
+        self._extra_headers = extra_headers
+        self._extra_body = extra_body
 
         # OpenAI
         self.openai_client = openai.OpenAI(
             base_url=self._url,
             api_key=self._api_key or "no-need-api-key",
+            default_headers=self._extra_headers,
         )
 
         # Callback for TTS state
@@ -198,6 +203,7 @@ class AudioOutputLiveStream:
                     voice=self._tts_voice,  # type: ignore
                     response_format=self._response_format,  # type: ignore
                     input=tts_request["text"],  # type: ignore
+                    extra_body=self._extra_body,
                 ) as response:
                     for chunk in response.iter_bytes(chunk_size=1024):
                         if not self.running:
@@ -238,16 +244,10 @@ class AudioOutputLiveStream:
                 return False
 
             try:
-                args = [
-                    "ffplay",
-                    "-f",
-                    "s16le",  # Format: signed 16-bit little-endian
-                    "-ar",
-                    str(self._rate),  # Sample rate
-                    "-nodisp",  # No video display window
-                    "-autoexit",  # Exit when audio finishes
-                    "-",  # Read from stdin
-                ]
+                args = ["ffplay"]
+                if "pcm" in self._response_format:
+                    args.extend(["-f", "s16le", "-ar", str(self._rate)])
+                args.extend(["-nodisp", "-autoexit", "-"])
 
                 self._ffplay_proc = subprocess.Popen(
                     args=args,
@@ -379,8 +379,10 @@ class AudioOutputLiveStream:
         while self.running:
             current_time = time.time()
             if current_time - self._last_audio_time >= 60:
-                self._write_audio_bytes(self._silence_audio)
-                self._last_audio_time = current_time
+                # Only send silence for PCM formats as we generate raw bytes
+                if "pcm" in self._response_format:
+                    self._write_audio_bytes(self._silence_audio)
+                    self._last_audio_time = current_time
             time.sleep(10)
 
     def _write_audio_bytes(self, audio_data: bytes):
@@ -498,6 +500,12 @@ def main():
         "--tts-voice", type=str, default="af_bella", help="TTS voice to use"
     )
     parser.add_argument(
+        "--response-format",
+        type=str,
+        default="pcm",
+        help="Response format for audio output" "(default: pcm)",
+    )
+    parser.add_argument(
         "--rate",
         type=int,
         default=24000,
@@ -506,7 +514,7 @@ def main():
     args = parser.parse_args()
 
     audio_output = AudioOutputLiveStream(
-        args.tts_url, args.tts_model, args.tts_voice, rate=args.rate
+        args.tts_url, args.tts_model, args.tts_voice, rate=args.rate, response_format=args.response_format
     )
     audio_output.start()
     audio_output.run_interactive()

@@ -359,7 +359,7 @@ class AudioOutputStream:
                 user_input = input()
                 if user_input.lower() == "quit":
                     break
-                self.add_request({"text": user_input})
+                self.add_request({"input": user_input, "text": user_input})
         except KeyboardInterrupt:
             self.stop()
         finally:
@@ -401,6 +401,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--tts-url", type=str, required=True, help="URL for the TTS service"
+    )
+    parser.add_argument(
+        "--rate", type=int, default=8000, help="Sample rate for the audio output"
     )
     args = parser.parse_args()
 
