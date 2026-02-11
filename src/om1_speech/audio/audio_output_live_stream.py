@@ -6,7 +6,7 @@ import subprocess
 import threading
 import time
 from queue import Queue
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import openai
 import zenoh
@@ -52,8 +52,7 @@ class AudioOutputLiveStream:
         api_key: Optional[str] = "",
         tts_state_callback: Optional[Callable] = None,
         enable_tts_interrupt: bool = False,
-        extra_headers: Optional[Dict[str, str]] = None,
-        extra_body: Optional[Dict[str, str]] = None,
+        extra_body: Dict[str, Any] = {},
     ):
         self._url = url
         self._tts_model = tts_model
@@ -62,14 +61,12 @@ class AudioOutputLiveStream:
         self._rate = rate
         self._api_key = api_key
         self._enable_tts_interrupt = enable_tts_interrupt
-        self._extra_headers = extra_headers
         self._extra_body = extra_body
 
         # OpenAI
         self.openai_client = openai.OpenAI(
             base_url=self._url,
             api_key=self._api_key or "no-need-api-key",
-            default_headers=self._extra_headers,
         )
 
         # Callback for TTS state
@@ -503,18 +500,22 @@ def main():
         "--response-format",
         type=str,
         default="pcm",
-        help="Response format for audio output" "(default: pcm)",
+        help="Response format for audio output (default: pcm)",
     )
     parser.add_argument(
         "--rate",
         type=int,
         default=24000,
-        help="Sampling rate for audio output" "(default: 24000 Hz)",
+        help="Sampling rate for audio output (default: 24000 Hz)",
     )
     args = parser.parse_args()
 
     audio_output = AudioOutputLiveStream(
-        args.tts_url, args.tts_model, args.tts_voice, rate=args.rate, response_format=args.response_format
+        args.tts_url,
+        args.tts_model,
+        args.tts_voice,
+        rate=args.rate,
+        response_format=args.response_format,
     )
     audio_output.start()
     audio_output.run_interactive()

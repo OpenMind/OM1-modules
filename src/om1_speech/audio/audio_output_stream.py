@@ -344,7 +344,7 @@ class AudioOutputStream:
         keepalive_thread.daemon = True
         keepalive_thread.start()
 
-    def run_interactive(self):
+    def run_interactive(self, text_key: str = "text"):
         """
         Run an interactive console for text-to-speech conversion.
 
@@ -359,7 +359,7 @@ class AudioOutputStream:
                 user_input = input()
                 if user_input.lower() == "quit":
                     break
-                self.add_request({"input": user_input, "text": user_input})
+                self.add_request({text_key: user_input})
         except KeyboardInterrupt:
             self.stop()
         finally:
@@ -405,11 +405,17 @@ def main():
     parser.add_argument(
         "--rate", type=int, default=8000, help="Sample rate for the audio output"
     )
+    parser.add_argument(
+        "--text-key",
+        type=str,
+        default="text",
+        help="The key for the text to be converted to speech in the request (default: text)",
+    )
     args = parser.parse_args()
 
     audio_output = AudioOutputStream(args.tts_url, rate=args.rate)
     audio_output.start()
-    audio_output.run_interactive()
+    audio_output.run_interactive(text_key=args.text_key)
     audio_output.stop()
 
 
