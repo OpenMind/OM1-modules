@@ -378,10 +378,8 @@ class AudioOutputLiveStream:
         while self.running:
             current_time = time.time()
             if current_time - self._last_audio_time >= 60:
-                # Only send silence for PCM formats as we generate raw bytes
-                if "pcm" in self._response_format:
-                    self._write_audio_bytes(self._silence_audio)
-                    self._last_audio_time = current_time
+                self._write_audio_bytes(self._silence_audio)
+                self._last_audio_time = current_time
             time.sleep(10)
 
     def _write_audio_bytes(self, audio_data: bytes):
