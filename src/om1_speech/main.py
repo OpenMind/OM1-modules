@@ -66,6 +66,7 @@ class Application:
         logging.basicConfig(
             level=getattr(logging, self.args.log_level.upper()),
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            force=True,
         )
         for name in logging.root.manager.loggerDict:
             logging.getLogger(name).setLevel(
