@@ -63,7 +63,10 @@ class Application:
         self.args.http_port = self.args.http_port or 6791
 
         # Set logging level in the lower level modules
-        logging.basicConfig(level=getattr(logging, self.args.log_level.upper()))
+        logging.basicConfig(
+            level=getattr(logging, self.args.log_level.upper()),
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        )
         for name in logging.root.manager.loggerDict:
             logging.getLogger(name).setLevel(
                 getattr(logging, self.args.log_level.upper())
