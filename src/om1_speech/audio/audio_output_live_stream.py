@@ -194,6 +194,8 @@ class AudioOutputLiveStream:
                     logger.error("Failed to initialize ffplay")
                     continue
 
+                self._stream_audio_chunk(self._create_silence_audio(10))
+
                 self._tts_callback(True)
                 self._update_audio_status(AudioStatus.STATUS_SPEAKER.ACTIVE.value)
 
