@@ -32,7 +32,7 @@ def add_asr_config_argparse_parameters(
     """
     parser.add_argument(
         "--asr-sample-rate-hz",
-        default=16000,
+        default=48000,
         type=int,
         help="A number of frames per second in audio streamed from a microphone.",
     )

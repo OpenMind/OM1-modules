@@ -39,9 +39,17 @@ class ASRProcessor(ASRProcessorInterface):
         self.callback = callback
         self.running: bool = True
 
-        # Customize the ASR model
-        self.args.stop_threshold = 0.99
-        self.args.stop_threshold_eou = 0.99
+        # ASR settings
+        if not hasattr(self.args, 'stop_history_eou') or self.args.stop_history_eou == -1:
+            self.args.stop_history_eou = 200  # milliseconds of silence before finalizing
+        if not hasattr(self.args, 'stop_threshold_eou') or self.args.stop_threshold_eou == -1.0:
+            self.args.stop_threshold_eou = 0.80  # Balanced threshold
+
+        # Reduce stop_history for faster resets but not too aggressive
+        if not hasattr(self.args, 'stop_history') or self.args.stop_history == -1:
+            self.args.stop_history = 600  # Longer to prevent mid-sentence cuts
+        if not hasattr(self.args, 'stop_threshold') or self.args.stop_threshold == -1.0:
+            self.args.stop_threshold = 0.90  # Higher to prevent false cuts
 
         self._initialize_model()
 
@@ -127,13 +135,9 @@ class ASRProcessor(ASRProcessorInterface):
                     data
                     and isinstance(data, dict)
                     and "audio" in data
-                    and "rate" in data
                 ):
-                    if data["rate"] != self.args.asr_sample_rate_hz:
-                        self.args.asr_sample_rate_hz = data["rate"]
-                        self._initialize_model()
                     yield base64.b64decode(data["audio"])
-            time.sleep(0.01)  # Small delay to prevent busy waiting
+            time.sleep(0.01)
 
     def process_audio(self, audio_source: Any):
         """
@@ -150,6 +154,19 @@ class ASRProcessor(ASRProcessorInterface):
         """
         if self.model is None or self.model_config is None:
             raise RuntimeError("ASR model is not initialized.")
+
+        logger.info("Waiting for first audio chunk to initialize sample rate...")
+        while self.running:
+            data = audio_source.get_audio_chunk()
+            if data and isinstance(data, dict) and "rate" in data:
+                if data["rate"] != self.args.asr_sample_rate_hz:
+                    logger.info(f"Updating sample rate from {self.args.asr_sample_rate_hz} to {data['rate']}")
+                    self.args.asr_sample_rate_hz = data["rate"]
+                    self._initialize_model()
+                if hasattr(audio_source, 'audio_queue'):
+                    audio_source.audio_queue.put(data)
+                break
+            time.sleep(0.01)
 
         responses = self.model.streaming_response_generator(
             audio_chunks=self._yield_audio_chunks(audio_source),
@@ -169,9 +186,11 @@ class ASRProcessor(ASRProcessorInterface):
                 continue
 
             if result.is_final:
-                logging.info(f"ASR: {transcript}")
+                logging.info(f"Final ASR Result: {transcript}")
                 if self.callback:
                     self.callback(json.dumps({"asr_reply": transcript}))
+            else:
+                logging.info(f"Interim ASR Result: {transcript}")
 
     def stop(self):
         """
