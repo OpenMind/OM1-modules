@@ -698,13 +698,11 @@ class RTSPVideoStreamWriter:
         except Exception:
             pass
 
-        if self.raw_thread:
-            try:
-                self.raw_thread.join(timeout=5)
-            except Exception:
-                pass
+        try:
+            self.raw_thread.join(timeout=5)
+        except Exception:
+            pass
 
-        # Cleanup processed video process
         if self.process:
             try:
                 if self.process.stdin and not self.process.stdin.closed:
@@ -728,7 +726,6 @@ class RTSPVideoStreamWriter:
             except Exception:
                 pass
 
-        # Cleanup raw video process
         if self.raw_process:
             try:
                 if self.raw_process.stdin and not self.raw_process.stdin.closed:

@@ -214,8 +214,8 @@ def main() -> None:
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     models_dir = os.path.join(script_dir, "..", "models")
-    scrfd_name = "om1-modules_scrfd_2.5g_bnkps_shape640x640.engine"
-    arc_name = "om1-modules_buffalo_m_w600k_r50.engine"
+    scrfd_name = "thor_scrfd_2.5g_bnkps_shape640x640.engine"
+    arc_name = "thor_buffalo_m_w600k_r50.engine"
     pose_name = "yolo11s-pose.engine"
 
     default_scrfd_engine = os.path.join(models_dir, scrfd_name)
