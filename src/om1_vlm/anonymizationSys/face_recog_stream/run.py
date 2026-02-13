@@ -214,8 +214,8 @@ def main() -> None:
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     models_dir = os.path.join(script_dir, "..", "models")
-    scrfd_name = "om1-modules_scrfd_2.5g_bnkps_shape640x640.engine"
-    arc_name = "om1-modules_buffalo_m_w600k_r50.engine"
+    scrfd_name = "thor_scrfd_2.5g_bnkps_shape640x640.engine"
+    arc_name = "thor_buffalo_m_w600k_r50.engine"
     pose_name = "yolo11s-pose.engine"
 
     default_scrfd_engine = os.path.join(models_dir, scrfd_name)
@@ -388,6 +388,15 @@ def main() -> None:
         "--remote-rtsp",
         help="Remote RTSP URL to relay (e.g. rtsp://host:8554/top_camera).",
     )
+    ap.add_argument(
+        "--raw-local-rtsp",
+        default="rtsp://localhost:8554/top_camera_raw",
+        help="RTSP URL to publish raw video (e.g. rtsp://host:8554/top_camera_raw).",
+    )
+    ap.add_argument(
+        "--raw-remote-rtsp",
+        help="Remote RTSP URL to relay raw video.",
+    )
 
     # UI / perf
     ap.add_argument(
@@ -507,12 +516,22 @@ def main() -> None:
         int(cap.fps),
         args.local_rtsp,
         args.remote_rtsp,
+        args.raw_local_rtsp,
+        args.raw_remote_rtsp,
     )
-    logger.info(
-        "Publishing RTSP: local=%s%s",
-        args.local_rtsp,
-        f"  remote={args.remote_rtsp}" if args.remote_rtsp else "",
-    )
+
+    if args.local_rtsp or args.remote_rtsp:
+        logger.info(
+            "Publishing processed RTSP: local=%s%s",
+            args.local_rtsp or "(none)",
+            f"  remote={args.remote_rtsp}" if args.remote_rtsp else "",
+        )
+    if args.raw_local_rtsp or args.raw_remote_rtsp:
+        logger.info(
+            "Publishing raw RTSP: local=%s%s",
+            args.raw_local_rtsp or "(none)",
+            f"  remote={args.raw_remote_rtsp}" if args.raw_remote_rtsp else "",
+        )
 
     # Who tracking
     who = WhoTracker(lookback_sec=args.http_lookback_sec)
@@ -668,6 +687,9 @@ def main() -> None:
                 logger.warning("[warn] Frame is None ")
                 time.sleep(0.02)
                 continue
+
+            # Publish raw video
+            rstp_writer.write_raw_frame(frame)
 
             # Snapshot config
             with cfg_lock:
