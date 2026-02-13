@@ -87,8 +87,8 @@ class TTSProcessor:
 
         Notes
         -----
-        The synthesis is performed with the configured voice, language,
-        sample rate, and quality settings specified in model_args.
+        The synthesis is performed with the configured voice, language
+        and sample rate specified in model_args.
         """
         if self.model is None:
             raise RuntimeError("TTS model is not initialized.")
@@ -98,9 +98,6 @@ class TTSProcessor:
             self.args.voice,
             self.args.language_code,
             sample_rate_hz=self.args.tts_sample_rate_hz,
-            audio_prompt_file=self.args.audio_prompt_file,
-            quality=20 if self.args.quality is None else self.args.quality,
-            custom_dictionary={},
         )
 
     def process_tts(self, tts_input: Dict[Any, Any], *args, **kwargs):
