@@ -101,7 +101,7 @@ class Server:
                     await self.connections[connection_id].send(message)
                 self.global_queue.task_done()
             except Empty:
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.001)
             except ConnectionClosed:
                 pass
             except Exception as e:
@@ -125,7 +125,7 @@ class Server:
                 await websocket.send(message)
                 queue.task_done()
             except Empty:
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.001)
             except ConnectionClosed:
                 break
             except Exception as e:
