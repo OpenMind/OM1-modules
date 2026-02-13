@@ -40,15 +40,23 @@ class ASRProcessor(ASRProcessorInterface):
         self.running: bool = True
 
         # ASR settings
-        if not hasattr(self.args, 'stop_history_eou') or self.args.stop_history_eou == -1:
-            self.args.stop_history_eou = 200  # milliseconds of silence before finalizing
-        if not hasattr(self.args, 'stop_threshold_eou') or self.args.stop_threshold_eou == -1.0:
+        if (
+            not hasattr(self.args, "stop_history_eou")
+            or self.args.stop_history_eou == -1
+        ):
+            self.args.stop_history_eou = (
+                200  # milliseconds of silence before finalizing
+            )
+        if (
+            not hasattr(self.args, "stop_threshold_eou")
+            or self.args.stop_threshold_eou == -1.0
+        ):
             self.args.stop_threshold_eou = 0.80  # Balanced threshold
 
         # Reduce stop_history for faster resets but not too aggressive
-        if not hasattr(self.args, 'stop_history') or self.args.stop_history == -1:
+        if not hasattr(self.args, "stop_history") or self.args.stop_history == -1:
             self.args.stop_history = 600  # Longer to prevent mid-sentence cuts
-        if not hasattr(self.args, 'stop_threshold') or self.args.stop_threshold == -1.0:
+        if not hasattr(self.args, "stop_threshold") or self.args.stop_threshold == -1.0:
             self.args.stop_threshold = 0.90  # Higher to prevent false cuts
 
         self._initialize_model()
@@ -131,11 +139,7 @@ class ASRProcessor(ASRProcessorInterface):
         while self.running:
             if audio_source:
                 data = audio_source.get_audio_chunk()
-                if (
-                    data
-                    and isinstance(data, dict)
-                    and "audio" in data
-                ):
+                if data and isinstance(data, dict) and "audio" in data:
                     yield base64.b64decode(data["audio"])
             time.sleep(0.01)
 
@@ -160,10 +164,12 @@ class ASRProcessor(ASRProcessorInterface):
             data = audio_source.get_audio_chunk()
             if data and isinstance(data, dict) and "rate" in data:
                 if data["rate"] != self.args.asr_sample_rate_hz:
-                    logger.info(f"Updating sample rate from {self.args.asr_sample_rate_hz} to {data['rate']}")
+                    logger.info(
+                        f"Updating sample rate from {self.args.asr_sample_rate_hz} to {data['rate']}"
+                    )
                     self.args.asr_sample_rate_hz = data["rate"]
                     self._initialize_model()
-                if hasattr(audio_source, 'audio_queue'):
+                if hasattr(audio_source, "audio_queue"):
                     audio_source.audio_queue.put(data)
                 break
             time.sleep(0.01)
