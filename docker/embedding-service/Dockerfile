@@ -1,0 +1,16 @@
+FROM nvcr.io/nvidia/pytorch:25.10-py3
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    fastapi \
+    uvicorn[standard] \
+    sentence-transformers
+
+RUN python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/e5-small-v2')"
+
+COPY embedding_server.py .
+
+EXPOSE 8100
+
+CMD ["uvicorn", "embedding_server:app", "--host", "0.0.0.0", "--port", "8100"]

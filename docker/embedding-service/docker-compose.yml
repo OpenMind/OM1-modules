@@ -1,0 +1,15 @@
+services:
+  embedding:
+    build: .
+    container_name: embedding-service
+    ports:
+      - "8100:8100"
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
