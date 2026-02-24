@@ -88,3 +88,23 @@ services:
 
     security_opt:
       - label:disable
+
+  embedding:
+    build:
+      context: .
+      dockerfile: Dockerfile.embed
+    container_name: embedding-service
+    runtime: nvidia
+
+    ports:
+      - "8100:8100"
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    restart: unless-stopped
