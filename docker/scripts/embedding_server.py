@@ -31,9 +31,7 @@ app = FastAPI(title="Embedding Service")
 model = None
 
 
-# ── Request/Response Models ──
-
-
+# Request/Response Models
 class QueryRequest(BaseModel):
     """
     Request body for single query embedding.
@@ -102,9 +100,6 @@ class BatchResponse(BaseModel):
     latency_ms: float
 
 
-# ── Startup ──
-
-
 @app.on_event("startup")
 def load_model():
     """
@@ -120,9 +115,6 @@ def load_model():
     for _ in range(5):
         model.encode(["warmup"], normalize_embeddings=True)
     logger.info("Model ready!")
-
-
-# ── Endpoints ──
 
 
 @app.post("/embed", response_model=FastResponse)
