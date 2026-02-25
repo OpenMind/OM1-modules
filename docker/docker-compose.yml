@@ -90,21 +90,9 @@ services:
       - label:disable
 
   embedding:
-    build:
-      context: .
-      dockerfile: Dockerfile.embed
-    container_name: embedding-service
-    runtime: nvidia
-
-    ports:
-      - "8100:8100"
-
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
-    restart: unless-stopped
+      image: openmindagi/embedding-service:e5-small-v2-aarch64
+      container_name: embedding_service
+      ports:
+        - "8100:8100"
+      runtime: nvidia
+      restart: unless-stopped
