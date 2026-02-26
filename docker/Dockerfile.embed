@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir \
 # Pre-download model at build time
 RUN python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/e5-small-v2')"
 
-COPY scripts/embedding_server.py .
+COPY src/embedding/embedding_server.py .
 
 EXPOSE 8100
 
