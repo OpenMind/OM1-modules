@@ -70,7 +70,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v4
         with:
-          images: openmindagi/embedding-service
+          images: openmindagi/embedding_service
           tags: |
             type=semver,pattern={{version}},prefix=v
             type=semver,pattern={{major}}.{{minor}},prefix=v
@@ -86,7 +86,7 @@ jobs:
           file: ./docker/Dockerfile.embed
           platforms: linux/arm64
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=openmindagi/embedding-service,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=openmindagi/embedding_service,push-by-digest=true,name-canonical=true,push=true
 
   create-riva-manifest:
     runs-on: ubuntu-latest
@@ -133,5 +133,5 @@ jobs:
             echo "Creating manifest for: $tag"
             docker buildx imagetools create \
               --tag $tag \
-              openmindagi/embedding-service@${{ needs.build-embedding-arm64.outputs.image-digest }}
+              openmindagi/embedding_service@${{ needs.build-embedding-arm64.outputs.image-digest }}
           done

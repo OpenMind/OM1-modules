@@ -90,7 +90,7 @@ services:
       - label:disable
 
   embedding:
-      image: openmindagi/embedding-service:e5-small-v2-aarch64
+      image: openmindagi/embedding_service:e5-small-v2-aarch64
       container_name: embedding_service
       ports:
         - "8100:8100"
