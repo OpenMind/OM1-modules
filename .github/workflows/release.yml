@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-arm64:
+  build-riva-arm64:
     runs-on: ubuntu-22.04-arm
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
@@ -88,7 +88,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=openmindagi/embedding-service,push-by-digest=true,name-canonical=true,push=true
 
-  create-manifest:
+  create-riva-manifest:
     runs-on: ubuntu-latest
     needs: [build-arm64]
     steps:
