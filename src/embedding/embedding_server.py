@@ -16,7 +16,7 @@ import base64
 import logging
 import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
@@ -135,6 +135,12 @@ def embed(req: QueryRequest):
     FastResponse
         Base64-encoded embedding with dimension and latency info.
     """
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Model not loaded. Service not initialized properly.",
+        )
+
     start = time.perf_counter()
     emb = model.encode([f"query: {req.query}"], normalize_embeddings=True).astype(
         "float32"
@@ -166,6 +172,12 @@ def embed_batch(req: BatchRequest):
     BatchResponse
         List of base64-encoded embeddings with count and latency info.
     """
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Model not loaded. Service not initialized properly.",
+        )
+
     start = time.perf_counter()
     prefixed = [f"query: {q}" for q in req.queries]
     embs = model.encode(prefixed, normalize_embeddings=True, batch_size=64).astype(
