@@ -88,3 +88,11 @@ services:
 
     security_opt:
       - label:disable
+
+  embedding:
+      image: openmindagi/embedding-service:e5-small-v2-aarch64
+      container_name: embedding_service
+      ports:
+        - "8100:8100"
+      runtime: nvidia
+      restart: unless-stopped
