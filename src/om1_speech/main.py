@@ -105,8 +105,8 @@ class Application:
         parser.add_argument(
             "--server-timeout",
             type=float,
-            default=500.0,
-            help="Connection timeout in seconds for server mode (default: 500s)",
+            default=300.0,
+            help="Connection timeout in seconds for server mode (default: 300s)",
         )
         parser.add_argument(
             "--remote-url",
