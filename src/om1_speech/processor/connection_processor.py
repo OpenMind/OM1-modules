@@ -29,6 +29,9 @@ class ConnectionProcessor:
         The class to use for creating ASR processor instances
     audio_stream_input_class : type
         The class to use for creating audio stream input instances
+    connection_timeout : Optional[float], optional
+        Maximum connection duration in seconds. If specified, connections will be
+        automatically closed after this duration. Default is None (no timeout).
     """
 
     def __init__(
@@ -36,13 +39,16 @@ class ConnectionProcessor:
         arg: argparse.Namespace,
         asr_processor_class: type,
         audio_stream_input_class: type,
+        connection_timeout: Optional[float] = None,
     ):
         self.args = arg
         self.asr_processor_class = asr_processor_class
         self.audio_stream_input_class = audio_stream_input_class
+        self.connection_timeout = connection_timeout
         self.asr_processors: Dict[str, ASRProcessorInterface] = {}
         self.audio_sources: Dict[str, AudioStreamInputInterface] = {}
         self.processing_threads: Dict[str, threading.Thread] = {}
+        self.timeout_timers: Dict[str, threading.Timer] = {}
         self.ws_server: Optional[ws.Server] = None
 
     def set_server(self, ws_server: ws.Server):
@@ -120,7 +126,38 @@ class ConnectionProcessor:
         self.processing_threads[connection_id] = processing_thread
         processing_thread.start()
 
-        logger.info(f"Started processing thread for connection {connection_id}")
+        if self.connection_timeout:
+            timeout_timer = threading.Timer(
+                self.connection_timeout,
+                self._timeout_connection,
+                args=(connection_id,),
+            )
+            self.timeout_timers[connection_id] = timeout_timer
+            timeout_timer.start()
+            logger.info(
+                f"Started processing thread for connection {connection_id} "
+                f"with {self.connection_timeout}s timeout"
+            )
+        else:
+            logger.info(f"Started processing thread for connection {connection_id}")
+
+    def _timeout_connection(self, connection_id: str):
+        """
+        Handle connection timeout.
+
+        This method is called when a connection exceeds its maximum allowed duration.
+        It logs the timeout event and closes the connection.
+
+        Parameters
+        ----------
+        connection_id : str
+            The unique identifier for the connection that timed out
+        """
+        logger.info(
+            f"Connection {connection_id} timed out after {self.connection_timeout}s"
+        )
+        if self.ws_server:
+            self.ws_server.close_connection(connection_id)
 
     def handle_connection_closed(self, connection_id: str):
         """
@@ -134,6 +171,10 @@ class ConnectionProcessor:
         connection_id : str
             The unique identifier for the closed connection
         """
+        if connection_id in self.timeout_timers:
+            self.timeout_timers[connection_id].cancel()
+            del self.timeout_timers[connection_id]
+
         if connection_id in self.asr_processors:
             self.asr_processors[connection_id].stop()
             del self.asr_processors[connection_id]
