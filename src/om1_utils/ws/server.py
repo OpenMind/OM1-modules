@@ -325,6 +325,41 @@ class Server:
         """
         return bool(self.connections)
 
+    async def _close_connection(self, connection_id: str):
+        """
+        Close a specific connection.
+
+        Parameters
+        ----------
+        connection_id : str
+            The ID of the connection to close
+        """
+        if connection_id in self.connections:
+            try:
+                await self.connections[connection_id].close()
+                logger.info(f"Connection {connection_id} closed by server")
+            except Exception as e:
+                logger.error(f"Error closing connection {connection_id}: {e}")
+
+    def close_connection(self, connection_id: str):
+        """
+        Close a specific connection.
+
+        This method schedules the connection to be closed asynchronously.
+
+        Parameters
+        ----------
+        connection_id : str
+            The ID of the connection to close
+        """
+        if connection_id in self.connections:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._close_connection(connection_id), asyncio.get_event_loop()
+                )
+            except Exception as e:
+                logger.error(f"Error scheduling connection close {connection_id}: {e}")
+
     def stop(self):
         """
         Stop the WebSocket server.
