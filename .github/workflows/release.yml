@@ -104,7 +104,7 @@ jobs:
       - name: Create manifest list and push
         run: |
           # Get the metadata from arm64 build to extract tags
-          tags=$(echo '${{ needs.build-arm64.outputs.metadata }}' | jq -r '.tags[]')
+          tags=$(echo '${{ needs.build-riva-arm64.outputs.metadata }}' | jq -r '.tags[]')
 
           # Create manifest for each tag
           for tag in $tags; do
@@ -112,7 +112,7 @@ jobs:
 
             docker buildx imagetools create \
               --tag $tag \
-              openmindagi/riva-speech-server@${{ needs.build-arm64.outputs.image-digest }}
+              openmindagi/riva-speech-server@${{ needs.build-riva-arm64.outputs.image-digest }}
           done
 
   create-embedding-manifest:
