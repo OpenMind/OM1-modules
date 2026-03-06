@@ -186,6 +186,7 @@ class AudioOutputLiveStream:
         and streams them through a persistent ffplay process.
         """
         while self.running:
+            tts_request = None
             try:
                 tts_request = self._pending_requests.get()
                 if tts_request is None:
