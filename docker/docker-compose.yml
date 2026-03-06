@@ -50,12 +50,8 @@ services:
     runtime: nvidia
 
     ports:
-      - "50051:50051"
-      - "50000:50000"
-      - "8000:8000"
-      - "8001:8001"
-      - "8002:8002"
-      - "8888:8888"
+      - "6790:6790"
+      - "6791:6791"
 
     environment:
       - RIVA_SERVER_HTTP_PORT=50000
@@ -65,6 +61,7 @@ services:
       - RIVA_API_KEY=${RIVA_API_KEY}
       - RIVA_API_NGC_ORG=${RIVA_API_NGC_ORG:-openmind-1}
       - RIVA_EULA=${RIVA_EULA:-accept}
+      - GLOG_minloglevel=2
 
     volumes:
       - ~/riva_quickstart_arm64_v2.24.0/model_repository:/data

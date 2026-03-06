@@ -102,6 +102,11 @@ class ASRProcessor(ASRProcessorInterface):
             self.args.stop_threshold,
             self.args.stop_threshold_eou,
         )
+        client.add_word_boosting_to_config(
+            self.model_config,
+            self.args.boosted_lm_words,
+            self.args.boosted_lm_score,
+        )
         client.add_custom_configuration_to_config(
             self.model_config, self.args.custom_configuration
         )
