@@ -101,6 +101,11 @@ class ConnectionProcessor:
                 if self.ws_server
                 else None
             ),
+            error_callback=lambda: (
+                self.ws_server.close_connection(connection_id)
+                if self.ws_server
+                else None
+            ),
         )
 
         self.asr_processors[connection_id] = asr_processor
