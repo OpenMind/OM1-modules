@@ -78,7 +78,16 @@ def add_asr_config_argparse_parameters(
     parser.add_argument(
         "--boosted-lm-words",
         action="append",
-        default=["OpenMind", "Bits", "hello", "GTC", "Unitree", "robot", "OM1", "NVIDIA"],
+        default=[
+            "OpenMind",
+            "Bits",
+            "hello",
+            "GTC",
+            "Unitree",
+            "robot",
+            "OM1",
+            "NVIDIA",
+        ],
         help="Words to boost when decoding. Can be used multiple times to boost multiple words.",
     )
     parser.add_argument(
