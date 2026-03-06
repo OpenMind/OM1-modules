@@ -122,6 +122,7 @@ class AudioOutputLiveStream:
             == AudioStatus.STATUS_SPEAKER.ACTIVE.value
         ):
             pending_message = json.loads(self.audio_status.sentence_to_speak.data)
+            pending_message["request_id"] = self.audio_status.header.frame_id
             self.add_request(pending_message)
 
     def _on_asr_text(self, data: zenoh.Sample):
@@ -190,6 +191,8 @@ class AudioOutputLiveStream:
                 if tts_request is None:
                     break
 
+                request_id = tts_request.get("request_id", "")
+
                 if not self._initialize_ffplay():
                     logger.error("Failed to initialize ffplay")
                     continue
@@ -197,7 +200,9 @@ class AudioOutputLiveStream:
                 self._stream_audio_chunk(self._create_silence_audio(10))
 
                 self._tts_callback(True)
-                self._update_audio_status(AudioStatus.STATUS_SPEAKER.ACTIVE.value)
+                self._update_audio_status(
+                    AudioStatus.STATUS_SPEAKER.ACTIVE.value, request_id
+                )
 
                 with self.openai_client.audio.speech.with_streaming_response.create(
                     model=self._tts_model,
@@ -214,12 +219,17 @@ class AudioOutputLiveStream:
                 self._finish_audio_playback()
 
                 self._tts_callback(False)
-                self._update_audio_status(AudioStatus.STATUS_SPEAKER.READY.value)
+                self._update_audio_status(
+                    AudioStatus.STATUS_SPEAKER.READY.value, request_id
+                )
 
             except Exception as e:
                 logger.error(f"Error processing audio: {e}")
                 self._tts_callback(False)
-                self._update_audio_status(AudioStatus.STATUS_SPEAKER.READY.value)
+                self._update_audio_status(
+                    AudioStatus.STATUS_SPEAKER.READY.value,
+                    tts_request.get("request_id", "") if tts_request else "",
+                )
                 continue
 
     def _initialize_ffplay(self) -> bool:
@@ -332,7 +342,7 @@ class AudioOutputLiveStream:
                     self._ffplay_proc = None
                     self._ffplay_initialized = False
 
-    def _update_audio_status(self, speaker_status: int):
+    def _update_audio_status(self, speaker_status: int, frame_id: str = ""):
         """
         Update and publish audio status via Zenoh.
 
@@ -340,9 +350,11 @@ class AudioOutputLiveStream:
         ----------
         speaker_status : int
             The speaker status to set
+        frame_id : str
+            The frame ID (request UUID) to include in the header
         """
         state = AudioStatus(
-            header=prepare_header(),
+            header=prepare_header(frame_id),
             status_mic=(
                 self.audio_status.status_mic
                 if self.audio_status
