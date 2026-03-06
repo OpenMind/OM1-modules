@@ -5,7 +5,7 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade pyaudio websockets numpy opencv-python requests protobuf google eclipse-zenoh pycdr2 av vulture openai
+RUN pip install pyaudio==0.2.14 websockets==16.0 numpy==1.26.4 opencv-python==4.11.0.86 requests==2.32.5 google==3.0.0 eclipse-zenoh==1.7.2 pycdr2==1.0.0 av==16.1.0 vulture==2.14 openai==2.24.0 protobuf==6.33.5
 RUN pip uninstall -y wandb && pip install wandb==0.18.7
 
 RUN mkdir /app
