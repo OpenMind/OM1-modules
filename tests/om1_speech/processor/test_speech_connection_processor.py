@@ -10,9 +10,10 @@ from om1_speech.processor import ConnectionProcessor
 
 
 class MockASRProcessor(ASRProcessorInterface):
-    def __init__(self, args, callback=None):
+    def __init__(self, args, callback=None, error_callback=None):
         self.args = args
         self.callback = callback
+        self.error_callback = error_callback
         self.stopped = False
 
     def on_audio(self, audio: bytes) -> bytes:
