@@ -42,7 +42,11 @@ services:
     restart: unless-stopped
 
   riva_speech:
-    image: openmindagi/riva-speech-server:2.24.0-l4t-aarch64
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.riva
+      network: host
+    image: om1/riva-speech-server:2.17.0-l4t-aarch64
     container_name: riva_speech
     restart: unless-stopped
 
@@ -52,6 +56,9 @@ services:
     ports:
       - "6790:6790"
       - "6791:6791"
+      # Optional: expose Riva directly on the host too.
+      - "15051:50051"
+      - "15000:50000"
 
     environment:
       - RIVA_SERVER_HTTP_PORT=50000
@@ -64,7 +71,7 @@ services:
       - GLOG_minloglevel=2
 
     volumes:
-      - ~/riva_quickstart_arm64_v2.24.0/model_repository:/data
+      - ${HOME}/riva_quickstart_arm64_v2.17.0/model_repository:/data
 
     devices:
       - /dev/bus/usb:/dev/bus/usb:rwm
