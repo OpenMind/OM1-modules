@@ -2,15 +2,14 @@ import argparse
 import logging
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 
-from om1_utils import http, ws
+from om1_utils import http
 
-# Audio input from microphone
-from .audio import AudioInputStream
-
-# Multithreading
-from .processor import ConnectionProcessor
+try:
+    from om1_utils import ws  # type: ignore
+except ModuleNotFoundError:
+    ws = None  # type: ignore
 
 # Riva ASR and TTS
 from .riva import (
@@ -50,12 +49,13 @@ class Application:
 
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        self.ws_server: Optional[ws.Server] = None
+        # `ws` can be unavailable in minimal environments; keep this loosely typed.
+        self.ws_server: Optional[Any] = None
         self.http_server: Optional[http.Server] = None
-        self.connection_processor: Optional[ConnectionProcessor] = None
+        self.connection_processor: Optional[Any] = None
         self.asr_processor: Optional[ASRProcessor] = None
         self.audio_source: Optional[AudioDeviceInput] = None
-        self.audio_input_streamer: Optional[AudioInputStream] = None
+        self.audio_input_streamer: Optional[Any] = None
         self.tts_processor: Optional[TTSProcessor] = None
         self.running: bool = False
 
@@ -89,11 +89,11 @@ class Application:
         """
         parser = argparse.ArgumentParser()
         parser.add_argument(
-            "--ws-host", type=str, default="localhost", help="WebSocket server host"
+            "--ws-host", default="localhost", help="WebSocket server host"
         )
         parser.add_argument("--ws-port", type=int, help="WebSocket server port")
         parser.add_argument(
-            "--http-host", type=str, default="localhost", help="HTTP server host"
+            "--http-host", default="localhost", help="HTTP server host"
         )
         parser.add_argument("--http-port", type=int, help="HTTP server port")
         parser.add_argument(
@@ -109,13 +109,23 @@ class Application:
             help="Connection timeout in seconds for server mode (default: 300s)",
         )
         parser.add_argument(
+            "--disable-ws",
+            default=False,
+            action="store_true",
+            help="Disable WebSocket server (logs ASR results locally only).",
+        )
+        parser.add_argument(
+            "--disable-tts",
+            default=False,
+            action="store_true",
+            help="Disable TTS + HTTP server startup.",
+        )
+        parser.add_argument(
             "--remote-url",
-            type=str,
             help="Remote webSocket URL server for audio stream input",
         )
         parser.add_argument(
             "--log-level",
-            type=str,
             default="INFO",
             choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
             help="Set the logging level",
@@ -138,13 +148,31 @@ class Application:
         Initializes the WebSocket client and audio input streamer for
         sending audio data to a remote server.
         """
-        self.ws_client = ws.Client(url=self.args.remote_url)
+        if ws is None:
+            raise RuntimeError(
+                "WebSocket support is unavailable (missing 'websockets' dependency). "
+                "Run without --remote-url, or install the websockets dependency in this environment."
+            )
+
+        # AudioInputStream requires optional dependencies (e.g., zenoh). Import it
+        # only when this mode is used so other modes (local mic ASR) keep working.
+        try:
+            from .audio import AudioInputStream
+        except ModuleNotFoundError as e:
+            raise RuntimeError(
+                "Audio streaming mode requires optional dependencies that are not installed "
+                f"in this environment: {e}"
+            ) from e
+
+        # ws is guaranteed not-None here.
+        self.ws_client = ws.Client(url=self.args.remote_url)  # type: ignore[union-attr]
         self.ws_client.start()
 
         self.audio_input_streamer = AudioInputStream(
             audio_data_callback=self.ws_client.send_message
         )
-        self.audio_input_streamer.start()
+        if self.audio_input_streamer:
+            self.audio_input_streamer.start()
 
     def setup_asr_processing(self):
         """
@@ -153,18 +181,36 @@ class Application:
         Configures either multi-connection server mode or single connection mode
         with default audio input. Initializes ASR processor and WebSocket server.
         """
-        self.ws_server = ws.Server(host=self.args.ws_host, port=self.args.ws_port)
+        ws_enabled = (not self.args.disable_ws) and (ws is not None)
+
+        if self.args.server_mode and not ws_enabled:
+            raise RuntimeError(
+                "--server-mode requires WebSocket support. Either remove --server-mode "
+                "(local mic ASR only) or run in an environment with the 'websockets' dependency."
+            )
+
+        if ws_enabled:
+            self.ws_server = ws.Server(  # type: ignore[union-attr]
+                host=self.args.ws_host, port=self.args.ws_port
+            )
+        else:
+            self.ws_server = None
 
         # Create thread processor
         if self.args.server_mode:
+            # Import only when needed: server-mode requires websockets.
+            from .processor import ConnectionProcessor
+
             self.connection_processor = ConnectionProcessor(
                 self.args, ASRProcessor, AudioStreamInput, self.args.server_timeout
             )
-            self.connection_processor.set_server(self.ws_server)
+            # ws_server exists here because server_mode requires ws_enabled.
+            self.connection_processor.set_server(self.ws_server)  # type: ignore[arg-type]
         else:
             # Use the default audio input
             self.asr_processor = ASRProcessor(
-                self.args, self.ws_server.handle_global_response
+                self.args,
+                self.ws_server.handle_global_response if self.ws_server else None,
             )
             self.audio_source = AudioDeviceInput()
             self.audio_source.setup_audio_devices()
@@ -176,7 +222,8 @@ class Application:
             )
             asr_thread.start()
 
-        self.ws_server.start()
+        if self.ws_server:
+            self.ws_server.start()
 
     def setup_tts_processing(self):
         """
@@ -216,8 +263,9 @@ class Application:
             # hardcode the model to Riva
             logger.info("Starting ARS processing with model: Riva")
             self.setup_asr_processing()
-            logger.info("Started TTS processing with model: Riva")
-            self.setup_tts_processing()
+            if not self.args.disable_tts:
+                logger.info("Started TTS processing with model: Riva")
+                self.setup_tts_processing()
 
         self.running = True
 

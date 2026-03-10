@@ -81,8 +81,9 @@ class ASRProcessor(ASRProcessorInterface):
             )
             return
 
+        metadata = self.args.metadata if getattr(self.args, "metadata", None) else {}
         auth = client.Auth(
-            self.args.ssl_cert, self.args.use_ssl, self.args.server, self.args.metadata
+            self.args.ssl_cert, self.args.use_ssl, self.args.server, metadata
         )
         self.model = client.ASRService(auth)
         self.model_config = client.StreamingRecognitionConfig(

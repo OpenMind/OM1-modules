@@ -5,8 +5,8 @@ from typing import Any, Dict, Optional
 
 # riva is only available on Jetson devices
 try:
-    from riva import client
-    from riva.client import SpeechSynthesisService
+    import riva.client as client  # pyright: ignore[reportMissingImports]
+    from riva.client import SpeechSynthesisService  # pyright: ignore[reportMissingImports]
 except ModuleNotFoundError:
     client = None
 
@@ -60,8 +60,9 @@ class TTSProcessor:
             )
             return
 
+        metadata = self.args.metadata if getattr(self.args, "metadata", None) else {}
         auth = client.Auth(
-            self.args.ssl_cert, self.args.use_ssl, self.args.server, self.args.metadata
+            self.args.ssl_cert, self.args.use_ssl, self.args.server, metadata
         )
         self.model = client.SpeechSynthesisService(auth)
 

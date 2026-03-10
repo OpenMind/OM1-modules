@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   qwen30b_quantized:
     image: nvcr.io/nvidia/vllm:25.09-py3
@@ -42,16 +40,20 @@ services:
     restart: unless-stopped
 
   riva_speech:
-    image: openmindagi/riva-speech-server:2.24.0-l4t-aarch64
+    image: nvcr.io/nvidia/riva/riva-speech:2.17.0-l4t-aarch64
     container_name: riva_speech
     restart: unless-stopped
+
+    pull_policy: never
+
+    command: ["/bin/bash", "/opt/om1/start_riva.sh"]
 
     ipc: host
     runtime: nvidia
 
     ports:
-      - "6790:6790"
-      - "6791:6791"
+      - "15051:50051"
+      - "15000:50000"
 
     environment:
       - RIVA_SERVER_HTTP_PORT=50000
@@ -61,22 +63,21 @@ services:
       - RIVA_API_KEY=${RIVA_API_KEY}
       - RIVA_API_NGC_ORG=${RIVA_API_NGC_ORG:-openmind-1}
       - RIVA_EULA=${RIVA_EULA:-accept}
-      - GLOG_minloglevel=2
+      # Set to 0 if you want request-level ASR/TTS logs from Riva.
+      - GLOG_minloglevel=0
+      # Start om1_speech (mic -> ASR logs + TTS HTTP) inside this container.
+      - START_OM1_SPEECH=1
+      # Keep startup clean on minimal images; ASR still runs (mic -> text logs).
+      - OM1_SPEECH_ARGS=--disable-tts
 
     volumes:
-      - ~/riva_quickstart_arm64_v2.24.0/model_repository:/data
+      - ${HOME}/riva_quickstart_arm64_v2.17.0/model_repository/models:/data/models
+      - ./scripts/start_riva_nocurl.sh:/opt/om1/start_riva.sh:ro
+      - ../src:/opt/om1/src:ro
 
     devices:
       - /dev/bus/usb:/dev/bus/usb:rwm
       - /dev/snd:/dev/snd:rwm
-
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ['0']
-              capabilities: [gpu]
 
     shm_size: "16g"
     ulimits:
