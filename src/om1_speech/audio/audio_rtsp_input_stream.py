@@ -170,6 +170,8 @@ class AudioRTSPInputStream:
 
         # Flag to indicate if TTS is active
         self._is_tts_active: bool = False
+        self._tts_active_since: float = 0.0
+        self._tts_active_timeout: float = 30.0
 
         # Flag to enable TTS interrupt
         self._enable_tts_interrupt = enable_tts_interrupt
@@ -242,6 +244,7 @@ class AudioRTSPInputStream:
                         self.pub.put(state.serialize())
 
                     self._is_tts_active = True
+                    self._tts_active_since = time.monotonic()
 
         if self.audio_status.status_speaker == AudioStatus.STATUS_SPEAKER.READY.value:
             with self._lock:
@@ -272,7 +275,30 @@ class AudioRTSPInputStream:
         """
         with self._lock:
             self._is_tts_active = is_active
+            if is_active:
+                self._tts_active_since = time.monotonic()
             logger.info(f"TTS active state changed to: {is_active}")
+
+    def _check_tts_timeout(self) -> bool:
+        """
+        Check if _is_tts_active has been True for too long and auto-reset.
+
+        Returns True if timeout was triggered (mic was unmuted).
+        Must be called while holding self._lock.
+        """
+        if (
+            self._is_tts_active
+            and self._tts_active_since > 0
+            and (time.monotonic() - self._tts_active_since) > self._tts_active_timeout
+        ):
+            self._is_tts_active = False
+            self._tts_active_since = 0.0
+            logger.warning(
+                f"TTS active safety timeout ({self._tts_active_timeout}s) triggered. "
+                "Auto-unmuting mic. A Zenoh READY message may have been lost."
+            )
+            return True
+        return False
 
     def register_audio_data_callback(self, audio_callback: Optional[Callable]):
         """
@@ -378,6 +404,7 @@ class AudioRTSPInputStream:
             The captured audio data from RTSP stream
         """
         with self._lock:
+            self._check_tts_timeout()
             if not self._is_tts_active:
                 self._buff.put(in_data)
 
@@ -404,6 +431,7 @@ class AudioRTSPInputStream:
         language_code = audio_data.get("language_code", self._language_code)
 
         with self._lock:
+            self._check_tts_timeout()
             if not self._is_tts_active:
                 self._buff.put(in_data)
                 self._rate = rate
@@ -428,6 +456,7 @@ class AudioRTSPInputStream:
                 return
 
             with self._lock:
+                self._check_tts_timeout()
                 if self._is_tts_active:
                     continue
 
