@@ -61,6 +61,7 @@ services:
       - RIVA_API_KEY=${RIVA_API_KEY}
       - RIVA_API_NGC_ORG=${RIVA_API_NGC_ORG:-openmind-1}
       - RIVA_EULA=${RIVA_EULA:-accept}
+      - BOOSTED_LM_WORDS=${BOOSTED_LM_WORDS:-Tensor}
       - GLOG_minloglevel=2
 
     volumes:

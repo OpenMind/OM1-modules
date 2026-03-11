@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import argparse
+import os
 from pathlib import Path
 
 
@@ -75,20 +76,34 @@ def add_asr_config_argparse_parameters(
         help="Language code of the model to be used.",
     )
     parser.add_argument("--model-name", default="", help="Model name to be used.")
+
+    default_boosted_words = [
+        "OpenMind",
+        "Bits",
+        "Bytes",
+        "Pixel",
+        "hello",
+        "GTC",
+        "Unitree",
+        "robot",
+        "NVIDIA",
+    ]
+
+    env_boosted_words = os.getenv("BOOSTED_LM_WORDS", "")
+    if env_boosted_words:
+        additional_words = [
+            word.strip() for word in env_boosted_words.split(",") if word.strip()
+        ]
+        unique_words = [
+            word for word in additional_words if word not in default_boosted_words
+        ]
+        default_boosted_words.extend(unique_words)
+
     parser.add_argument(
         "--boosted-lm-words",
         action="append",
-        default=[
-            "OpenMind",
-            "Bits",
-            "hello",
-            "GTC",
-            "Unitree",
-            "robot",
-            "OM1",
-            "NVIDIA",
-        ],
-        help="Words to boost when decoding. Can be used multiple times to boost multiple words.",
+        default=default_boosted_words,
+        help="Words to boost when decoding. Can be used multiple times to boost multiple words. Can also be set via BOOSTED_LM_WORDS environment variable (comma-separated).",
     )
     parser.add_argument(
         "--boosted-lm-score",
