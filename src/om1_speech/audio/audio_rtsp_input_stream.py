@@ -136,6 +136,8 @@ class AudioRTSPInputStream:
         A callback function that receives audio data chunks (default: None)
     language_code: str, optional
         The language for the ASR to listen. (default: en-US)
+    alternative_language_codes: List[str], optional
+        A list of alternative language codes for the ASR to consider (default: None)
     rtsp_url : str, optional
         The RTSP URL of the audio stream. If None, uses device or device_name to determine the URL.
         (default: "rtsp://localhost:8554/audio")
@@ -149,6 +151,7 @@ class AudioRTSPInputStream:
         audio_data_callback: Optional[Callable] = None,
         audio_data_callbacks: Optional[List[Callable]] = None,
         language_code: Optional[str] = None,
+        alternative_language_codes: Optional[List[str]] = None,
         enable_tts_interrupt: bool = False,
     ):
         self._rate = rate
@@ -163,6 +166,9 @@ class AudioRTSPInputStream:
         else:
             self._language_code = language_code
             logger.info(f"Using specified language code: {self._language_code}")
+
+        # Alternative language codes
+        self._alternative_language_codes = alternative_language_codes or []
 
         # Callback for audio data
         self._audio_data_callbacks = audio_data_callbacks or []
@@ -447,6 +453,7 @@ class AudioRTSPInputStream:
                 "audio": base64.b64encode(b"".join(data)).decode("utf-8"),
                 "rate": self._rate,
                 "language_code": self._language_code,
+                "alternative_language_codes": self._alternative_language_codes,
             }
             for audio_callback in self._audio_data_callbacks:
                 audio_callback(json.dumps(response))
