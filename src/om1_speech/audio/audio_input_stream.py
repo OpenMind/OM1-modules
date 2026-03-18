@@ -45,6 +45,8 @@ class AudioInputStream:
         A callback function that receives audio data chunks (default: None)
     language_code: str, optional
         The language for the ASR to listen. (default: en-US)
+    alternative_language_codes: List[str], optional
+        A list of alternative language codes for the ASR to consider (default: None)
     remote_input : bool, optional
         If True, indicates that the audio input is from a remote source.
     """
@@ -58,6 +60,7 @@ class AudioInputStream:
         audio_data_callback: Optional[Callable] = None,
         audio_data_callbacks: Optional[List[Callable]] = None,
         language_code: Optional[str] = None,
+        alternative_language_codes: Optional[List[str]] = None,
         remote_input: bool = False,
         enable_tts_interrupt: bool = False,
     ):
@@ -73,6 +76,9 @@ class AudioInputStream:
         else:
             self._language_code = language_code
             logger.info(f"Using specified language code: {self._language_code}")
+
+        # Alternative language codes
+        self._alternative_language_codes = alternative_language_codes or []
 
         # Callback for audio data
         self._audio_data_callbacks = audio_data_callbacks or []
@@ -430,6 +436,7 @@ class AudioInputStream:
                 "audio": base64.b64encode(b"".join(data)).decode("utf-8"),
                 "rate": self._rate,
                 "language_code": self._language_code,
+                "alternative_language_codes": self._alternative_language_codes,
             }
             for audio_callback in self._audio_data_callbacks:
                 audio_callback(json.dumps(response))
