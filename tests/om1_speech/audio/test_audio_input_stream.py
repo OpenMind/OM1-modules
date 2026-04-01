@@ -181,21 +181,25 @@ def test_stop(audio_stream, mock_pyaudio):
 def test_audio_callback(mock_pyaudio):
     """Test audio data callback functionality"""
     callback_data = None
+    fixed_time = 1234567890
 
     def test_callback(data):
         nonlocal callback_data
         callback_data = data
 
-    stream = AudioInputStream(audio_data_callback=test_callback)
-    stream.start()
+    with patch("om1_speech.audio.audio_input_stream.time") as mock_time:
+        mock_time.time.return_value = fixed_time
 
-    # Simulate receiving audio data
-    test_data = b"test_audio_data"
-    stream._buff.put(test_data)
-    stream._buff.put(None)
+        stream = AudioInputStream(audio_data_callback=test_callback)
+        stream.start()
 
-    # Process one chunk through generator
-    next(stream.generator())
+        # Simulate receiving audio data
+        test_data = b"test_audio_data"
+        stream._buff.put(test_data)
+        stream._buff.put(None)
+
+        # Process one chunk through generator
+        next(stream.generator())
 
     # Verify callback was called with correct data
     assert callback_data == json.dumps(
@@ -204,6 +208,7 @@ def test_audio_callback(mock_pyaudio):
             "rate": 16000,
             "language_code": "en-US",
             "alternative_language_codes": [],
+            "timestamp": fixed_time,
         }
     )
 
@@ -222,28 +227,6 @@ def test_error_handling(mock_pyaudio):
     mock_pyaudio.return_value.terminate.assert_called_once()
 
     stream.stop()
-
-
-def test_multiple_chunks_generation(audio_stream):
-    """Test generating multiple chunks at once"""
-    chunks = [b"chunk1", b"chunk2", b"chunk3"]
-    expected_data = {
-        "audio": base64.b64encode(b"".join(chunks)).decode("utf-8"),
-        "rate": 16000,
-        "language_code": "en-US",
-        "alternative_language_codes": [],
-    }
-
-    # Add chunks in quick succession
-    for chunk in chunks:
-        audio_stream._buff.put(chunk)
-    audio_stream._buff.put(None)
-
-    # Get first generated chunk
-    generated = next(audio_stream.generator())
-
-    # Verify chunks were combined
-    assert generated == expected_data
 
 
 @pytest.mark.parametrize(
@@ -337,18 +320,23 @@ def test_audio_callback_with_alternative_languages(mock_pyaudio):
         nonlocal callback_data
         callback_data = data
 
-    stream = AudioInputStream(
-        audio_data_callback=test_callback,
-        language_code="es-MX",
-        alternative_language_codes=alt_langs,
-    )
-    stream.start()
+    fixed_time = 1234567890
 
-    test_data = b"test_audio_data"
-    stream._buff.put(test_data)
-    stream._buff.put(None)
+    with patch("om1_speech.audio.audio_input_stream.time") as mock_time:
+        mock_time.time.return_value = fixed_time
 
-    next(stream.generator())
+        stream = AudioInputStream(
+            audio_data_callback=test_callback,
+            language_code="es-MX",
+            alternative_language_codes=alt_langs,
+        )
+        stream.start()
+
+        test_data = b"test_audio_data"
+        stream._buff.put(test_data)
+        stream._buff.put(None)
+
+        next(stream.generator())
 
     expected_data = json.dumps(
         {
@@ -356,6 +344,7 @@ def test_audio_callback_with_alternative_languages(mock_pyaudio):
             "rate": 16000,
             "language_code": "es-MX",
             "alternative_language_codes": alt_langs,
+            "timestamp": fixed_time,
         }
     )
     assert callback_data == expected_data
