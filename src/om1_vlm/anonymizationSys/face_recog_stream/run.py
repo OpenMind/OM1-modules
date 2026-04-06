@@ -180,6 +180,22 @@ class _FrameState:
         self.kpss: Optional[np.ndarray] = None
 
 
+def get_platform_prefix() -> str:
+    """
+    Detect Jetson platform and return appropriate engine prefix.
+
+    Returns
+    -------
+    str
+        Platform prefix for engine filenames (e.g., "agx", "thor").
+    """
+    platform_prefix = os.environ.get("JETSON_PLATFORM", "").lower()
+    if platform_prefix in ["agx", "thor"]:
+        return platform_prefix
+
+    return "thor"
+
+
 # --------------------------------- Main ----------------------------------- #
 def main() -> None:
     """Entry point: wire up models, gallery, HTTP, streaming, and run the loop.
@@ -214,8 +230,10 @@ def main() -> None:
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     models_dir = os.path.join(script_dir, "..", "models")
-    scrfd_name = "om1-modules_scrfd_2.5g_bnkps_shape640x640.engine"
-    arc_name = "om1-modules_buffalo_m_w600k_r50.engine"
+
+    platform_prefix = get_platform_prefix()
+    scrfd_name = f"{platform_prefix}_scrfd_2.5g_bnkps_shape640x640.engine"
+    arc_name = f"{platform_prefix}_buffalo_m_w600k_r50.engine"
     pose_name = "yolo11s-pose.engine"
 
     default_scrfd_engine = os.path.join(models_dir, scrfd_name)
