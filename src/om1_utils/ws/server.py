@@ -54,6 +54,7 @@ class Server:
         self.connection_callback: Optional[Callable] = None
         self.message_callbacks: Dict[str, Optional[Callable]] = {}
         self.enable_health_check = enable_health_check
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Initialize health check server
         self.health_check: Optional[HealthCheckServer] = None
@@ -271,9 +272,9 @@ class Server:
         """
         Internal method to run the server in a separate thread.
         """
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(self.start_server())
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self.start_server())
 
     def start(self):
         """
@@ -324,6 +325,41 @@ class Server:
             True if there are active connections, False otherwise
         """
         return bool(self.connections)
+
+    async def _close_connection(self, connection_id: str):
+        """
+        Close a specific connection.
+
+        Parameters
+        ----------
+        connection_id : str
+            The ID of the connection to close
+        """
+        if connection_id in self.connections:
+            try:
+                await self.connections[connection_id].close()
+                logger.info(f"Connection {connection_id} closed by server")
+            except Exception as e:
+                logger.error(f"Error closing connection {connection_id}: {e}")
+
+    def close_connection(self, connection_id: str):
+        """
+        Close a specific connection.
+
+        This method schedules the connection to be closed asynchronously.
+
+        Parameters
+        ----------
+        connection_id : str
+            The ID of the connection to close
+        """
+        if connection_id in self.connections and self.loop is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._close_connection(connection_id), self.loop
+                )
+            except Exception as e:
+                logger.error(f"Error scheduling connection close {connection_id}: {e}")
 
     def stop(self):
         """
