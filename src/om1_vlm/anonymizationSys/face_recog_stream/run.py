@@ -144,7 +144,7 @@ from .yolo_pose import TRTYOLOPose
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------- Small shared states -------------------------- #
+# Small shared states
 class _GalState:
     """Mutable in-memory gallery state shared with the main loop and HTTP.
 
@@ -583,9 +583,7 @@ def main() -> None:
         "blur": bool(args.blur),
         "blur_mode": str(args.blur_mode),
         "sim_thr": float(args.sim_thr),
-        "recog_topk": int(args.recog_topk),
         "crowd_thr": int(args.crowd_thr),
-        "perf_mode": bool(args.perf_mode),
         "show_fps": bool(args.show_fps),
         "conf": float(args.conf),
         "nms": float(args.nms),

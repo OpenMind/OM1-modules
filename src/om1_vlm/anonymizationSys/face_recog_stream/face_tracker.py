@@ -377,7 +377,7 @@ class FaceTracker:
 
         return result
 
-    # ---------- Recognition ----------
+    # Recognition
 
     def _run_recognition_batch(
         self,

@@ -53,6 +53,7 @@ SKELETON = [
 
 
 def nms_boxes(boxes: np.ndarray, scores: np.ndarray, iou_thr: float) -> List[int]:
+    """Apply non-maximum suppression on bounding boxes."""
     if len(boxes) == 0:
         return []
     x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
@@ -177,6 +178,7 @@ class TRTYOLOPose(TRTModule):
         conf: Optional[float] = None,
         max_num: int = 0,
     ) -> Tuple[np.ndarray, np.ndarray]:
+        """Detect poses and return bounding boxes with keypoints."""
         if conf is not None:
             self.conf_thresh = float(conf)
 

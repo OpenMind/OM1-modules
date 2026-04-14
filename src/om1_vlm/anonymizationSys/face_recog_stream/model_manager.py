@@ -44,7 +44,7 @@ import tensorrt as trt
 
 logger = logging.getLogger(__name__)
 
-# ──────────────────────────── Model Registry ──────────────────────────── #
+# Model Registry
 # Each entry describes how to compile one ONNX → engine.
 #
 #   onnx_name    : filename looked up in model_dir
@@ -88,7 +88,7 @@ MODEL_REGISTRY: Dict[str, dict] = {
 }
 
 
-# ──────────────────────────── ModelManager ──────────────────────────── #
+# ModelManager
 class ModelManager:
     """
     Manages TensorRT engine lifecycle for the face-recognition pipeline.
@@ -136,9 +136,7 @@ class ModelManager:
         # Locate trtexec
         self.trtexec_path = self._find_trtexec(trtexec_path)
 
-    # ------------------------------------------------------------------ #
-    #  Public API                                                         #
-    # ------------------------------------------------------------------ #
+    #  Public API
 
     def ensure_engine(self, model_key: str) -> Path:
         """Return path to a ready-to-use engine, compiling if necessary.
@@ -216,9 +214,7 @@ class ModelManager:
             print(f"{key:<20} {cfg['engine_name']:<40} {status}")
         print()
 
-    # ------------------------------------------------------------------ #
-    #  Internal helpers                                                   #
-    # ------------------------------------------------------------------ #
+    #  Internal helpers
 
     @staticmethod
     def _find_trtexec(explicit_path: Optional[str]) -> Path:
@@ -356,7 +352,7 @@ class ModelManager:
         logger.info("✓ Engine ready: %s (%.1f MB)", engine_path.name, size_mb)
 
 
-# ──────────────────────────── CLI ──────────────────────────── #
+# CLI
 def main() -> None:
     """CLI entry point for model management."""
     import argparse

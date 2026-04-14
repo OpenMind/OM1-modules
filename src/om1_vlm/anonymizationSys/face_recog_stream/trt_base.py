@@ -27,10 +27,12 @@ class GpuBuffer:
         self._tensor = torch.empty(nbytes, dtype=torch.uint8, device="cuda")
 
     def __int__(self) -> int:
+        """Return raw device pointer for TensorRT."""
         return self._tensor.data_ptr()
 
     @property
     def ptr(self) -> int:
+        """Return raw device pointer."""
         return self._tensor.data_ptr()
 
     def htod(self, host_np: np.ndarray, stream: torch.cuda.Stream) -> None:
