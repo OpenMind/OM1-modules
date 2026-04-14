@@ -16,7 +16,6 @@ om1_tts = "om1_speech.audio.audio_output_stream:main"
 om_face_recog_stream = "om1_vlm.anonymizationSys.face_recog_stream.run:main"
 
 [tool.poetry.dependencies]
-pycuda = { version = "2024.1.2", optional = true }
 python = ">=3.9,<4.0"
 pyaudio = "^0.2.13"
 numpy = ">2.0.0"
@@ -29,7 +28,7 @@ pyrealsense2 = {version = "2.55.1.6486", markers = "sys_platform == 'win32'", op
 pyrealsense2-macosx = {version = "^2.54.2", markers = "sys_platform == 'darwin'", optional = true}
 eclipse-zenoh = "^1.4.0"
 pycdr2 = "^1.0.0"
-torch = { url = "https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl", optional = true }
+torch = { version = ">=2.5.0", optional = true }
 av = "^15.1.0"
 vulture = "^2.14"
 openai= "1.60.1"
@@ -37,8 +36,7 @@ openai= "1.60.1"
 
 [tool.poetry.extras]
 realsense = ["pyrealsense2", "pyrealsense2-macosx"]
-jetson61 = ["torch"]
-gpu = ["pycuda"]
+jetson = ["torch"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.0"

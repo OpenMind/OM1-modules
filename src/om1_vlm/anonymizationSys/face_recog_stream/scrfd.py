@@ -4,14 +4,15 @@ from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
-import pycuda.driver as cuda
 import tensorrt as trt
+import torch
 
 from .trt_base import TRTModule
 
 
 def distance2bbox(points: np.ndarray, distance: np.ndarray) -> np.ndarray:
-    """Decode SCRFD distances to boxes (xyxy).
+    """
+    Decode SCRFD distances to boxes (xyxy).
 
     Parameters
     ----------
@@ -33,7 +34,8 @@ def distance2bbox(points: np.ndarray, distance: np.ndarray) -> np.ndarray:
 
 
 def distance2kps(points: np.ndarray, distance: np.ndarray) -> np.ndarray:
-    """Decode SCRFD keypoint distances to absolute coords.
+    """
+    Decode SCRFD keypoint distances to absolute coords.
 
     Parameters
     ----------
@@ -57,7 +59,8 @@ def distance2kps(points: np.ndarray, distance: np.ndarray) -> np.ndarray:
 
 
 def nms(dets: np.ndarray, iou_thr: float) -> List[int]:
-    """Perform greedy NMS on detections.
+    """
+    Perform greedy NMS on detections.
 
     Parameters
     ----------
@@ -94,16 +97,12 @@ def nms(dets: np.ndarray, iou_thr: float) -> List[int]:
 
 
 class TRTSCRFD(TRTModule):
-    """TensorRT SCRFD detector with optional keypoints output.
+    """
+    TensorRT SCRFD face detector — uses torch.cuda for GPU memory.
 
-    Parameters
-    ----------
-    engine_path : str
-        Path to SCRFD TensorRT engine.
-    input_name : str | None
-        Explicit input tensor name (TRT < 10 may use binding names).
-    size : int
-        Square model size (e.g., 640).
+    Handles two ONNX naming conventions:
+    - Named outputs: score_8, bbox_8, kps_8, score_16, ...
+    - Numeric outputs: 448, 451, 454, 471, ... (inferred by shape)
     """
 
     def __init__(
@@ -113,6 +112,9 @@ class TRTSCRFD(TRTModule):
         self.size = int(size)
         self.nms_thresh = 0.4
         self.conf_thresh = 0.5
+        self.num_anchors = 2
+
+        # Setup input name
         if self.v10_api:
             self.in_name = (
                 input_name
@@ -136,17 +138,81 @@ class TRTSCRFD(TRTModule):
                 for n in self.bindings_map
                 if not self.engine.binding_is_input(self.bindings_map[n])
             }
-        # Discover strides by output tensor names
-        self.strides = [
+
+        # Try named outputs first (score_8, bbox_8, kps_8 ...)
+        named_strides = [
             s
             for s in (8, 16, 32, 64, 128)
             if any(f"score_{s}" in n for n in self.out_names)
-        ] or [8, 16, 32]
-        self.num_anchors = 2
+        ]
+
+        if named_strides:
+            # Standard named convention
+            self.strides = named_strides
+            self._output_map = None  # use get_name() path
+        else:
+            # Numeric names — infer mapping from shapes
+            self.strides = [8, 16, 32]
+            self._output_map = self._build_output_map_from_shapes(size)
+
+    def _build_output_map_from_shapes(self, size: int) -> dict:
+        """
+        Infer score/bbox/kps tensor names from output shapes.
+
+        Groups outputs by last dim (1=score, 4=bbox, 10=kps),
+        then maps to strides by anchor count.
+
+        Returns dict: {stride: {"score": name, "bbox": name, "kps": name}}
+        """
+        # Get all output shapes
+        out_info = {}
+        for name in self.out_names:
+            if self.v10_api:
+                shape = tuple(self.engine.get_tensor_shape(name))
+            else:
+                idx = (
+                    self.out_names[name]
+                    if isinstance(self.out_names[name], int)
+                    else self.bindings_map[name]
+                )
+                shape = tuple(self.engine.get_binding_shape(idx))
+            out_info[name] = shape
+
+        # Group by last dimension
+        scores, bboxes, kpses = [], [], []
+        for name, shape in out_info.items():
+            last_dim = shape[-1]
+            count = shape[0] if len(shape) == 2 else int(np.prod(shape[:-1]))
+            if last_dim == 1:
+                scores.append((name, count))
+            elif last_dim == 4:
+                bboxes.append((name, count))
+            elif last_dim == 10:
+                kpses.append((name, count))
+
+        # Sort by count descending (stride 8 = most anchors)
+        scores.sort(key=lambda x: -x[1])
+        bboxes.sort(key=lambda x: -x[1])
+        kpses.sort(key=lambda x: -x[1])
+
+        # Map to strides
+        result = {}
+        for i, s in enumerate(self.strides):
+            entry = {}
+            if i < len(scores):
+                entry["score"] = scores[i][0]
+            if i < len(bboxes):
+                entry["bbox"] = bboxes[i][0]
+            if i < len(kpses):
+                entry["kps"] = kpses[i][0]
+            result[s] = entry
+
+        return result
 
     @staticmethod
     def _preprocess_letterbox(img_bgr: np.ndarray, size: int):
-        """Resize+pad to square, normalize to SCRFD input (NCHW float32).
+        """
+        Resize+pad to square, normalize to SCRFD input (NCHW float32).
 
         Parameters
         ----------
@@ -182,7 +248,8 @@ class TRTSCRFD(TRTModule):
     def detect(
         self, img_bgr: np.ndarray, conf: float = 0.5, max_num: int = 0
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """Run SCRFD detection on a single frame.
+        """
+        Run SCRFD detection on a single frame.
 
         Parameters
         ----------
@@ -204,45 +271,47 @@ class TRTSCRFD(TRTModule):
         H0, W0 = img_bgr.shape[:2]
 
         def K_for_stride(s: int) -> int:
-            h = size // s
-            w = size // s
-            return h * w * self.num_anchors
+            return (size // s) * (size // s) * self.num_anchors
 
-        host_scores, host_bboxes, host_kps = {}, {}, {}
-        for s in self.strides:
-            K = K_for_stride(s)
-            host_scores[s] = np.empty((1, K, 1), dtype=np.float32)
-            host_bboxes[s] = np.empty((1, K, 4), dtype=np.float32)
-            host_kps[s] = np.empty((1, K, 10), dtype=np.float32)
-
-        d_in = self._malloc_bytes(inp.nbytes)
+        # Upload input to GPU
+        d_in = self._to_gpu(inp)
 
         def get_name(tag: str, s: int) -> Optional[str]:
+            if self._output_map is not None:
+                return self._output_map.get(s, {}).get(tag)
             cand = f"{tag}_{s}"
             for n in self.out_names:
                 if n.endswith(cand) or cand in n:
                     return n
             return None
 
-        # Set up I/O
+        # Allocate GPU output tensors
+        d_scores: dict[int, torch.Tensor] = {}
+        d_bboxes: dict[int, torch.Tensor] = {}
+        d_kps: dict[int, torch.Tensor] = {}
+
         if self.v10_api:
             self.context.set_input_shape(self.in_name, tuple(inp.shape))
-            self.context.set_tensor_address(self.in_name, int(d_in))
-            d_scores, d_bboxes, d_kps = {}, {}, {}
+            self.context.set_tensor_address(self.in_name, d_in.data_ptr())
+
             for s in self.strides:
-                ns = get_name("score", s)
-                nb = get_name("bbox", s)
-                nk = get_name("kps", s)
+                K = K_for_stride(s)
+                ns, nb, nk = (
+                    get_name("score", s),
+                    get_name("bbox", s),
+                    get_name("kps", s),
+                )
                 if ns:
-                    d_scores[s] = self._malloc_bytes(host_scores[s].nbytes)
-                    self.context.set_tensor_address(ns, int(d_scores[s]))
+                    d_scores[s] = self._empty_gpu((1, K, 1))
+                    self.context.set_tensor_address(ns, d_scores[s].data_ptr())
                 if nb:
-                    d_bboxes[s] = self._malloc_bytes(host_bboxes[s].nbytes)
-                    self.context.set_tensor_address(nb, int(d_bboxes[s]))
+                    d_bboxes[s] = self._empty_gpu((1, K, 4))
+                    self.context.set_tensor_address(nb, d_bboxes[s].data_ptr())
                 if nk:
-                    d_kps[s] = self._malloc_bytes(host_kps[s].nbytes)
-                    self.context.set_tensor_address(nk, int(d_kps[s]))
-            # Bind any remaining outputs (strict in TRT10)
+                    d_kps[s] = self._empty_gpu((1, K, 10))
+                    self.context.set_tensor_address(nk, d_kps[s].data_ptr())
+
+            # Bind remaining outputs (strict in TRT10)
             if not hasattr(self, "_scratch_out"):
                 self._scratch_out = {}
             for name in self.output_names:
@@ -250,83 +319,81 @@ class TRTSCRFD(TRTModule):
                     continue
                 shape = tuple(self.context.get_tensor_shape(name))
                 if -1 in shape:
-                    shape = tuple(self.context.get_tensor_shape(name))
+                    continue
                 dtype = trt.nptype(self.engine.get_tensor_dtype(name))
                 nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
                 if nbytes == 0:
                     continue
-                buf = self._malloc_bytes(nbytes)
-                self.context.set_tensor_address(name, int(buf))
+                buf = self._empty_gpu((nbytes,), dtype=torch.uint8)
+                self.context.set_tensor_address(name, buf.data_ptr())
                 self._scratch_out[name] = buf
+
+            ok = self.context.execute_async_v3(self.stream_handle)
         else:
             self.context.set_binding_shape(self.in_idx, tuple(inp.shape))
             bindings = [None] * self.engine.num_bindings
-            bindings[self.in_idx] = int(d_in)
-            d_scores, d_bboxes, d_kps = {}, {}, {}
-            for s in self.strides:
-                ns = get_name("score", s)
-                nb = get_name("bbox", s)
-                nk = get_name("kps", s)
-                if ns:
-                    idx = self.out_names[ns]
-                    d_scores[s] = self._malloc_bytes(host_scores[s].nbytes)
-                    bindings[idx] = int(d_scores[s])
-                if nb:
-                    idx = self.out_names[nb]
-                    d_bboxes[s] = self._malloc_bytes(host_bboxes[s].nbytes)
-                    bindings[idx] = int(d_bboxes[s])
-                if nk:
-                    idx = self.out_names[nk]
-                    d_kps[s] = self._malloc_bytes(host_kps[s].nbytes)
-                    bindings[idx] = int(d_kps[s])
+            bindings[self.in_idx] = d_in.data_ptr()
 
-        # Run
-        cuda.memcpy_htod_async(d_in, inp, self.stream)
-        ok = (
-            self.context.execute_async_v3(self.stream.handle)
-            if self.v10_api
-            else self.context.execute_async_v2(
-                bindings=bindings,  # type: ignore
-                stream_handle=self.stream.handle,
+            for s in self.strides:
+                K = K_for_stride(s)
+                ns, nb, nk = (
+                    get_name("score", s),
+                    get_name("bbox", s),
+                    get_name("kps", s),
+                )
+                if ns:
+                    d_scores[s] = self._empty_gpu((1, K, 1))
+                    bindings[self.out_names[ns]] = d_scores[s].data_ptr()
+                if nb:
+                    d_bboxes[s] = self._empty_gpu((1, K, 4))
+                    bindings[self.out_names[nb]] = d_bboxes[s].data_ptr()
+                if nk:
+                    d_kps[s] = self._empty_gpu((1, K, 10))
+                    bindings[self.out_names[nk]] = d_kps[s].data_ptr()
+
+            ok = self.context.execute_async_v2(
+                bindings=bindings, stream_handle=self.stream_handle
             )
-        )
+
         if not ok:
             raise RuntimeError("SCRFD execute_async failed")
 
-        # Copy outputs
-        for s in self.strides:
-            if s in d_scores:
-                cuda.memcpy_dtoh_async(host_scores[s], d_scores.get(s), self.stream)
-            if s in d_bboxes:
-                cuda.memcpy_dtoh_async(host_bboxes[s], d_bboxes.get(s), self.stream)
-            if s in d_kps:
-                cuda.memcpy_dtoh_async(host_kps[s], d_kps.get(s), self.stream)
-        self.stream.synchronize()
+        self._sync()
 
-        # Decode
+        # Copy outputs to CPU and decode
         scores_list, bboxes_list, kpss_list = [], [], []
         for s in self.strides:
-            scores = host_scores[s].reshape(-1)
-            bboxes = host_bboxes[s].reshape(-1, 4) * float(s)
-            has_kps = s in d_kps
-            kps = None
-            if has_kps:
-                kps = host_kps[s].reshape(-1, 10) * float(s)
+            scores_np = d_scores[s].cpu().numpy().reshape(-1) if s in d_scores else None
+            bboxes_np = (
+                d_bboxes[s].cpu().numpy().reshape(-1, 4) * float(s)
+                if s in d_bboxes
+                else None
+            )
+            kps_np = (
+                d_kps[s].cpu().numpy().reshape(-1, 10) * float(s)
+                if s in d_kps
+                else None
+            )
+
+            if scores_np is None or bboxes_np is None:
+                continue
 
             h = size // s
             w = size // s
-            centers = np.stack(np.mgrid[:h, :w][::-1], axis=-1).astype(np.float32)  # type: ignore
+            centers = np.stack(np.mgrid[:h, :w][::-1], axis=-1).astype(np.float32)
             centers = (centers * s).reshape(-1, 2)
             if self.num_anchors > 1:
                 centers = np.repeat(centers, self.num_anchors, axis=0)
-            pos = np.where(scores >= self.conf_thresh)[0]
+
+            pos = np.where(scores_np >= self.conf_thresh)[0]
             if pos.size == 0:
                 continue
-            boxes_xyxy = distance2bbox(centers, bboxes)
-            scores_list.append(scores[pos, None])
+
+            boxes_xyxy = distance2bbox(centers, bboxes_np)
+            scores_list.append(scores_np[pos, None])
             bboxes_list.append(boxes_xyxy[pos])
-            if has_kps:
-                kpss_list.append(distance2kps(centers, kps)[pos].reshape(-1, 5, 2))  # type: ignore
+            if kps_np is not None:
+                kpss_list.append(distance2kps(centers, kps_np)[pos].reshape(-1, 5, 2))
 
         if not scores_list:
             return np.zeros((0, 5), dtype=np.float32), None
