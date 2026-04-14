@@ -136,9 +136,9 @@ class FaceTracker:
             det_conf,
         )
         return BoTSORT(
-            reid_weights=None,
+            model_weights=None,
             device="cuda",
-            half=False,
+            fp16=False,
             track_high_thresh=high_thresh,
             track_low_thresh=low_thresh,
             new_track_thresh=new_thresh,
