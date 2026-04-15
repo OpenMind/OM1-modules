@@ -605,7 +605,7 @@ class GalleryManager:
             return np.empty((0, self._dim), np.float32)
         # Use your shared helper (already used at runtime)
         vecs = infer_arc_batched(self.arc, imgs_112_bgr, max_bs=self.arc_max_bs)
-        return np.asarray(vecs, dtype=np.float32, copy=False)
+        return np.asarray(vecs, dtype=np.float32)
 
     def _append_vectors(self, vecs: np.ndarray) -> int:
         """Append embeddings to ``vectors.f32`` and return the starting row index.
