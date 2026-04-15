@@ -480,7 +480,7 @@ def main() -> None:
     if args.recognition and arc is not None:
         face_tracker = FaceTracker(
             arc=arc,
-            recog_interval=0.3,  # run AdaFace every 0.3s per unidentified track
+            recog_interval=0.2,  # run AdaFace every 0.3s per unidentified track
             vote_frames=3,  # collect 3 votes before deciding
             vote_threshold=0.5,  # majority vote (2/3)
             max_recog_attempts=10,
@@ -488,7 +488,7 @@ def main() -> None:
             track_buffer=60,
             arc_max_bs=arc_max_bs,
             det_conf=float(args.conf),
-            re_identify_interval=3.0,  # retry unknown tracks every 3s
+            re_identify_interval=1.0,  # retry unknown tracks every 1s
         )
         logger.info("FaceTracker initialized (BoTSORT + low-freq AdaFace)")
 
