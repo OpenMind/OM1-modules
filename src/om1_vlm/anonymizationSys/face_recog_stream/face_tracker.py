@@ -123,7 +123,7 @@ class FaceTracker:
     @staticmethod
     def _init_tracker(track_buffer: int, det_conf: float = 0.5):
         """Initialize BoTSORT tracker with thresholds aligned to detection confidence."""
-        from boxmot import BoTSORT
+        from boxmot import BotSort
 
         high_thresh = max(det_conf, 0.3)
         new_thresh = max(det_conf, 0.3)
@@ -135,10 +135,10 @@ class FaceTracker:
             low_thresh,
             det_conf,
         )
-        return BoTSORT(
-            model_weights=None,
+        return BotSort(
+            reid_weights=None,
             device="cuda",
-            fp16=False,
+            half=False,
             track_high_thresh=high_thresh,
             track_low_thresh=low_thresh,
             new_track_thresh=new_thresh,
