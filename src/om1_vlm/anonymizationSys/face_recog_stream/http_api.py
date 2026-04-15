@@ -32,7 +32,7 @@ from typing import Any, Callable, Dict, List, Optional
 import cv2
 import numpy as np
 
-from .arcface import warp_face_by_5p
+from .adaface import warp_face_by_5p
 
 
 class HttpAPI:

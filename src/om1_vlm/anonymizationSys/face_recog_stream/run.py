@@ -28,11 +28,15 @@ python -m om1_vlm.anonymizationSys.face_recog_stream.run \
 
 # With remote RTSP relay
 python -m om1_vlm.anonymizationSys.face_recog_stream.run \
-  --device /dev/video0 --width 1280 --height 720 --fps 30 \
-  --detection --recognition --blur --blur-mode unknown \
+  --scrfd-engine /home/openmind/Documents/OM1-modules/src/om1_vlm/anonymizationSys/engine/scrfd_10g.engine \
+  --arc-engine /home/openmind/Documents/OM1-modules/src/om1_vlm/anonymizationSys/engine/adaface_ir101.engine \
+  --size 640 --device /dev/video0 \
+  --width 1920 --height 1080 --fps 30 \
+  --detection --recognition \
   --draw-boxes --draw-names --show-fps \
-  --remote-rtsp "rtsp://api-video-ingest.openmind.org:8554/<stream>?api_key=<KEY>" \
-  --http-host 0.0.0.0 --http-port 6791
+  --http-host 0.0.0.0 --http-port 6791 \
+  --local-rtsp rtsp://localhost:8554/top_camera \
+  --conf 0.5 --sim-thr 0.55
 
 # Use teach_face.sh for simple
 # Query presence (who's been seen in last 2s)
@@ -124,23 +128,23 @@ import numpy as np
 
 from om1_utils.http import Server  # lightweight HTTP server
 
-from .arcface import TRTArcFace, warp_face_by_5p
+from .adaface import TRTFaceRecognition
 from .camera_reader import CameraReader
 from .draw import draw_overlays
 from .draw_pose import draw_fall_alert, draw_pose_overlays
+from .face_tracker import FaceTracker
 from .fall_detector import FallDetector
 from .gallery import GalleryManager
 from .http_api import HttpAPI
 from .rtsp_video_writer import RTSPVideoStreamWriter
 from .scrfd import TRTSCRFD
-from .utils import infer_arc_batched, pick_topk_indices
 from .who_tracker import WhoTracker, match_falls_to_faces
 from .yolo_pose import TRTYOLOPose
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------- Small shared states -------------------------- #
+# Small shared states
 class _GalState:
     """Mutable in-memory gallery state shared with the main loop and HTTP.
 
@@ -196,7 +200,6 @@ def get_platform_prefix() -> str:
     return "thor"
 
 
-# --------------------------------- Main ----------------------------------- #
 def main() -> None:
     """Entry point: wire up models, gallery, HTTP, streaming, and run the loop.
 
@@ -229,11 +232,11 @@ def main() -> None:
     logger.info("Starting realtime_stream...")
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    models_dir = os.path.join(script_dir, "..", "models")
+    models_dir = os.path.join(script_dir, "..", "engines")
 
     platform_prefix = get_platform_prefix()
-    scrfd_name = f"{platform_prefix}_scrfd_2.5g_bnkps_shape640x640.engine"
-    arc_name = f"{platform_prefix}_buffalo_m_w600k_r50.engine"
+    scrfd_name = f"{platform_prefix}_scrfd_10g.engine"
+    arc_name = f"{platform_prefix}_adaface_ir101.engine"
     pose_name = "yolo11s-pose.engine"
 
     default_scrfd_engine = os.path.join(models_dir, scrfd_name)
@@ -381,7 +384,7 @@ def main() -> None:
     ap.add_argument(
         "--sim-thr",
         type=float,
-        default=0.35,
+        default=0.55,
         help="Recognition cosine similarity threshold.",
     )
     ap.add_argument(
@@ -460,17 +463,34 @@ def main() -> None:
     scrfd = TRTSCRFD(args.scrfd_engine, input_name=args.scrfd_input, size=args.size)
     scrfd.nms_thresh = args.nms
 
-    arc: Optional[TRTArcFace] = None
+    arc: Optional[TRTFaceRecognition] = None
     if args.recognition:
-        arc = TRTArcFace(args.arc_engine, input_name=args.arc_input)
+        arc = TRTFaceRecognition(args.arc_engine, input_name=args.arc_input)
 
-    # Safe ArcFace batch (avoid profile errors)
+    # Safe AdaFace batch (avoid profile errors)
     arc_max_bs = 4
     if args.recognition and arc is not None and hasattr(arc, "max_batch"):
         try:
             arc_max_bs = max(1, int(arc.max_batch))  # type: ignore[attr-defined]
         except Exception:
             arc_max_bs = 4
+
+    # Face tracker (BoTSORT + low-freq AdaFace recognition)
+    face_tracker: Optional[FaceTracker] = None
+    if args.recognition and arc is not None:
+        face_tracker = FaceTracker(
+            arc=arc,
+            recog_interval=0.2,  # run AdaFace every 0.3s per unidentified track
+            vote_frames=3,  # collect 3 votes before deciding
+            vote_threshold=0.5,  # majority vote (2/3)
+            max_recog_attempts=10,
+            sim_thr=float(args.sim_thr),
+            track_buffer=60,
+            arc_max_bs=arc_max_bs,
+            det_conf=float(args.conf),
+            re_identify_interval=1.0,  # retry unknown tracks every 1s
+        )
+        logger.info("FaceTracker initialized (BoTSORT + low-freq AdaFace)")
 
     # Load pose detection engine
     pose_detector: Optional[TRTYOLOPose] = None
@@ -521,6 +541,9 @@ def main() -> None:
             vec_added,
             time.time() - t0b,
         )
+        if face_tracker is not None:
+            face_tracker.set_gallery(feats, id_labels)
+            logger.info("FaceTracker gallery synced: %d identities", len(id_labels))
 
     # Capture
     cap = CameraReader(args.device, args.width, args.height, args.fps)
@@ -560,9 +583,7 @@ def main() -> None:
         "blur": bool(args.blur),
         "blur_mode": str(args.blur_mode),
         "sim_thr": float(args.sim_thr),
-        "recog_topk": int(args.recog_topk),
         "crowd_thr": int(args.crowd_thr),
-        "perf_mode": bool(args.perf_mode),
         "show_fps": bool(args.show_fps),
         "conf": float(args.conf),
         "nms": float(args.nms),
@@ -583,7 +604,7 @@ def main() -> None:
     frame_state = _FrameState()
     frame_lock = threading.Lock()
 
-    # ----------- Job queue so CUDA work runs on the main thread only -------- #
+    # Job queue so CUDA work runs on the main thread only
     class Job:
         """A unit of work to be executed on the main thread.
 
@@ -714,9 +735,6 @@ def main() -> None:
                 do_blur = bool(cfg["blur"])
                 blur_mode = str(cfg["blur_mode"])
                 sim_thr = float(cfg["sim_thr"])
-                recog_topk = int(cfg["recog_topk"])
-                crowd_thr = int(cfg["crowd_thr"])
-                perf_mode = bool(cfg["perf_mode"])
                 show_fps = bool(cfg["show_fps"])
                 det_conf = float(cfg["conf"])
                 max_num = int(cfg["max_num"])
@@ -749,107 +767,63 @@ def main() -> None:
                 frame_state.dets = None if dets is None else dets.copy()
                 frame_state.kpss = None if kpss is None else kpss.copy()
 
-            # Recognition (Top-K with perf guard)
+            # ---- Track-based recognition (BoTSORT + low-freq AdaFace) ----
             names: List[Optional[str]] = []
             known_mask: List[bool] = []
 
-            skip_recognition = (
-                perf_mode
-                and ema_ms is not None
-                and ema_ms > (target_frame_time * 1000.0 * 0.8)
-            )  # ema in ms vs 80% of frame budget
+            if face_tracker is not None:
+                with gal_lock:
+                    if gal_state.gal_feats is not None:
+                        face_tracker.set_gallery(
+                            gal_state.gal_feats, gal_state.gal_labels
+                        )
+                face_tracker.set_sim_thr(sim_thr)
 
-            with gal_lock:
-                have_gallery = (
-                    gal_state.gal_feats is not None and gal_state.gal_feats.size > 0
-                )
+                # Always call update so BoTSORT ages out lost tracks on empty frames
+                track_results = face_tracker.update(frame, dets, kpss)
 
-            do_recog = (
-                args.recognition
-                and (not skip_recognition)
-                and dets is not None
-                and dets.shape[0] > 0
-                and have_gallery
-            )
-
-            if do_recog and (dets.shape[0] <= crowd_thr):
-                try:
-                    Hf, Wf = frame.shape[:2]
+                if dets is not None and dets.shape[0] > 0:
+                    # Map track results back to detection indices (exclusive matching)
                     n_det = dets.shape[0]
-                    names_full: List[Optional[str]] = ["unknown"] * n_det
+                    names = ["unknown"] * n_det
                     known_mask = [False] * n_det
+                    used_dets = set()  # prevent double assignment
 
-                    sel_idx = (
-                        np.arange(n_det, dtype=np.int32)
-                        if n_det <= recog_topk
-                        else pick_topk_indices(dets, topk=recog_topk, H=Hf, W=Wf)
+                    # Sort tracks by sim descending so best matches get priority
+                    sorted_trs = sorted(
+                        track_results, key=lambda t: t.sim, reverse=True
                     )
 
-                    crops: List[np.ndarray] = []
-                    backmap: List[int] = []
-                    for i_sel in sel_idx:
-                        try:
-                            if kpss is not None:
-                                crop = warp_face_by_5p(frame, kpss[i_sel], 112)
-                            else:
-                                x1, y1, x2, y2, _ = dets[i_sel].astype(int)
-                                face = frame[
-                                    max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)
-                                ]
-                                crop = (
-                                    cv2.resize(face, (112, 112))
-                                    if face.size > 0
-                                    else None
-                                )
-                            if crop is not None and crop.size:
-                                crops.append(crop)
-                                backmap.append(int(i_sel))
-                        except Exception:
-                            pass
-
-                    if crops and arc is not None:
-                        # Respect engine profile
-                        max_bs = min(arc_max_bs, max(1, recog_topk))
-                        feats_list = []
-                        for i in range(0, len(crops), max_bs):
-                            sub = crops[i : i + max_bs]
-                            vecs = infer_arc_batched(arc, sub, max_bs=max_bs)  # type: ignore[arg-type]
-                            vecs = vecs / (
-                                np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
-                            )
-                            feats_list.append(vecs.astype(np.float32))
-                        feats = (
-                            np.concatenate(feats_list, axis=0)
-                            if len(feats_list) > 1
-                            else feats_list[0]
-                        )
-
-                        with gal_lock:
-                            S = feats @ gal_state.gal_feats.T  # type: ignore[union-attr]
-                            best_j = np.argmax(S, axis=1)
-                            best_v = S[np.arange(S.shape[0]), best_j]
-                            labels_ref = gal_state.gal_labels
-
-                        for pos, (vv, jj) in enumerate(zip(best_v, best_j)):
-                            det_i = backmap[pos]
-                            if float(vv) >= float(sim_thr):
-                                label = labels_ref[int(jj)]
-                                names_full[det_i] = f"{label} ({float(vv):.2f})"
-                                known_mask[det_i] = True
-                            else:
-                                names_full[det_i] = "unknown"
-
-                    names = names_full
-                except Exception as e:
-                    logger.warning("[warn] recognition failed this frame: %s", e)
-                    names = [None] * dets.shape[0]
-                    known_mask = [False] * dets.shape[0]
+                    for tr in sorted_trs:
+                        best_iou, best_d = 0.0, -1
+                        for d_idx in range(n_det):
+                            if d_idx in used_dets:
+                                continue
+                            db = dets[d_idx, :4]
+                            tb = tr.bbox
+                            xx1 = max(tb[0], db[0])
+                            yy1 = max(tb[1], db[1])
+                            xx2 = min(tb[2], db[2])
+                            yy2 = min(tb[3], db[3])
+                            inter = max(0, xx2 - xx1) * max(0, yy2 - yy1)
+                            area_t = (tb[2] - tb[0]) * (tb[3] - tb[1])
+                            area_d = (db[2] - db[0]) * (db[3] - db[1])
+                            iou = inter / (area_t + area_d - inter + 1e-9)
+                            if iou > best_iou:
+                                best_iou = iou
+                                best_d = d_idx
+                        if best_d >= 0 and best_iou > 0.3:
+                            used_dets.add(best_d)
+                            names[best_d] = tr.name
+                            known_mask[best_d] = tr.is_known
+                else:
+                    n = 0 if dets is None else int(dets.shape[0])
+                    names = ["unknown"] * n
+                    known_mask = [False] * n
             else:
                 n = 0 if dets is None else int(dets.shape[0])
                 names = ["unknown"] * n
                 known_mask = [False] * n
-                # if args.recognition and dets is not None and dets.shape[0] > crowd_thr:
-                #     names = ["unknown"] * int(dets.shape[0])
 
             # Who-tracker (strip score suffix)
             # Strip score suffix helper
@@ -858,6 +832,10 @@ def main() -> None:
                     return None
                 if nm == "unknown":
                     return "unknown"
+                # Handle "wendy? (0.62)" and "wendy (0.65)"
+                p = nm.find("? (")
+                if p > 0:
+                    return nm[:p]  # strip "? (score)"
                 p = nm.find(" (")
                 return nm[:p] if p > 0 else nm
 
