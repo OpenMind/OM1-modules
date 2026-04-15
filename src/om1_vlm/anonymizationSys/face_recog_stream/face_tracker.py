@@ -369,7 +369,7 @@ class FaceTracker:
                     best_d = d_idx
 
             if best_d >= 0 and best_iou > 0.3:
-                entry = {"det_idx": best_d}
+                entry: dict[str, object] = {"det_idx": best_d}
                 entry["kps"] = (
                     kpss[best_d] if kpss is not None and best_d < len(kpss) else None
                 )

@@ -380,7 +380,7 @@ class TRTSCRFD(TRTModule):
 
             h = size // s
             w = size // s
-            centers = np.stack(np.mgrid[:h, :w][::-1], axis=-1).astype(np.float32)
+            centers = np.stack(list(np.mgrid[:h, :w][::-1]), axis=-1).astype(np.float32)
             centers = (centers * s).reshape(-1, 2)
             if self.num_anchors > 1:
                 centers = np.repeat(centers, self.num_anchors, axis=0)
