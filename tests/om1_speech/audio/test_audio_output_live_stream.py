@@ -313,9 +313,7 @@ def test_create_silence_audio(audio_stream):
     silence = audio_stream._create_silence_audio(100)
 
     assert isinstance(silence, bytes)
-    # Verify it's raw bytes (not base64) and all zeros
     assert all(b == 0 for b in silence)
-    # Verify correct length: (rate * duration_ms / 1000) * 2 bytes per sample
     expected_samples = int(audio_stream._rate * 100 / 1000)
     assert len(silence) == expected_samples * 2
 
@@ -335,7 +333,6 @@ def test_write_audio_bytes_initialization_failure(audio_stream, mock_is_installe
     mock_is_installed.return_value = False
 
     test_audio = b"raw_audio_data"
-    # Should not raise an exception, just log error
     audio_stream._write_audio_bytes(test_audio)
 
 
@@ -399,7 +396,6 @@ def test_zenoh_audio_message(audio_stream):
         audio_stream.zenoh_audio_message(mock_sample)
 
         assert audio_stream._pending_requests.qsize() == 1
-        # Verify request has the frame_id as request_id
         request = audio_stream._pending_requests.get()
         assert request["request_id"] == "test-request-id-123"
 
@@ -454,7 +450,6 @@ def test_stop(audio_stream, mock_ffplay):
     audio_stream.stop()
 
     assert audio_stream.running is False
-    # Cleanup should be called
     assert audio_stream._ffplay_proc is None
 
 
@@ -594,7 +589,6 @@ def test_process_audio_with_custom_voice_id(audio_stream, mock_openai, mock_ffpl
     audio_stream.stop()
     thread.join(timeout=1)
 
-    # Verify the custom voice was used
     call_kwargs = (
         mock_openai.return_value.audio.speech.with_streaming_response.create.call_args[
             1
@@ -616,7 +610,6 @@ def test_process_audio_with_default_voice(audio_stream, mock_openai, mock_ffplay
     audio_stream.stop()
     thread.join(timeout=1)
 
-    # Verify the default voice was used
     call_kwargs = (
         mock_openai.return_value.audio.speech.with_streaming_response.create.call_args[
             1
@@ -650,7 +643,6 @@ def test_process_audio_with_extra_body(
     stream.stop()
     thread.join(timeout=1)
 
-    # Verify extra_body was passed
     call_kwargs = (
         mock_openai.return_value.audio.speech.with_streaming_response.create.call_args[
             1
@@ -674,7 +666,6 @@ def test_zenoh_audio_message_inactive_speaker(audio_stream):
 
         audio_stream.zenoh_audio_message(mock_sample)
 
-        # Should not add to queue since speaker is not active
         assert audio_stream._pending_requests.qsize() == 0
 
 
@@ -713,7 +704,6 @@ def test_on_asr_text_empty_payload(audio_stream):
 
         audio_stream._on_asr_text(mock_sample)
 
-        # Should not interrupt with empty payload
         assert audio_stream._pending_requests.qsize() == 1
 
 
@@ -727,10 +717,8 @@ def test_on_asr_text_without_audio_status(audio_stream):
     mock_sample = Mock()
     mock_sample.payload.to_bytes.return_value = b"speech"
 
-    # Should not crash when audio_status is None
     audio_stream._on_asr_text(mock_sample)
 
-    # Request should still be in queue
     assert audio_stream._pending_requests.qsize() == 1
 
 
@@ -749,11 +737,7 @@ def test_stream_audio_chunk_updates_last_audio_time(audio_stream, mock_ffplay):
 def test_cleanup_ffplay_with_none_stdin(audio_stream, mock_ffplay):
     """Test cleanup when stdin is None"""
     audio_stream._initialize_ffplay()
-
-    # Set stdin to None
     audio_stream._ffplay_proc.stdin = None
-
-    # Should not crash
     audio_stream._cleanup_ffplay()
 
     assert audio_stream._ffplay_proc is None
@@ -762,11 +746,7 @@ def test_cleanup_ffplay_with_none_stdin(audio_stream, mock_ffplay):
 def test_finish_audio_playback_with_none_stdin(audio_stream, mock_ffplay):
     """Test finishing playback when stdin is None"""
     audio_stream._initialize_ffplay()
-
-    # Set stdin to None
     audio_stream._ffplay_proc.stdin = None
-
-    # Should not crash
     audio_stream._finish_audio_playback()
 
     assert audio_stream._ffplay_proc is None
