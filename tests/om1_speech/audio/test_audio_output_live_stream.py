@@ -1,4 +1,3 @@
-import base64
 import json
 import subprocess
 import threading
@@ -114,6 +113,8 @@ def test_initialization_with_custom_params(mock_openai, mock_zenoh):
     def custom_callback(is_active):
         pass
 
+    extra_body = {"speed": 1.2, "custom_param": "value"}
+
     stream = AudioOutputLiveStream(
         url="http://custom-server/v1",
         tts_model="custom-model",
@@ -123,6 +124,7 @@ def test_initialization_with_custom_params(mock_openai, mock_zenoh):
         api_key="test-api-key",
         tts_state_callback=custom_callback,
         enable_tts_interrupt=True,
+        extra_body=extra_body,
     )
 
     assert stream._url == "http://custom-server/v1"
@@ -133,14 +135,15 @@ def test_initialization_with_custom_params(mock_openai, mock_zenoh):
     assert stream._api_key == "test-api-key"
     assert stream._tts_state_callback == custom_callback
     assert stream._enable_tts_interrupt is True
+    assert stream._extra_body == extra_body
 
     stream.stop()
 
 
 def test_add_request(audio_stream):
     """Test adding requests to the queue"""
-    request1 = {"text": "Hello world"}
-    request2 = {"text": "Goodbye world"}
+    request1 = {"text": "Hello world", "voice_id": None}
+    request2 = {"text": "Goodbye world", "voice_id": None}
 
     audio_stream.add_request(request1)
     audio_stream.add_request(request2)
@@ -310,29 +313,27 @@ def test_create_silence_audio(audio_stream):
     silence = audio_stream._create_silence_audio(100)
 
     assert isinstance(silence, bytes)
+    assert all(b == 0 for b in silence)
+    expected_samples = int(audio_stream._rate * 100 / 1000)
+    assert len(silence) == expected_samples * 2
 
-    decoded = base64.b64decode(silence)
-    assert all(b == 0 for b in decoded)
 
-
-def test_write_audio(audio_stream, mock_ffplay):
-    """Test writing audio data"""
+def test_write_audio_bytes(audio_stream, mock_ffplay):
+    """Test writing audio bytes"""
     audio_stream._initialize_ffplay()
 
-    test_audio = base64.b64encode(b"test_audio_data")
+    test_audio = b"test_audio_data"
     audio_stream._write_audio_bytes(test_audio)
 
     audio_stream._ffplay_proc.stdin.write.assert_called()
 
 
-def test_write_audio_raw_data(audio_stream, mock_ffplay):
-    """Test writing raw audio data (not base64)"""
-    audio_stream._initialize_ffplay()
+def test_write_audio_bytes_initialization_failure(audio_stream, mock_is_installed):
+    """Test handling initialization failure when writing audio bytes"""
+    mock_is_installed.return_value = False
 
     test_audio = b"raw_audio_data"
     audio_stream._write_audio_bytes(test_audio)
-
-    audio_stream._ffplay_proc.stdin.write.assert_called()
 
 
 def test_process_audio(audio_stream, mock_openai, mock_ffplay):
@@ -343,7 +344,7 @@ def test_process_audio(audio_stream, mock_openai, mock_ffplay):
         callback_states.append(is_active)
 
     audio_stream.set_tts_state_callback(callback)
-    audio_stream.add_request({"text": "Test message"})
+    audio_stream.add_request({"text": "Test message", "voice_id": None})
 
     thread = threading.Thread(target=audio_stream._process_audio)
     thread.daemon = True
@@ -363,7 +364,7 @@ def test_process_audio_error_handling(audio_stream, mock_openai):
         Exception("Test error")
     )
 
-    audio_stream.add_request({"text": "Test message"})
+    audio_stream.add_request({"text": "Test message", "voice_id": None})
 
     thread = threading.Thread(target=audio_stream._process_audio)
     thread.daemon = True
@@ -384,6 +385,7 @@ def test_zenoh_audio_message(audio_stream):
         mock_audio_status = Mock()
         mock_audio_status.sentence_to_speak.data = json.dumps({"text": "Test"})
         mock_audio_status.status_speaker = 1  # ACTIVE
+        mock_audio_status.header.frame_id = "test-request-id-123"
 
         mock_status.deserialize.return_value = mock_audio_status
         mock_status.STATUS_SPEAKER.ACTIVE.value = 1
@@ -394,6 +396,8 @@ def test_zenoh_audio_message(audio_stream):
         audio_stream.zenoh_audio_message(mock_sample)
 
         assert audio_stream._pending_requests.qsize() == 1
+        request = audio_stream._pending_requests.get()
+        assert request["request_id"] == "test-request-id-123"
 
 
 def test_on_asr_text_interrupt(audio_stream):
@@ -406,8 +410,8 @@ def test_on_asr_text_interrupt(audio_stream):
         audio_stream.audio_status.status_speaker = 1  # ACTIVE
         mock_status.STATUS_SPEAKER.ACTIVE.value = 1
 
-        audio_stream.add_request({"text": "Request 1"})
-        audio_stream.add_request({"text": "Request 2"})
+        audio_stream.add_request({"text": "Request 1", "voice_id": None})
+        audio_stream.add_request({"text": "Request 2", "voice_id": None})
 
         mock_sample = Mock()
         mock_sample.payload.to_bytes.return_value = b"speech detected"
@@ -421,8 +425,8 @@ def test_on_asr_text_no_interrupt_when_disabled(audio_stream):
     """Test that ASR doesn't interrupt when disabled"""
     audio_stream._enable_tts_interrupt = False
 
-    audio_stream.add_request({"text": "Request 1"})
-    audio_stream.add_request({"text": "Request 2"})
+    audio_stream.add_request({"text": "Request 1", "voice_id": None})
+    audio_stream.add_request({"text": "Request 2", "voice_id": None})
 
     mock_sample = Mock()
     mock_sample.payload.to_bytes.return_value = b"speech detected"
@@ -446,7 +450,6 @@ def test_stop(audio_stream, mock_ffplay):
     audio_stream.stop()
 
     assert audio_stream.running is False
-    # Cleanup should be called
     assert audio_stream._ffplay_proc is None
 
 
@@ -553,11 +556,11 @@ def test_zenoh_session_failure(mock_openai):
         stream.stop()
 
 
-def test_write_audio_bytes(audio_stream, mock_ffplay):
-    """Test writing audio bytes directly"""
+def test_write_audio_bytes_direct(audio_stream, mock_ffplay):
+    """Test writing audio bytes directly via _write_audio_bytes"""
     audio_stream._initialize_ffplay()
 
-    test_data = base64.b64encode(b"test_audio")
+    test_data = b"test_audio"
     audio_stream._write_audio_bytes(test_data)
 
     audio_stream._ffplay_proc.stdin.write.assert_called()
@@ -569,5 +572,181 @@ def test_ffplay_process_reinitialization(audio_stream, mock_ffplay):
 
     audio_stream._ffplay_proc.poll.return_value = 1  # Process exited
     audio_stream._stream_audio_chunk(b"test")
+
+    assert audio_stream._ffplay_proc is None
+
+
+def test_process_audio_with_custom_voice_id(audio_stream, mock_openai, mock_ffplay):
+    """Test that custom voice_id from request is used when provided"""
+    audio_stream.add_request({"text": "Test message", "voice_id": "custom_voice"})
+
+    thread = threading.Thread(target=audio_stream._process_audio)
+    thread.daemon = True
+    thread.start()
+
+    time.sleep(0.2)
+
+    audio_stream.stop()
+    thread.join(timeout=1)
+
+    call_kwargs = (
+        mock_openai.return_value.audio.speech.with_streaming_response.create.call_args[
+            1
+        ]
+    )
+    assert call_kwargs["voice"] == "custom_voice"
+
+
+def test_process_audio_with_default_voice(audio_stream, mock_openai, mock_ffplay):
+    """Test that default voice is used when voice_id is None"""
+    audio_stream.add_request({"text": "Test message", "voice_id": None})
+
+    thread = threading.Thread(target=audio_stream._process_audio)
+    thread.daemon = True
+    thread.start()
+
+    time.sleep(0.2)
+
+    audio_stream.stop()
+    thread.join(timeout=1)
+
+    call_kwargs = (
+        mock_openai.return_value.audio.speech.with_streaming_response.create.call_args[
+            1
+        ]
+    )
+    assert call_kwargs["voice"] == "test-voice"
+
+
+def test_process_audio_with_extra_body(
+    mock_openai, mock_zenoh, mock_ffplay, mock_is_installed
+):
+    """Test that extra_body is passed to OpenAI API"""
+    extra_body = {"speed": 1.5, "custom_param": "test_value"}
+
+    stream = AudioOutputLiveStream(
+        url="http://test-server/v1",
+        tts_model="test-model",
+        tts_voice="test-voice",
+        rate=24000,
+        extra_body=extra_body,
+    )
+
+    stream.add_request({"text": "Test message", "voice_id": None})  # type: ignore
+
+    thread = threading.Thread(target=stream._process_audio)
+    thread.daemon = True
+    thread.start()
+
+    time.sleep(0.2)
+
+    stream.stop()
+    thread.join(timeout=1)
+
+    call_kwargs = (
+        mock_openai.return_value.audio.speech.with_streaming_response.create.call_args[
+            1
+        ]
+    )
+    assert call_kwargs["extra_body"] == extra_body
+
+
+def test_zenoh_audio_message_inactive_speaker(audio_stream):
+    """Test that messages are not queued when speaker is not active"""
+    with patch("om1_speech.audio.audio_output_live_stream.AudioStatus") as mock_status:
+        mock_audio_status = Mock()
+        mock_audio_status.sentence_to_speak.data = json.dumps({"text": "Test"})
+        mock_audio_status.status_speaker = 0  # NOT ACTIVE
+
+        mock_status.deserialize.return_value = mock_audio_status
+        mock_status.STATUS_SPEAKER.ACTIVE.value = 1  # Define what ACTIVE value is
+
+        mock_sample = Mock()
+        mock_sample.payload.to_bytes.return_value = b"test_data"
+
+        audio_stream.zenoh_audio_message(mock_sample)
+
+        assert audio_stream._pending_requests.qsize() == 0
+
+
+def test_zenoh_audio_message_empty_sentence(audio_stream):
+    """Test handling of empty sentence in Zenoh messages"""
+    with patch("om1_speech.audio.audio_output_live_stream.AudioStatus") as mock_status:
+        mock_audio_status = Mock()
+        mock_audio_status.sentence_to_speak.data = ""  # Empty
+        mock_audio_status.status_speaker = 1  # ACTIVE
+
+        mock_status.deserialize.return_value = mock_audio_status
+        mock_status.STATUS_SPEAKER.ACTIVE.value = 1
+
+        mock_sample = Mock()
+        mock_sample.payload.to_bytes.return_value = b"test_data"
+
+        audio_stream.zenoh_audio_message(mock_sample)
+
+        # Should not add to queue due to empty sentence
+        assert audio_stream._pending_requests.qsize() == 0
+
+
+def test_on_asr_text_empty_payload(audio_stream):
+    """Test ASR interrupt with empty payload"""
+    audio_stream._enable_tts_interrupt = True
+
+    with patch("om1_speech.audio.audio_output_live_stream.AudioStatus") as mock_status:
+        audio_stream.audio_status = Mock()
+        audio_stream.audio_status.status_speaker = 1  # ACTIVE
+        mock_status.STATUS_SPEAKER.ACTIVE.value = 1
+
+        audio_stream.add_request({"text": "Request 1", "voice_id": None})
+
+        mock_sample = Mock()
+        mock_sample.payload.to_bytes.return_value = b""  # Empty payload
+
+        audio_stream._on_asr_text(mock_sample)
+
+        assert audio_stream._pending_requests.qsize() == 1
+
+
+def test_on_asr_text_without_audio_status(audio_stream):
+    """Test ASR interrupt when audio_status is None"""
+    audio_stream._enable_tts_interrupt = True
+    audio_stream.audio_status = None
+
+    audio_stream.add_request({"text": "Request 1", "voice_id": None})
+
+    mock_sample = Mock()
+    mock_sample.payload.to_bytes.return_value = b"speech"
+
+    audio_stream._on_asr_text(mock_sample)
+
+    assert audio_stream._pending_requests.qsize() == 1
+
+
+def test_stream_audio_chunk_updates_last_audio_time(audio_stream, mock_ffplay):
+    """Test that streaming audio updates the last_audio_time"""
+    audio_stream._initialize_ffplay()
+
+    initial_time = audio_stream._last_audio_time
+    time.sleep(0.01)
+
+    audio_stream._stream_audio_chunk(b"test_chunk")
+
+    assert audio_stream._last_audio_time > initial_time
+
+
+def test_cleanup_ffplay_with_none_stdin(audio_stream, mock_ffplay):
+    """Test cleanup when stdin is None"""
+    audio_stream._initialize_ffplay()
+    audio_stream._ffplay_proc.stdin = None
+    audio_stream._cleanup_ffplay()
+
+    assert audio_stream._ffplay_proc is None
+
+
+def test_finish_audio_playback_with_none_stdin(audio_stream, mock_ffplay):
+    """Test finishing playback when stdin is None"""
+    audio_stream._initialize_ffplay()
+    audio_stream._ffplay_proc.stdin = None
+    audio_stream._finish_audio_playback()
 
     assert audio_stream._ffplay_proc is None

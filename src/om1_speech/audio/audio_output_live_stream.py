@@ -207,7 +207,7 @@ class AudioOutputLiveStream:
 
                 with self.openai_client.audio.speech.with_streaming_response.create(
                     model=self._tts_model,
-                    voice=self._tts_voice,  # type: ignore
+                    voice=self._tts_voice if tts_request["voice_id"] is None else tts_request["voice_id"],  # type: ignore
                     response_format=self._response_format,  # type: ignore
                     input=tts_request["text"],  # type: ignore
                     extra_body=self._extra_body,
