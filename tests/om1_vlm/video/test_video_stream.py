@@ -53,8 +53,10 @@ class MockVideoCapture:
 def mock_cv2():
     with patch("cv2.VideoCapture", MockVideoCapture) as mock:
         with patch("cv2.imencode") as mock_imencode:
-            # Mock imencode to return a simple base64 string
-            mock_imencode.return_value = (True, b"fake_image_data")
+            mock_imencode.return_value = (
+                True,
+                np.frombuffer(b"fake_image_data", dtype=np.uint8),
+            )
             yield mock
 
 
