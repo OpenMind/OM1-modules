@@ -152,7 +152,7 @@ class HttpAPI:
                 )
                 result = self.who.snapshot(sec)
                 if self.face_tracker is not None:
-                    result["largest_face"] = self.face_tracker.get_largest_face()
+                    result["faces"] = self.face_tracker.get_faces()
                 return result
 
             if path == "/config":
