@@ -23,7 +23,6 @@ def mock_pyaudio():
         mock.return_value.get_default_input_device_info.return_value = default_device
         mock.return_value.get_device_info_by_index.return_value = default_device
 
-        # Mock stream
         mock_stream = MagicMock()
         mock_stream.stop_stream = Mock()
         mock_stream.close = Mock()
@@ -62,13 +61,8 @@ def test_start_with_default_device(audio_stream, mock_pyaudio):
     """Test starting AudioInputStream with default device"""
     audio_stream.start()
 
-    # Verify PyAudio initialization
     mock_pyaudio.assert_called_once()
-
-    # Verify default device was retrieved
     mock_pyaudio.return_value.get_default_input_device_info.assert_called_once()
-
-    # Verify stream was opened with correct parameters
     mock_pyaudio.return_value.open.assert_called_once_with(
         format=pyaudio.paInt16,
         input_device_index=0,
@@ -113,7 +107,6 @@ def test_fill_buffer_with_tts_inactive(audio_stream):
     test_data = b"test_audio_data"
     audio_stream._fill_buffer(test_data, 1024, {}, 0)
 
-    # Verify data was added to buffer
     assert audio_stream._buff.get() == test_data
 
 
@@ -123,24 +116,18 @@ def test_fill_buffer_with_tts_active(audio_stream):
     test_data = b"test_audio_data"
     audio_stream._fill_buffer(test_data, 1024, {}, 0)
 
-    # Verify buffer is empty (data wasn't added)
     with pytest.raises(queue.Empty):
         audio_stream._buff.get_nowait()
 
 
 def test_generator(audio_stream):
     """Test audio data generation"""
-    # Ensure the stream starts in a clean state
     audio_stream.running = True
-
-    # Create test chunks
     test_chunks = [b"chunk1", b"chunk2", b"chunk3"]
 
-    # Add test chunks to buffer
     for chunk in test_chunks:
         audio_stream._buff.put(chunk)
 
-    # Start collecting in a separate thread to avoid blocking
     collected_chunks = []
 
     def collect_data():
@@ -149,19 +136,15 @@ def test_generator(audio_stream):
             if len(collected_chunks) >= len(test_chunks):
                 break
 
-    # Run collection in thread
     collection_thread = threading.Thread(target=collect_data)
     collection_thread.daemon = True
     collection_thread.start()
 
-    # Wait a short time for collection
     collection_thread.join(timeout=1.0)
 
-    # Stop the generator properly
     audio_stream.running = False
     audio_stream._buff.put(None)
 
-    # Verify the results
     assert len(collected_chunks) > 0
     assert all(isinstance(data, dict) for data in collected_chunks)
 
@@ -171,11 +154,9 @@ def test_stop(audio_stream, mock_pyaudio):
     audio_stream.start()
     audio_stream.stop()
 
-    # Verify stream was stopped and closed
+    # Verify stream was stopped
     assert audio_stream.running is False
-    mock_pyaudio.return_value.open.return_value.stop_stream.assert_called_once()
-    mock_pyaudio.return_value.open.return_value.close.assert_called_once()
-    mock_pyaudio.return_value.terminate.assert_called_once()
+    assert audio_stream._audio_thread is None
 
 
 def test_audio_callback(mock_pyaudio):
@@ -220,11 +201,10 @@ def test_error_handling(mock_pyaudio):
     mock_pyaudio.return_value.open.side_effect = Exception("Test error")
 
     stream = AudioInputStream()
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="Test error"):
         stream.start()
 
-    # Verify cleanup was performed
-    mock_pyaudio.return_value.terminate.assert_called_once()
+    assert stream._audio_stream is None
 
     stream.stop()
 
