@@ -480,7 +480,7 @@ def main() -> None:
     if args.recognition and arc is not None:
         face_tracker = FaceTracker(
             arc=arc,
-            recog_interval=0.2,  # run AdaFace every 0.3s per unidentified track
+            recog_interval=0.2,  # run AdaFace every 0.2s per unidentified track
             vote_frames=3,  # collect 3 votes before deciding
             vote_threshold=0.5,  # majority vote (2/3)
             max_recog_attempts=10,
@@ -684,6 +684,7 @@ def main() -> None:
         frame_lock=frame_lock,
         run_job_sync=run_job_sync,
         logger=logger,
+        face_tracker=face_tracker,
     )
 
     # Run the server here

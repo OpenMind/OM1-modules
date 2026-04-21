@@ -85,6 +85,7 @@ class HttpAPI:
         frame_lock: threading.Lock,
         run_job_sync: Callable[[Callable[[], Any]], Any],
         logger: Optional[logging.Logger] = None,
+        face_tracker=None,
     ):
         """Initialize the HTTP API wrapper."""
         self.who = who
@@ -100,6 +101,7 @@ class HttpAPI:
         self.run_job_sync = run_job_sync
         self.log = logger or logging.getLogger("http_api")
         self.server = None
+        self.face_tracker = face_tracker
 
     def stop(self) -> None:
         """Stop an attached HTTP server if present."""
@@ -148,7 +150,10 @@ class HttpAPI:
                     if payload
                     else self.who.lookback_sec
                 )
-                return self.who.snapshot(sec)
+                result = self.who.snapshot(sec)
+                if self.face_tracker is not None:
+                    result["faces"] = self.face_tracker.get_faces()
+                return result
 
             if path == "/config":
                 return self._handle_config(payload)

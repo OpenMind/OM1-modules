@@ -120,6 +120,9 @@ class FaceTracker:
         # Track IDs seen this frame (for cleanup)
         self._active_ids: set = set()
 
+        # Current frame faces (for status queries)
+        self._current_faces: list = []
+
     @staticmethod
     def _init_tracker(track_buffer: int, det_conf: float = 0.5):
         """Initialize BoTSORT tracker with thresholds aligned to detection confidence."""
@@ -283,6 +286,22 @@ class FaceTracker:
 
         # Cleanup stale tracks
         self._cleanup_stale()
+
+        # Build faces sorted by bbox area (largest = closest first)
+        faces = []
+        for r in results:
+            x1, y1, x2, y2 = r.bbox
+            area = (x2 - x1) * (y2 - y1)
+            ident = self._identities.get(r.track_id)
+            name = ident.name if ident and ident.status == "identified" else "unknown"
+            faces.append(
+                {
+                    "name": name,
+                    "bbox": r.bbox,
+                    "area": area,
+                }
+            )
+        self._current_faces = sorted(faces, key=lambda f: f["area"], reverse=True)
 
         return results
 
@@ -524,6 +543,17 @@ class FaceTracker:
             for tid, ident in self._identities.items()
             if tid in self._active_ids
         }
+
+    def get_faces(self) -> list:
+        """Get all faces sorted by bbox area (largest first).
+
+        Returns
+        -------
+        list of dict
+            Each dict has 'name' (str), 'bbox' (tuple), 'area' (int).
+            Empty list if no faces in current frame.
+        """
+        return self._current_faces
 
     def reset(self) -> None:
         """Reset all tracking state."""
