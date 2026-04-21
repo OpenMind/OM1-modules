@@ -92,7 +92,7 @@ class AudioInputStream:
         self._enable_tts_interrupt = enable_tts_interrupt
 
         # Thread-safe buffer for audio data
-        self._buff: queue.Queue[Optional[bytes]] = queue.Queue()
+        self._buff: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=5)
 
         # audio interface and stream
         self._audio_interface: pyaudio.PyAudio = pyaudio.PyAudio()
@@ -293,36 +293,53 @@ class AudioInputStream:
         Exception
             If there are errors initializing the audio interface or opening the stream
         """
-        if not self.running:
-            return self
+        self.running = True
+
+        while not self._buff.empty():
+            try:
+                self._buff.get_nowait()
+            except queue.Empty:
+                break
 
         try:
+            if self.session is None:
+                try:
+                    self.session = open_zenoh_session()
+                    self.pub = self.session.declare_publisher(self.topic)
+                    self.session.declare_subscriber(
+                        self.topic, self.zenoh_audio_message
+                    )
+                    logger.info("Zenoh session initialized")
+                except Exception as e:
+                    logger.error(f"Failed to initialize Zenoh: {e}")
+                    self.session = None
+
             if not self.remote_input:
                 logger.info("Remote input is disabled, initializing audio input stream")
                 if self._rate is None:
                     self._rate = 16000
                 if self._chunk is None:
                     self._chunk = int(self._rate * 0.2)
-                self._audio_stream = self._audio_interface.open(
-                    format=pyaudio.paInt16,
-                    input_device_index=(
-                        int(self._device) if self._device is not None else None
-                    ),
-                    channels=1,
-                    rate=self._rate,
-                    input=True,
-                    frames_per_buffer=self._chunk,
-                    stream_callback=self._fill_buffer,  # type: ignore
-                )
 
-            # Start the audio processing thread
+                if self._audio_stream is None:
+                    self._audio_stream = self._audio_interface.open(
+                        format=pyaudio.paInt16,
+                        input_device_index=(
+                            int(self._device) if self._device is not None else None
+                        ),
+                        channels=1,
+                        rate=self._rate,
+                        input=True,
+                        frames_per_buffer=self._chunk,
+                        stream_callback=self._fill_buffer,  # type: ignore
+                    )
+
             self._start_audio_thread()
 
             logger.info(f"Started audio stream with device {self._device}")
 
         except Exception as e:
             logger.error(f"Error opening audio stream: {e}")
-            self._audio_interface.terminate()
             raise
 
         return self
@@ -444,25 +461,23 @@ class AudioInputStream:
     def stop(self):
         """
         Stops the audio stream and cleans up resources.
-
-        This method stops the audio stream, terminates the PyAudio interface,
-        and ensures the audio processing thread is properly shut down.
         """
         self.running = False
 
+        self._buff.put(None)
+
+        if self._audio_thread and self._audio_thread.is_alive():
+            self._audio_thread.join(timeout=2.0)
+            if self._audio_thread.is_alive():
+                logger.warning("Audio processing thread did not terminate gracefully")
+            else:
+                logger.info("Audio processing thread terminated successfully")
+
+        self._audio_thread = None
+
         if self.session:
             self.session.close()
+            self.session = None
+            self.pub = None
 
-        if self._audio_stream:
-            self._audio_stream.stop_stream()
-            self._audio_stream.close()
-
-        if self._audio_interface:
-            self._audio_interface.terminate()
-
-        # Clean up the audio processing thread
-        if self._audio_thread and self._audio_thread.is_alive():
-            self._audio_thread.join(timeout=1.0)
-
-        self._buff.put(None)
         logger.info("Stopped audio stream")

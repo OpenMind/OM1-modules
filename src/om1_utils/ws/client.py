@@ -34,6 +34,7 @@ class Client:
         self.message_queue: Queue = Queue()
         self.receiver_thread: Optional[threading.Thread] = None
         self.sender_thread: Optional[threading.Thread] = None
+        self.client_thread: Optional[threading.Thread] = None
 
     def _receive_messages(self):
         """
@@ -164,6 +165,11 @@ class Client:
         Initializes and starts the main client thread that manages the WebSocket
         connection.
         """
+        if self.client_thread and self.client_thread.is_alive():
+            logger.warning("WebSocket client thread is already running")
+            return
+
+        self.running = True
         self.client_thread = threading.Thread(target=self._run_client, daemon=True)
         self.client_thread.start()
         logger.info("WebSocket client thread started")
@@ -231,6 +237,17 @@ class Client:
                 logger.info("WebSocket connection closed")
             except Exception as _:
                 pass
+
+        if self.client_thread and self.client_thread.is_alive():
+            self.client_thread.join(timeout=2.0)
+            if self.client_thread.is_alive():
+                logger.warning("Client thread did not terminate gracefully")
+            else:
+                logger.info("Client thread stopped")
+
+        self.client_thread = None
+        self.receiver_thread = None
+        self.sender_thread = None
 
         try:
             while True:
