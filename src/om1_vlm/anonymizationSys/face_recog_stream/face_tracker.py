@@ -120,6 +120,11 @@ class FaceTracker:
         # Track IDs seen this frame (for cleanup)
         self._active_ids: set = set()
 
+        # Largest bbox in current frame (closest person)
+        self._largest_bbox: Optional[Tuple[int, int, int, int]] = None
+        self._largest_track_id: Optional[int] = None
+        self._largest_bbox_area: int = 0
+
     @staticmethod
     def _init_tracker(track_buffer: int, det_conf: float = 0.5):
         """Initialize BoTSORT tracker with thresholds aligned to detection confidence."""
@@ -191,6 +196,9 @@ class FaceTracker:
 
         # Build results + collect tracks needing recognition
         self._active_ids = set()
+        self._largest_bbox = None
+        self._largest_track_id = None
+        self._largest_bbox_area = 0
         results: List[TrackResult] = []
         need_recog: List[Tuple[int, np.ndarray, Optional[np.ndarray]]] = []
 
@@ -205,6 +213,13 @@ class FaceTracker:
                 continue
 
             self._active_ids.add(track_id)
+
+            # Track largest bbox (closest person to camera)
+            area = (x2 - x1) * (y2 - y1)
+            if area > self._largest_bbox_area:
+                self._largest_bbox_area = area
+                self._largest_bbox = (x1, y1, x2, y2)
+                self._largest_track_id = track_id
 
             # Get or create identity state
             if track_id not in self._identities:
@@ -520,9 +535,32 @@ class FaceTracker:
                 "frames_seen": ident.frames_seen,
                 "recog_attempts": ident.recog_attempts,
                 "votes": len(ident.vote_names),
+                "is_largest": tid == self._largest_track_id,
             }
             for tid, ident in self._identities.items()
             if tid in self._active_ids
+        }
+
+    def get_largest_face(self) -> Optional[dict]:
+        """Get the largest face bbox in the current frame (likely closest person).
+
+        Returns
+        -------
+        dict or None
+            Dictionary with track_id, bbox, area, name, sim.
+            None if no tracks in current frame.
+        """
+        if self._largest_track_id is None:
+            return None
+
+        ident = self._identities.get(self._largest_track_id)
+        name = ident.name if ident and ident.status == "identified" else "unknown"
+        return {
+            "track_id": self._largest_track_id,
+            "bbox": self._largest_bbox,
+            "area": self._largest_bbox_area,
+            "name": name,
+            "sim": round(ident.sim, 3) if ident else 0.0,
         }
 
     def reset(self) -> None:
