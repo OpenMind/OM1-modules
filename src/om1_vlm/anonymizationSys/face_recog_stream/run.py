@@ -481,7 +481,7 @@ def main() -> None:
         face_tracker = FaceTracker(
             arc=arc,
             recog_interval=0.2,  # run AdaFace every 0.2s per unidentified track
-            vote_frames=2,  # collect 3 votes before deciding
+            vote_frames=3,  # collect 3 votes before deciding
             vote_threshold=0.5,  # majority vote (2/3)
             max_recog_attempts=10,
             sim_thr=float(args.sim_thr),
