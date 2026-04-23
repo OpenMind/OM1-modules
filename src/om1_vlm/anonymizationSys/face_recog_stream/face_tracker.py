@@ -125,6 +125,9 @@ class FaceTracker:
         # Track IDs seen this frame (for cleanup)
         self._active_ids: set = set()
 
+        # Current frame faces (for status queries)
+        self._current_faces: list = []
+
     @staticmethod
     def _init_tracker(track_buffer: int, det_conf: float = 0.5):
         """Initialize BoTSORT tracker with thresholds aligned to detection confidence."""
@@ -288,6 +291,22 @@ class FaceTracker:
 
         # Cleanup stale tracks
         self._cleanup_stale()
+
+        # Build faces sorted by bbox area (largest = closest first)
+        faces = []
+        for r in results:
+            x1, y1, x2, y2 = r.bbox
+            area = (x2 - x1) * (y2 - y1)
+            ident = self._identities.get(r.track_id)
+            name = ident.name if ident and ident.status == "identified" else "unknown"
+            faces.append(
+                {
+                    "name": name,
+                    "bbox": r.bbox,
+                    "area": area,
+                }
+            )
+        self._current_faces = sorted(faces, key=lambda f: f["area"], reverse=True)
 
         return results
 
@@ -504,7 +523,7 @@ class FaceTracker:
             ident.status = "identified"
             ident.name = best_name
             ident.sim = avg_sim
-            ident.unknown_since = 0  # reset — no longer unknown
+            ident.unknown_since = 0  # reset unknown timer
             log.info(
                 f"Track {ident.track_id}: confirmed '{best_name}' "
                 f"(votes={best_count}/{total_votes}, sim={avg_sim:.3f})"
@@ -539,6 +558,17 @@ class FaceTracker:
             if tid in self._active_ids
         }
 
+    def get_faces(self) -> list:
+        """Get all faces sorted by bbox area (largest first).
+
+        Returns
+        -------
+        list of dict
+            Each dict has 'name' (str), 'bbox' (tuple), 'area' (int).
+            Empty list if no faces in current frame.
+        """
+        return self._current_faces
+
     def get_unknown_captures(
         self,
         frame: np.ndarray,
@@ -549,37 +579,22 @@ class FaceTracker:
         max_captures_per_track: int = 10,
         jpeg_quality: int = 80,
     ) -> Optional[dict]:
-        """Check if any unknown tracks qualify for capture and return frame + bbox list.
+        """Check if any unknown tracks qualify for capture.
+
+        Returns 1 frame_b64 + list of all qualifying unknown bboxes.
 
         Criteria per track (ALL must be met):
           - status == "unknown" consistently for >= unknown_persist_sec
           - bbox area >= min_area_ratio of frame area (default 0.3%)
-          - time since last capture >= capture_interval_sec
-          - total captures < max_captures_per_track
-
-        Parameters
-        ----------
-        frame : ndarray (H, W, 3)
-            Current BGR frame (will be JPEG-encoded once if any track qualifies).
-        track_results : list[TrackResult]
-            Current frame's track results from update().
-        unknown_persist_sec : float
-            Seconds the track must remain unknown before first capture.
-        min_area_ratio : float
-            Minimum bbox area as fraction of frame area (0.003 = 0.3%).
-        capture_interval_sec : float
-            Minimum seconds between captures for the same track.
-        max_captures_per_track : int
-            Stop capturing after this many sends per track.
-        jpeg_quality : int
-            JPEG encode quality for frame_b64.
+          - time since last capture for this track >= capture_interval_sec
+          - total captures for this track < max_captures_per_track
 
         Returns
         -------
         dict or None
             None if no tracks qualify. Otherwise:
             {
-                "frame_b64": str,          # JPEG base64 of full frame
+                "frame_b64": str,
                 "timestamp": float,
                 "frame_hw": [H, W],
                 "unknown_captures": [
@@ -597,7 +612,6 @@ class FaceTracker:
         qualifying = []
 
         for tr in track_results:
-            # Must be unknown
             if tr.is_known or (tr.name is not None and tr.name != "unknown"):
                 continue
 
@@ -605,20 +619,17 @@ class FaceTracker:
             if ident is None:
                 continue
 
-            # Must have been unknown long enough
             if ident.unknown_since <= 0:
                 continue
             unknown_duration = now - ident.unknown_since
             if unknown_duration < unknown_persist_sec:
                 continue
 
-            # BBox area check
             x1, y1, x2, y2 = tr.bbox
             area = (x2 - x1) * (y2 - y1)
             if area < min_area:
                 continue
 
-            # Rate limit per track
             if ident.capture_count >= max_captures_per_track:
                 continue
             if (
@@ -640,13 +651,11 @@ class FaceTracker:
         if not qualifying:
             return None
 
-        # Encode frame once for all qualifying tracks
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
         if not ok:
             return None
         frame_b64 = base64.b64encode(buf.tobytes()).decode("ascii")
 
-        # Update capture state
         for q in qualifying:
             ident = self._identities.get(q["track_id"])
             if ident:
