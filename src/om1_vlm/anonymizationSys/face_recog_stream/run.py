@@ -120,6 +120,7 @@ import os
 import signal
 import threading
 import time
+from collections import deque
 from queue import Empty, Queue
 from typing import Any, Dict, List, Optional
 
@@ -182,6 +183,7 @@ class _FrameState:
         self.frame_bgr: Optional[np.ndarray] = None
         self.dets: Optional[np.ndarray] = None
         self.kpss: Optional[np.ndarray] = None
+        self.pending_captures: deque = deque(maxlen=50)
 
 
 def get_platform_prefix() -> str:
@@ -782,6 +784,12 @@ def main() -> None:
 
                 # Always call update so BoTSORT ages out lost tracks on empty frames
                 track_results = face_tracker.update(frame, dets, kpss)
+
+                # Check for capturable unknowns → queue for /who
+                capture = face_tracker.get_unknown_captures(frame, track_results)
+                if capture is not None:
+                    with frame_lock:
+                        frame_state.pending_captures.append(capture)
 
                 if dets is not None and dets.shape[0] > 0:
                     # Map track results back to detection indices (exclusive matching)

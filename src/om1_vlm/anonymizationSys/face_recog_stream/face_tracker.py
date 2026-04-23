@@ -60,8 +60,7 @@ class _TrackIdentity:
     recog_attempts: int = 0
     # Unknown capture state
     unknown_since: float = 0.0  # when status first became unknown (0 = not unknown)
-    last_capture_time: float = 0.0  # last time we sent a capture for this track
-    capture_count: int = 0  # total captures sent
+    capture_count: int = 0  # 1 = already captured, 0 = not yet
 
 
 class FaceTracker:
@@ -523,7 +522,7 @@ class FaceTracker:
             ident.status = "identified"
             ident.name = best_name
             ident.sim = avg_sim
-            ident.unknown_since = 0  # reset unknown timer
+            ident.unknown_since = 0  # no longer unknown
             log.info(
                 f"Track {ident.track_id}: confirmed '{best_name}' "
                 f"(votes={best_count}/{total_votes}, sim={avg_sim:.3f})"
@@ -575,19 +574,12 @@ class FaceTracker:
         track_results: List[TrackResult],
         unknown_persist_sec: float = 5.0,
         min_area_ratio: float = 0.003,
-        capture_interval_sec: float = 5.0,
-        max_captures_per_track: int = 10,
         jpeg_quality: int = 80,
     ) -> Optional[dict]:
         """Check if any unknown tracks qualify for capture.
 
-        Returns 1 frame_b64 + list of all qualifying unknown bboxes.
-
-        Criteria per track (ALL must be met):
-          - status == "unknown" consistently for >= unknown_persist_sec
-          - bbox area >= min_area_ratio of frame area (default 0.3%)
-          - time since last capture for this track >= capture_interval_sec
-          - total captures for this track < max_captures_per_track
+        Each unknown track gets captured exactly ONCE after being unknown
+        for >= unknown_persist_sec with bbox area >= min_area_ratio.
 
         Returns
         -------
@@ -599,15 +591,14 @@ class FaceTracker:
                 "frame_hw": [H, W],
                 "unknown_captures": [
                     {"track_id": int, "bbox": [x1,y1,x2,y2], "area": int,
-                     "unknown_duration": float, "capture_num": int},
+                     "unknown_duration": float},
                     ...
                 ]
             }
         """
         now = time.time()
         H, W = frame.shape[:2]
-        frame_area = H * W
-        min_area = frame_area * min_area_ratio
+        min_area = H * W * min_area_ratio
 
         qualifying = []
 
@@ -616,11 +607,13 @@ class FaceTracker:
                 continue
 
             ident = self._identities.get(tr.track_id)
-            if ident is None:
+            if ident is None or ident.unknown_since <= 0:
                 continue
 
-            if ident.unknown_since <= 0:
+            # Already captured once → skip
+            if ident.capture_count > 0:
                 continue
+
             unknown_duration = now - ident.unknown_since
             if unknown_duration < unknown_persist_sec:
                 continue
@@ -630,21 +623,12 @@ class FaceTracker:
             if area < min_area:
                 continue
 
-            if ident.capture_count >= max_captures_per_track:
-                continue
-            if (
-                ident.last_capture_time > 0
-                and (now - ident.last_capture_time) < capture_interval_sec
-            ):
-                continue
-
             qualifying.append(
                 {
                     "track_id": tr.track_id,
                     "bbox": [int(x1), int(y1), int(x2), int(y2)],
                     "area": int(area),
                     "unknown_duration": round(unknown_duration, 1),
-                    "capture_num": ident.capture_count + 1,
                 }
             )
 
@@ -659,8 +643,7 @@ class FaceTracker:
         for q in qualifying:
             ident = self._identities.get(q["track_id"])
             if ident:
-                ident.last_capture_time = now
-                ident.capture_count += 1
+                ident.capture_count = 1
 
         log.info(
             "Unknown capture: %d tracks [%s], frame %.1fKB",

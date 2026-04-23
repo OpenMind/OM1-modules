@@ -155,20 +155,12 @@ class HttpAPI:
                 if self.face_tracker is not None:
                     result["faces"] = self.face_tracker.get_faces()
 
-                    # Check for capturable unknown face
-                    capture = self.face_tracker.get_capturable_unknown()
-                    if capture is not None:
-                        with self.frame_lock:
-                            frm = (
-                                self.frame_state.frame_bgr.copy()
-                                if self.frame_state.frame_bgr is not None
-                                else None
-                            )
-                        if frm is not None:
-                            _, buf = cv2.imencode(".jpg", frm)
-                            capture["frame_b64"] = base64.b64encode(buf).decode("ascii")
-                            result["unknown_capture"] = capture
-                            self.face_tracker.mark_captured(capture["track_id"])
+                    # Drain pending unknown captures (queued by main loop)
+                    with self.frame_lock:
+                        captures = list(self.frame_state.pending_captures)
+                        self.frame_state.pending_captures.clear()
+                    if captures:
+                        result["unknown_captures"] = captures
 
                 return result
 
