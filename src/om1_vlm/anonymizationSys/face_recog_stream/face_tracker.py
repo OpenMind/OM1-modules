@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import base64
 import logging
 import time
 from collections import Counter
@@ -57,8 +58,10 @@ class _TrackIdentity:
     last_recog_time: float = 0.0
     frames_seen: int = 0
     recog_attempts: int = 0
-    # Unknown duration tracking (0.0 = not unknown)
-    unknown_since: float = 0.0
+    # Unknown capture state
+    unknown_since: float = 0.0  # when status first became unknown (0 = not unknown)
+    last_capture_time: float = 0.0  # last time we sent a capture for this track
+    capture_count: int = 0  # total captures sent
 
 
 class FaceTracker:
@@ -121,21 +124,6 @@ class FaceTracker:
 
         # Track IDs seen this frame (for cleanup)
         self._active_ids: set = set()
-
-        # Current frame faces sorted by area (for /who)
-        self._current_faces: list = []
-
-        # Unknown capture: track_ids already captured (no repeat upload)
-        self._uploaded_unknown_ids: set = set()
-
-        # Frame dimensions (set on first update)
-        self._frame_area: int = 0
-
-        # Min bbox area ratio to qualify for unknown capture (0.3%)
-        self._unknown_area_ratio: float = 0.003
-
-        # Seconds an unknown must persist before capture
-        self._unknown_capture_delay: float = 5.0
 
     @staticmethod
     def _init_tracker(track_buffer: int, det_conf: float = 0.5):
@@ -232,15 +220,9 @@ class FaceTracker:
             ident = self._identities[track_id]
             ident.frames_seen += 1
 
-            # Track how long this face has been unknown
-            if ident.status == "identified":
-                ident.unknown_since = 0.0  # reset when identified
-            elif ident.unknown_since == 0.0:
-                ident.unknown_since = now  # start timing
-
             # Re-identify: if "unknown" or low-confidence "identified" and enough
             # time has passed, reset voting state so recognition retries.
-            # High-confidence identified tracks are NOT re-verified.
+            # Handles the "walking closer" scenario where face gets clearer over time.
             if (
                 self.re_identify_interval > 0
                 and (now - ident.last_recog_time) >= self.re_identify_interval
@@ -306,26 +288,6 @@ class FaceTracker:
 
         # Cleanup stale tracks
         self._cleanup_stale()
-
-        # Update frame area for unknown capture threshold
-        self._frame_area = H * W
-
-        # Build faces sorted by bbox area (largest = closest first)
-        faces = []
-        for r in results:
-            x1, y1, x2, y2 = r.bbox
-            area = (x2 - x1) * (y2 - y1)
-            ident = self._identities.get(r.track_id)
-            name = ident.name if ident and ident.status == "identified" else "unknown"
-            faces.append(
-                {
-                    "name": name,
-                    "bbox": r.bbox,
-                    "area": area,
-                    "track_id": r.track_id,
-                }
-            )
-        self._current_faces = sorted(faces, key=lambda f: f["area"], reverse=True)
 
         return results
 
@@ -509,9 +471,13 @@ class FaceTracker:
 
     def _finalize_identity(self, ident: _TrackIdentity) -> None:
         """Decide identity from collected votes using majority voting."""
+        now = time.time()
+
         if not ident.vote_names:
             ident.status = "unknown"
             ident.name = None
+            if ident.unknown_since == 0:
+                ident.unknown_since = now
             return
 
         real_votes = [n for n in ident.vote_names if n != "__unknown__"]
@@ -519,6 +485,8 @@ class FaceTracker:
         if not real_votes:
             ident.status = "unknown"
             ident.name = None
+            if ident.unknown_since == 0:
+                ident.unknown_since = now
             log.debug(f"Track {ident.track_id}: all votes unknown")
             return
 
@@ -536,7 +504,7 @@ class FaceTracker:
             ident.status = "identified"
             ident.name = best_name
             ident.sim = avg_sim
-            ident.unknown_since = 0.0  # no longer unknown
+            ident.unknown_since = 0  # reset — no longer unknown
             log.info(
                 f"Track {ident.track_id}: confirmed '{best_name}' "
                 f"(votes={best_count}/{total_votes}, sim={avg_sim:.3f})"
@@ -544,6 +512,8 @@ class FaceTracker:
         else:
             ident.status = "unknown"
             ident.name = None
+            if ident.unknown_since == 0:
+                ident.unknown_since = now
             log.debug(
                 f"Track {ident.track_id}: no majority ({best_name} {best_count}/{total_votes})"
             )
@@ -569,78 +539,138 @@ class FaceTracker:
             if tid in self._active_ids
         }
 
-    def get_faces(self) -> list:
-        """Get all faces sorted by bbox area (largest first).
+    def get_unknown_captures(
+        self,
+        frame: np.ndarray,
+        track_results: List[TrackResult],
+        unknown_persist_sec: float = 5.0,
+        min_area_ratio: float = 0.003,
+        capture_interval_sec: float = 5.0,
+        max_captures_per_track: int = 10,
+        jpeg_quality: int = 80,
+    ) -> Optional[dict]:
+        """Check if any unknown tracks qualify for capture and return frame + bbox list.
 
-        Returns
-        -------
-        list of dict
-            Each dict has 'name' (str), 'bbox' (tuple), 'area' (int).
-            Empty list if no faces in current frame.
-        """
-        return [
-            {"name": f["name"], "bbox": f["bbox"], "area": f["area"]}
-            for f in self._current_faces
-        ]
+        Criteria per track (ALL must be met):
+          - status == "unknown" consistently for >= unknown_persist_sec
+          - bbox area >= min_area_ratio of frame area (default 0.3%)
+          - time since last capture >= capture_interval_sec
+          - total captures < max_captures_per_track
 
-    def get_capturable_unknown(self) -> Optional[dict]:
-        """Get an unknown face eligible for capture/upload.
-
-        Conditions:
-        - Status is not "identified" (unknown/new/identifying)
-        - Unknown for >= _unknown_capture_delay seconds (default 5s)
-        - Bbox area >= _unknown_area_ratio of frame area (default 0.3%)
-        - Not already captured (track_id not in _uploaded_unknown_ids)
+        Parameters
+        ----------
+        frame : ndarray (H, W, 3)
+            Current BGR frame (will be JPEG-encoded once if any track qualifies).
+        track_results : list[TrackResult]
+            Current frame's track results from update().
+        unknown_persist_sec : float
+            Seconds the track must remain unknown before first capture.
+        min_area_ratio : float
+            Minimum bbox area as fraction of frame area (0.003 = 0.3%).
+        capture_interval_sec : float
+            Minimum seconds between captures for the same track.
+        max_captures_per_track : int
+            Stop capturing after this many sends per track.
+        jpeg_quality : int
+            JPEG encode quality for frame_b64.
 
         Returns
         -------
         dict or None
-            {'track_id': int, 'bbox': tuple, 'area': int, 'timestamp': float}
-            or None if no eligible unknown.
+            None if no tracks qualify. Otherwise:
+            {
+                "frame_b64": str,          # JPEG base64 of full frame
+                "timestamp": float,
+                "frame_hw": [H, W],
+                "unknown_captures": [
+                    {"track_id": int, "bbox": [x1,y1,x2,y2], "area": int,
+                     "unknown_duration": float, "capture_num": int},
+                    ...
+                ]
+            }
         """
-        if self._frame_area == 0:
-            return None
-
         now = time.time()
-        min_area = self._frame_area * self._unknown_area_ratio
+        H, W = frame.shape[:2]
+        frame_area = H * W
+        min_area = frame_area * min_area_ratio
 
-        for face in self._current_faces:
-            if face["name"] != "unknown":
-                continue
-            if face["area"] < min_area:
+        qualifying = []
+
+        for tr in track_results:
+            # Must be unknown
+            if tr.is_known or (tr.name is not None and tr.name != "unknown"):
                 continue
 
-            tid = face["track_id"]
-            ident = self._identities.get(tid)
+            ident = self._identities.get(tr.track_id)
             if ident is None:
                 continue
-            if tid in self._uploaded_unknown_ids:
+
+            # Must have been unknown long enough
+            if ident.unknown_since <= 0:
                 continue
-            if ident.unknown_since == 0.0:
-                continue
-            if (now - ident.unknown_since) < self._unknown_capture_delay:
+            unknown_duration = now - ident.unknown_since
+            if unknown_duration < unknown_persist_sec:
                 continue
 
-            return {
-                "track_id": tid,
-                "bbox": face["bbox"],
-                "area": face["area"],
-                "timestamp": now,
-            }
+            # BBox area check
+            x1, y1, x2, y2 = tr.bbox
+            area = (x2 - x1) * (y2 - y1)
+            if area < min_area:
+                continue
 
-        return None
+            # Rate limit per track
+            if ident.capture_count >= max_captures_per_track:
+                continue
+            if (
+                ident.last_capture_time > 0
+                and (now - ident.last_capture_time) < capture_interval_sec
+            ):
+                continue
 
-    def mark_captured(self, track_id: int) -> None:
-        """Mark a track_id as captured so it won't be captured again."""
-        self._uploaded_unknown_ids.add(track_id)
-        log.info(f"Track {track_id}: marked as captured for upload")
+            qualifying.append(
+                {
+                    "track_id": tr.track_id,
+                    "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                    "area": int(area),
+                    "unknown_duration": round(unknown_duration, 1),
+                    "capture_num": ident.capture_count + 1,
+                }
+            )
+
+        if not qualifying:
+            return None
+
+        # Encode frame once for all qualifying tracks
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+        if not ok:
+            return None
+        frame_b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+
+        # Update capture state
+        for q in qualifying:
+            ident = self._identities.get(q["track_id"])
+            if ident:
+                ident.last_capture_time = now
+                ident.capture_count += 1
+
+        log.info(
+            "Unknown capture: %d tracks [%s], frame %.1fKB",
+            len(qualifying),
+            ", ".join(f"T{q['track_id']}" for q in qualifying),
+            len(frame_b64) / 1024,
+        )
+
+        return {
+            "frame_b64": frame_b64,
+            "timestamp": now,
+            "frame_hw": [H, W],
+            "unknown_captures": qualifying,
+        }
 
     def reset(self) -> None:
         """Reset all tracking state."""
         self._identities.clear()
         self._active_ids.clear()
-        self._current_faces.clear()
-        self._uploaded_unknown_ids.clear()
         if self._tracker is not None:
             self._tracker = self._init_tracker(
                 self._track_buffer, det_conf=self._det_conf
