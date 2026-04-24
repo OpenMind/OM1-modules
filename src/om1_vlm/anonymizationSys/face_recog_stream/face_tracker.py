@@ -301,6 +301,7 @@ class FaceTracker:
                     "name": name,
                     "bbox": r.bbox,
                     "area": area,
+                    "track_id": r.track_id,
                 }
             )
         self._current_faces = sorted(faces, key=lambda f: f["area"], reverse=True)
@@ -561,7 +562,7 @@ class FaceTracker:
         Returns
         -------
         list of dict
-            Each dict has 'name' (str), 'bbox' (tuple), 'area' (int).
+            Each dict has 'name', 'bbox', 'area', 'track_id'.
             Empty list if no faces in current frame.
         """
         return self._current_faces
@@ -601,6 +602,7 @@ class FaceTracker:
         """Reset all tracking state."""
         self._identities.clear()
         self._active_ids.clear()
+        self._current_faces.clear()
         if self._tracker is not None:
             self._tracker = self._init_tracker(
                 self._track_buffer, det_conf=self._det_conf
