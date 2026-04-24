@@ -16,7 +16,6 @@ Usage:
 
 from __future__ import annotations
 
-import base64
 import logging
 import time
 from collections import Counter
@@ -60,7 +59,6 @@ class _TrackIdentity:
     recog_attempts: int = 0
     # Unknown capture state
     unknown_since: float = 0.0  # when status first became unknown (0 = not unknown)
-    capture_count: int = 0  # 1 = already captured, 0 = not yet
 
 
 class FaceTracker:
@@ -568,96 +566,36 @@ class FaceTracker:
         """
         return self._current_faces
 
-    def get_unknown_captures(
-        self,
-        frame: np.ndarray,
-        track_results: List[TrackResult],
-        unknown_persist_sec: float = 5.0,
-        min_area_ratio: float = 0.003,
-        jpeg_quality: int = 80,
-    ) -> Optional[dict]:
-        """Check if any unknown tracks qualify for capture.
-
-        Each unknown track gets captured exactly ONCE after being unknown
-        for >= unknown_persist_sec with bbox area >= min_area_ratio.
+    def get_unknowns(self) -> list:
+        """Get all unknown faces in current frame with duration info.
 
         Returns
         -------
-        dict or None
-            None if no tracks qualify. Otherwise:
-            {
-                "frame_b64": str,
-                "timestamp": float,
-                "frame_hw": [H, W],
-                "unknown_captures": [
-                    {"track_id": int, "bbox": [x1,y1,x2,y2], "area": int,
-                     "unknown_duration": float},
-                    ...
-                ]
-            }
+        list of dict
+            Each dict has 'track_id', 'bbox', 'area', 'unknown_duration'.
+            Empty list if no unknowns.
         """
         now = time.time()
-        H, W = frame.shape[:2]
-        min_area = H * W * min_area_ratio
+        unknowns = []
 
-        qualifying = []
-
-        for tr in track_results:
-            if tr.is_known or (tr.name is not None and tr.name != "unknown"):
+        for face in self._current_faces:
+            if face["name"] != "unknown":
                 continue
-
-            ident = self._identities.get(tr.track_id)
+            tid = face["track_id"]
+            ident = self._identities.get(tid)
             if ident is None or ident.unknown_since <= 0:
                 continue
 
-            # Already captured once → skip
-            if ident.capture_count > 0:
-                continue
-
-            unknown_duration = now - ident.unknown_since
-            if unknown_duration < unknown_persist_sec:
-                continue
-
-            x1, y1, x2, y2 = tr.bbox
-            area = (x2 - x1) * (y2 - y1)
-            if area < min_area:
-                continue
-
-            qualifying.append(
+            unknowns.append(
                 {
-                    "track_id": tr.track_id,
-                    "bbox": [int(x1), int(y1), int(x2), int(y2)],
-                    "area": int(area),
-                    "unknown_duration": round(unknown_duration, 1),
+                    "track_id": tid,
+                    "bbox": list(face["bbox"]),
+                    "area": face["area"],
+                    "unknown_duration": round(now - ident.unknown_since, 1),
                 }
             )
 
-        if not qualifying:
-            return None
-
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
-        if not ok:
-            return None
-        frame_b64 = base64.b64encode(buf.tobytes()).decode("ascii")
-
-        for q in qualifying:
-            ident = self._identities.get(q["track_id"])
-            if ident:
-                ident.capture_count = 1
-
-        log.info(
-            "Unknown capture: %d tracks [%s], frame %.1fKB",
-            len(qualifying),
-            ", ".join(f"T{q['track_id']}" for q in qualifying),
-            len(frame_b64) / 1024,
-        )
-
-        return {
-            "frame_b64": frame_b64,
-            "timestamp": now,
-            "frame_hw": [H, W],
-            "unknown_captures": qualifying,
-        }
+        return unknowns
 
     def reset(self) -> None:
         """Reset all tracking state."""
