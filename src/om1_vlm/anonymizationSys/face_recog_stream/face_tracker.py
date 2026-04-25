@@ -220,6 +220,12 @@ class FaceTracker:
             ident = self._identities[track_id]
             ident.frames_seen += 1
 
+            # Track how long this face has been unknown
+            if ident.status == "identified":
+                ident.unknown_since = 0.0  # reset when identified
+            elif ident.unknown_since == 0.0:
+                ident.unknown_since = now  # start timing
+
             # Re-identify: if "unknown" or low-confidence "identified" and enough
             # time has passed, reset voting state so recognition retries.
             # Handles the "walking closer" scenario where face gets clearer over time.
