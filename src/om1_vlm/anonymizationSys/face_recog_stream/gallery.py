@@ -3,7 +3,7 @@ Gallery & embedding manager for face recognition.
 
 This module manages a disk-backed face gallery and its embedding store.
 It aligns new photos (optionally from `raw/` using SCRFD) into 112×112
-`aligned/` crops, embeds them with ArcFace (TensorRT), and persists the
+`aligned/` crops, embeds them with AdaFace (TensorRT), and persists the
 results under `embeds/<model_sig>/{index.json,vectors.f32,stats.json}`.
 It supports incremental refresh (only process new files), adding single
 aligned snapshots, clearing & rebuilding, and computing per-identity mean
@@ -17,7 +17,7 @@ Typical usage:
 Notes
 -----
 - Embeddings are float32; vectors are L2-normalized before similarity.
-- Batch size respects the ArcFace TensorRT optimization profile (`arc_max_bs`).
+- Batch size respects the AdaFace TensorRT optimization profile (`arc_max_bs`).
 """
 
 from __future__ import annotations
@@ -33,17 +33,12 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from .arcface import TRTArcFace, warp_face_by_5p
+from .adaface import TRTFaceRecognition, warp_face_by_5p
 from .scrfd import TRTSCRFD
 from .utils import infer_arc_batched, list_images  # helpers
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-
-
-# ----------------------------
-# Small filesystem helpers
-# ----------------------------
 
 
 def _ensure_dir(d: str) -> None:
@@ -54,18 +49,13 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H-%M-%S")
 
 
-# ----------------------------
-# Model signature
-# ----------------------------
-
-
-def make_model_sig(arc: TRTArcFace, extra: Optional[str] = None) -> str:
+def make_model_sig(arc: TRTFaceRecognition, extra: Optional[str] = None) -> str:
     """Build a readable, deterministic model signature for the embedding store.
 
     Parameters
     ----------
-    arc : TRTArcFace
-        ArcFace TensorRT wrapper; used to read model name and embedding dimension.
+    arc : TRTFaceRecognition
+        AdaFace TensorRT wrapper; used to read model name and embedding dimension.
     extra : str, optional
         Extra token to append (e.g., engine variant), by default ``None``.
 
@@ -82,11 +72,6 @@ def make_model_sig(arc: TRTArcFace, extra: Optional[str] = None) -> str:
     if extra:
         parts.append(str(extra))
     return "-".join(parts)
-
-
-# ----------------------------
-# Alignment utilities
-# ----------------------------
 
 
 def _align_largest_face_bgr(
@@ -116,17 +101,12 @@ def _align_largest_face_bgr(
     return cv2.resize(face, (size, size))
 
 
-# ----------------------------
-# Gallery Manager
-# ----------------------------
-
-
 class GalleryManager:
     """
     Gallery manager for face recognition.
 
     Manages a face gallery with aligned crops and an embedding store. It supports incremental refresh from
-    ``raw/`` and ``aligned/``, batched embedding respecting the ArcFace TensorRT max batch size, and per-identity statistics (counts and mean vectors)
+    ``raw/`` and ``aligned/``, batched embedding respecting the AdaFace TensorRT max batch size, and per-identity statistics (counts and mean vectors)
 
     Layout:
       gallery/
@@ -150,8 +130,8 @@ class GalleryManager:
         Absolute path to the gallery root (one subfolder per identity).
     embeds_root : str
         Absolute path to the embeddings root folder.
-    arc : TRTArcFace
-        ArcFace TensorRT wrapper used for feature extraction.
+    arc : TRTFaceRecognition
+        AdaFace TensorRT wrapper used for feature extraction.
     scrfd : TRTSCRFD or None
         SCRFD detector used to align new images from ``raw/``.
     det_conf : float
@@ -161,7 +141,7 @@ class GalleryManager:
     model_sig : str
         Model signature used to segregate embed stores.
     arc_max_bs : int
-        Maximum ArcFace batch size (matches TRT optimization profile).
+        Maximum AdaFace batch size (matches TRT optimization profile).
     store_dir : str
         Directory under ``embeds_root`` for this model signature.
     index_path : str
@@ -177,7 +157,7 @@ class GalleryManager:
         gallery_dir: str,
         embeds_dir: str,
         *,
-        arc: TRTArcFace,
+        arc: TRTFaceRecognition,
         scrfd: Optional[TRTSCRFD] = None,
         det_conf: float = 0.5,
         aligned_size: int = 112,
@@ -205,8 +185,6 @@ class GalleryManager:
         _ensure_dir(self.store_dir)
         self._index = self._load_index()
         self._dim = int(getattr(self.arc, "embedding_dim", 512))
-
-    # ---------- public API ----------
 
     def refresh(self, process_raw: bool = True) -> Tuple[int, int]:
         """
@@ -403,8 +381,6 @@ class GalleryManager:
             self.det_conf = float(det_conf)
         self.refresh(process_raw=True)
         return self.get_identity_means()
-
-    # ---------- internals ----------
 
     def _load_index(self) -> Dict:
         """Load or initialize the JSON index file.
@@ -613,7 +589,7 @@ class GalleryManager:
         return (vec / n).astype(np.float32, copy=False)
 
     def _embed_batch(self, imgs_112_bgr: List[np.ndarray]) -> np.ndarray:
-        """Embed a list of aligned crops, chunked to respect ArcFace max batch.
+        """Embed a list of aligned crops, chunked to respect AdaFace max batch.
 
         Parameters
         ----------
@@ -629,7 +605,7 @@ class GalleryManager:
             return np.empty((0, self._dim), np.float32)
         # Use your shared helper (already used at runtime)
         vecs = infer_arc_batched(self.arc, imgs_112_bgr, max_bs=self.arc_max_bs)
-        return np.asarray(vecs, dtype=np.float32, copy=False)
+        return np.asarray(vecs, dtype=np.float32)
 
     def _append_vectors(self, vecs: np.ndarray) -> int:
         """Append embeddings to ``vectors.f32`` and return the starting row index.
@@ -687,13 +663,8 @@ class GalleryManager:
         return out
 
 
-# ----------------------------------------
-# Back-compat free function
-# ----------------------------------------
-
-
 def build_gallery_embeddings(
-    gallery_root: str, scrfd: TRTSCRFD, arc: TRTArcFace, det_conf: float
+    gallery_root: str, scrfd: TRTSCRFD, arc: TRTFaceRecognition, det_conf: float
 ) -> Tuple[np.ndarray, List[str]]:
     """
     One-shot builder that returns per-identity means (old API).
@@ -705,8 +676,8 @@ def build_gallery_embeddings(
         Path to the gallery root.
     scrfd : TRTSCRFD
         SCRFD detector used for alignment.
-    arc : TRTArcFace
-        ArcFace TensorRT wrapper used for embedding.
+    arc : TRTFaceRecognition
+        AdaFace TensorRT wrapper used for embedding.
     det_conf : float
         Detection confidence threshold for alignment.
 

@@ -28,15 +28,21 @@ class ASRProcessor(ASRProcessorInterface):
         Command line arguments and configuration parameters
     callback : Optional[Callable], optional
         Callback function to receive ASR results (default: None)
+    error_callback : Optional[Callable], optional
+        Callback function to be called when an error occurs (default: None)
     """
 
     def __init__(
-        self, model_args: argparse.Namespace, callback: Optional[Callable] = None
+        self,
+        model_args: argparse.Namespace,
+        callback: Optional[Callable] = None,
+        error_callback: Optional[Callable] = None,
     ):
         self.model: Optional[ASRService] = None  # type: ignore
         self.model_config: Optional[StreamingRecognitionConfig] = None  # type: ignore
         self.args = model_args
         self.callback = callback
+        self.error_callback = error_callback
         self.running: bool = True
 
         # ASR settings
@@ -102,6 +108,11 @@ class ASRProcessor(ASRProcessorInterface):
             self.args.stop_threshold,
             self.args.stop_threshold_eou,
         )
+        client.add_word_boosting_to_config(
+            self.model_config,
+            self.args.boosted_lm_words,
+            self.args.boosted_lm_score,
+        )
         client.add_custom_configuration_to_config(
             self.model_config, self.args.custom_configuration
         )
@@ -149,7 +160,8 @@ class ASRProcessor(ASRProcessorInterface):
 
         Continuously processes audio chunks from the source and generates
         transcriptions. Final transcriptions are logged and sent to the
-        callback function if provided.
+        callback function if provided. If an error occurs during processing,
+        the error_callback is invoked (if provided) to close the connection.
 
         Parameters
         ----------
@@ -157,7 +169,11 @@ class ASRProcessor(ASRProcessorInterface):
             Source object that provides audio chunks for processing
         """
         if self.model is None or self.model_config is None:
-            raise RuntimeError("ASR model is not initialized.")
+            error_msg = "ASR model is not initialized."
+            logger.error(error_msg)
+            if self.error_callback:
+                self.error_callback()
+            raise RuntimeError(error_msg)
 
         logger.info("Waiting for first audio chunk to initialize sample rate...")
         while self.running:
@@ -174,29 +190,41 @@ class ASRProcessor(ASRProcessorInterface):
                 break
             time.sleep(0.01)
 
-        responses = self.model.streaming_response_generator(
-            audio_chunks=self._yield_audio_chunks(audio_source),
-            streaming_config=self.model_config,
-        )
+        try:
+            responses = self.model.streaming_response_generator(
+                audio_chunks=self._yield_audio_chunks(audio_source),
+                streaming_config=self.model_config,
+            )
 
-        for response in responses:
-            if not response.results:
-                continue
+            for response in responses:
+                if not self.running:
+                    logger.info("ASR processor stopped by user request")
+                    break
 
-            result = response.results[0]
-            if not result.alternatives:
-                continue
+                if not response.results:
+                    continue
 
-            transcript = result.alternatives[0].transcript.strip()
-            if not transcript:
-                continue
+                result = response.results[0]
+                if not result.alternatives:
+                    continue
 
-            if result.is_final:
-                logging.info(f"Final ASR Result: {transcript}")
-                if self.callback:
-                    self.callback(json.dumps({"asr_reply": transcript}))
-            else:
-                logging.info(f"Interim ASR Result: {transcript}")
+                transcript = result.alternatives[0].transcript.strip()
+                if not transcript:
+                    continue
+
+                if result.is_final:
+                    logging.info(f"Final ASR Result: {transcript}")
+                    if self.callback:
+                        self.callback(json.dumps({"asr_reply": transcript}))
+                else:
+                    logging.info(f"Interim ASR Result: {transcript}")
+        except Exception as e:
+            logger.error(f"Error in ASR processing: {e}")
+            if self.error_callback:
+                logger.info("Invoking error callback to close connection")
+                self.error_callback()
+            self.running = False
+            raise
 
     def stop(self):
         """

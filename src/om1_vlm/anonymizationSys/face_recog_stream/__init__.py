@@ -5,7 +5,8 @@ __all__ = [
     "pixelate",
     "draw",
     "trt_base",
-    "arcface",
+    "adaface",
+    "face_tracker",
     "scrfd",
     "gallery",
     "io",
@@ -15,4 +16,4 @@ __all__ = [
     "draw_pose",
     "fall_detector",
 ]
-__version__ = "0.1.0"
+__version__ = "0.1.1"
