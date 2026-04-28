@@ -151,8 +151,34 @@ class HttpAPI:
                     else self.who.lookback_sec
                 )
                 result = self.who.snapshot(sec)
+
+                # Read frame + faces + unknowns under one lock (consistent snapshot)
+                with self.frame_lock:
+                    frm = (
+                        self.frame_state.frame_bgr.copy()
+                        if self.frame_state.frame_bgr is not None
+                        else None
+                    )
+                    faces = self.frame_state.current_faces
+                    unknowns = self.frame_state.current_unknowns
+
                 if self.face_tracker is not None:
-                    result["faces"] = self.face_tracker.get_faces()
+                    result["faces"] = faces
+                    if unknowns:
+                        result["unknown_captures"] = unknowns
+
+                if frm is not None:
+                    _, buf = cv2.imencode(".jpg", frm, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    result["frame_b64"] = base64.b64encode(buf.tobytes()).decode(
+                        "ascii"
+                    )
+                    result["frame_hw"] = list(frm.shape[:2])
+                    result["frame_ts"] = time.time()
+                else:
+                    result["frame_b64"] = None
+                    result["frame_hw"] = None
+                    result["frame_ts"] = None
+
                 return result
 
             if path == "/config":

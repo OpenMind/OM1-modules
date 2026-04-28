@@ -57,6 +57,8 @@ class _TrackIdentity:
     last_recog_time: float = 0.0
     frames_seen: int = 0
     recog_attempts: int = 0
+    # Unknown capture state
+    unknown_since: float = 0.0  # when status first became unknown (0 = not unknown)
 
 
 class FaceTracker:
@@ -218,6 +220,12 @@ class FaceTracker:
             ident = self._identities[track_id]
             ident.frames_seen += 1
 
+            # Track how long this face has been unknown
+            if ident.status == "identified":
+                ident.unknown_since = 0.0  # reset when identified
+            elif ident.unknown_since == 0.0:
+                ident.unknown_since = now  # start timing
+
             # Re-identify: if "unknown" or low-confidence "identified" and enough
             # time has passed, reset voting state so recognition retries.
             # Handles the "walking closer" scenario where face gets clearer over time.
@@ -299,6 +307,7 @@ class FaceTracker:
                     "name": name,
                     "bbox": r.bbox,
                     "area": area,
+                    "track_id": r.track_id,
                 }
             )
         self._current_faces = sorted(faces, key=lambda f: f["area"], reverse=True)
@@ -485,9 +494,13 @@ class FaceTracker:
 
     def _finalize_identity(self, ident: _TrackIdentity) -> None:
         """Decide identity from collected votes using majority voting."""
+        now = time.time()
+
         if not ident.vote_names:
             ident.status = "unknown"
             ident.name = None
+            if ident.unknown_since == 0:
+                ident.unknown_since = now
             return
 
         real_votes = [n for n in ident.vote_names if n != "__unknown__"]
@@ -495,6 +508,8 @@ class FaceTracker:
         if not real_votes:
             ident.status = "unknown"
             ident.name = None
+            if ident.unknown_since == 0:
+                ident.unknown_since = now
             log.debug(f"Track {ident.track_id}: all votes unknown")
             return
 
@@ -512,6 +527,7 @@ class FaceTracker:
             ident.status = "identified"
             ident.name = best_name
             ident.sim = avg_sim
+            ident.unknown_since = 0  # no longer unknown
             log.info(
                 f"Track {ident.track_id}: confirmed '{best_name}' "
                 f"(votes={best_count}/{total_votes}, sim={avg_sim:.3f})"
@@ -519,6 +535,8 @@ class FaceTracker:
         else:
             ident.status = "unknown"
             ident.name = None
+            if ident.unknown_since == 0:
+                ident.unknown_since = now
             log.debug(
                 f"Track {ident.track_id}: no majority ({best_name} {best_count}/{total_votes})"
             )
@@ -550,15 +568,47 @@ class FaceTracker:
         Returns
         -------
         list of dict
-            Each dict has 'name' (str), 'bbox' (tuple), 'area' (int).
+            Each dict has 'name', 'bbox', 'area', 'track_id'.
             Empty list if no faces in current frame.
         """
         return self._current_faces
+
+    def get_unknowns(self) -> list:
+        """Get all unknown faces in current frame with duration info.
+
+        Returns
+        -------
+        list of dict
+            Each dict has 'track_id', 'bbox', 'area', 'unknown_duration'.
+            Empty list if no unknowns.
+        """
+        now = time.time()
+        unknowns = []
+
+        for face in self._current_faces:
+            if face["name"] != "unknown":
+                continue
+            tid = face["track_id"]
+            ident = self._identities.get(tid)
+            if ident is None or ident.unknown_since <= 0:
+                continue
+
+            unknowns.append(
+                {
+                    "track_id": tid,
+                    "bbox": list(face["bbox"]),
+                    "area": face["area"],
+                    "unknown_duration": round(now - ident.unknown_since, 1),
+                }
+            )
+
+        return unknowns
 
     def reset(self) -> None:
         """Reset all tracking state."""
         self._identities.clear()
         self._active_ids.clear()
+        self._current_faces.clear()
         if self._tracker is not None:
             self._tracker = self._init_tracker(
                 self._track_buffer, det_conf=self._det_conf

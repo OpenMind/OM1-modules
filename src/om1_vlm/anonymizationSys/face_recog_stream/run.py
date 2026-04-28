@@ -182,6 +182,8 @@ class _FrameState:
         self.frame_bgr: Optional[np.ndarray] = None
         self.dets: Optional[np.ndarray] = None
         self.kpss: Optional[np.ndarray] = None
+        self.current_faces: list = []
+        self.current_unknowns: list = []
 
 
 def get_platform_prefix() -> str:
@@ -782,6 +784,11 @@ def main() -> None:
 
                 # Always call update so BoTSORT ages out lost tracks on empty frames
                 track_results = face_tracker.update(frame, dets, kpss)
+
+                # Snapshot faces + unknowns (consistent with frame_bgr saved above)
+                with frame_lock:
+                    frame_state.current_faces = face_tracker.get_faces()
+                    frame_state.current_unknowns = face_tracker.get_unknowns()
 
                 if dets is not None and dets.shape[0] > 0:
                     # Map track results back to detection indices (exclusive matching)
