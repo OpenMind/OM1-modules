@@ -1,4 +1,3 @@
-import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from om1_utils.singleton import singleton
