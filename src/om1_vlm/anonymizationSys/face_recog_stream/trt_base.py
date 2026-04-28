@@ -3,6 +3,7 @@
 
 Replaces pycuda dependency with PyTorch — no extra install needed.
 """
+
 from __future__ import annotations
 
 import os.path as osp
