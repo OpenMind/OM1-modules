@@ -6,6 +6,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import pyaudio
@@ -45,6 +46,8 @@ class AudioInputStream:
         A callback function that receives audio data chunks (default: None)
     language_code: str, optional
         The language for the ASR to listen. (default: en-US)
+    alternative_language_codes: List[str], optional
+        A list of alternative language codes for the ASR to consider (default: None)
     remote_input : bool, optional
         If True, indicates that the audio input is from a remote source.
     """
@@ -58,6 +61,7 @@ class AudioInputStream:
         audio_data_callback: Optional[Callable] = None,
         audio_data_callbacks: Optional[List[Callable]] = None,
         language_code: Optional[str] = None,
+        alternative_language_codes: Optional[List[str]] = None,
         remote_input: bool = False,
         enable_tts_interrupt: bool = False,
     ):
@@ -74,6 +78,9 @@ class AudioInputStream:
             self._language_code = language_code
             logger.info(f"Using specified language code: {self._language_code}")
 
+        # Alternative language codes
+        self._alternative_language_codes = alternative_language_codes or []
+
         # Callback for audio data
         self._audio_data_callbacks = audio_data_callbacks or []
         self.register_audio_data_callback(audio_data_callback)
@@ -85,7 +92,7 @@ class AudioInputStream:
         self._enable_tts_interrupt = enable_tts_interrupt
 
         # Thread-safe buffer for audio data
-        self._buff: queue.Queue[Optional[bytes]] = queue.Queue()
+        self._buff: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=5)
 
         # audio interface and stream
         self._audio_interface: pyaudio.PyAudio = pyaudio.PyAudio()
@@ -286,36 +293,53 @@ class AudioInputStream:
         Exception
             If there are errors initializing the audio interface or opening the stream
         """
-        if not self.running:
-            return self
+        self.running = True
+
+        while not self._buff.empty():
+            try:
+                self._buff.get_nowait()
+            except queue.Empty:
+                break
 
         try:
+            if self.session is None:
+                try:
+                    self.session = open_zenoh_session()
+                    self.pub = self.session.declare_publisher(self.topic)
+                    self.session.declare_subscriber(
+                        self.topic, self.zenoh_audio_message
+                    )
+                    logger.info("Zenoh session initialized")
+                except Exception as e:
+                    logger.error(f"Failed to initialize Zenoh: {e}")
+                    self.session = None
+
             if not self.remote_input:
                 logger.info("Remote input is disabled, initializing audio input stream")
                 if self._rate is None:
                     self._rate = 16000
                 if self._chunk is None:
                     self._chunk = int(self._rate * 0.2)
-                self._audio_stream = self._audio_interface.open(
-                    format=pyaudio.paInt16,
-                    input_device_index=(
-                        int(self._device) if self._device is not None else None
-                    ),
-                    channels=1,
-                    rate=self._rate,
-                    input=True,
-                    frames_per_buffer=self._chunk,
-                    stream_callback=self._fill_buffer,  # type: ignore
-                )
 
-            # Start the audio processing thread
+                if self._audio_stream is None:
+                    self._audio_stream = self._audio_interface.open(
+                        format=pyaudio.paInt16,
+                        input_device_index=(
+                            int(self._device) if self._device is not None else None
+                        ),
+                        channels=1,
+                        rate=self._rate,
+                        input=True,
+                        frames_per_buffer=self._chunk,
+                        stream_callback=self._fill_buffer,  # type: ignore
+                    )
+
             self._start_audio_thread()
 
             logger.info(f"Started audio stream with device {self._device}")
 
         except Exception as e:
             logger.error(f"Error opening audio stream: {e}")
-            self._audio_interface.terminate()
             raise
 
         return self
@@ -394,16 +418,15 @@ class AudioInputStream:
 
     def generator(self) -> Generator[Dict[str, Union[bytes, int]], None, None]:
         """
-        Generates a stream of audio data chunks.
+        Generates a stream of audio data chunk.
 
-        This generator yields audio data chunks, combining multiple chunks when
-        available to reduce processing overhead. It skips yielding data when
-        TTS is active.
+        This generator yields audio data chunk.
+        It continuously retrieves audio data from the buffer and yields it as a dictionary.
 
         Yields
         ------
         bytes
-            Combined audio data chunks
+            The next chunk of audio data from the buffer
         """
         while self.running:
             chunk = self._buff.get()
@@ -414,22 +437,14 @@ class AudioInputStream:
                 if self._is_tts_active:
                     continue
 
-            # Collect additional chunks that are immediately available
             data = [chunk]
-            while True:
-                try:
-                    chunk = self._buff.get(block=False)
-                    if chunk is None:
-                        assert self.running
-                    if chunk:
-                        data.append(chunk)
-                except queue.Empty:
-                    break
 
             response = {
                 "audio": base64.b64encode(b"".join(data)).decode("utf-8"),
                 "rate": self._rate,
                 "language_code": self._language_code,
+                "alternative_language_codes": self._alternative_language_codes,
+                "timestamp": int(time.time()),
             }
             for audio_callback in self._audio_data_callbacks:
                 audio_callback(json.dumps(response))
@@ -446,25 +461,23 @@ class AudioInputStream:
     def stop(self):
         """
         Stops the audio stream and cleans up resources.
-
-        This method stops the audio stream, terminates the PyAudio interface,
-        and ensures the audio processing thread is properly shut down.
         """
         self.running = False
 
+        self._buff.put(None)
+
+        if self._audio_thread and self._audio_thread.is_alive():
+            self._audio_thread.join(timeout=2.0)
+            if self._audio_thread.is_alive():
+                logger.warning("Audio processing thread did not terminate gracefully")
+            else:
+                logger.info("Audio processing thread terminated successfully")
+
+        self._audio_thread = None
+
         if self.session:
             self.session.close()
+            self.session = None
+            self.pub = None
 
-        if self._audio_stream:
-            self._audio_stream.stop_stream()
-            self._audio_stream.close()
-
-        if self._audio_interface:
-            self._audio_interface.terminate()
-
-        # Clean up the audio processing thread
-        if self._audio_thread and self._audio_thread.is_alive():
-            self._audio_thread.join(timeout=1.0)
-
-        self._buff.put(None)
         logger.info("Stopped audio stream")

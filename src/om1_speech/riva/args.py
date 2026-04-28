@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import argparse
+import os
 from pathlib import Path
 
 
@@ -59,7 +60,7 @@ def add_asr_config_argparse_parameters(
         )
     parser.add_argument(
         "--automatic-punctuation",
-        default=False,
+        default=True,
         action="store_true",
         help="Flag that controls if transcript should be automatically punctuated",
     )
@@ -75,15 +76,39 @@ def add_asr_config_argparse_parameters(
         help="Language code of the model to be used.",
     )
     parser.add_argument("--model-name", default="", help="Model name to be used.")
+
+    default_boosted_words = [
+        "OpenMind",
+        "Bits",
+        "Bytes",
+        "Pixel",
+        "hello",
+        "GTC",
+        "Unitree",
+        "robot",
+        "NVIDIA",
+    ]
+
+    env_boosted_words = os.getenv("BOOSTED_LM_WORDS", "")
+    if env_boosted_words:
+        additional_words = [
+            word.strip() for word in env_boosted_words.split(",") if word.strip()
+        ]
+        unique_words = [
+            word for word in additional_words if word not in default_boosted_words
+        ]
+        default_boosted_words.extend(unique_words)
+
     parser.add_argument(
         "--boosted-lm-words",
         action="append",
-        help="Words to boost when decoding. Can be used multiple times to boost multiple words.",
+        default=default_boosted_words,
+        help="Words to boost when decoding. Can be used multiple times to boost multiple words. Can also be set via BOOSTED_LM_WORDS environment variable (comma-separated).",
     )
     parser.add_argument(
         "--boosted-lm-score",
         type=float,
-        default=4.0,
+        default=100.0,
         help="Recommended range for the boost score is 20 to 100. The higher the boost score, the more biased the ASR engine is towards this word.",
     )
     parser.add_argument(
@@ -100,37 +125,37 @@ def add_asr_config_argparse_parameters(
     )
     parser.add_argument(
         "--start-history",
-        default=-1,
+        default=150,
         type=int,
         help="Value (in milliseconds) to detect and initiate start of speech utterance",
     )
     parser.add_argument(
         "--start-threshold",
-        default=-1.0,
+        default=0.50,
         type=float,
         help="Threshold value for detecting the start of speech utterance",
     )
     parser.add_argument(
         "--stop-history",
-        default=-1,
+        default=800,
         type=int,
         help="Value (in milliseconds) to detect end of utterance and reset decoder",
     )
     parser.add_argument(
         "--stop-threshold",
-        default=-1.0,
+        default=0.92,
         type=float,
         help="Threshold value for detecting the end of speech utterance",
     )
     parser.add_argument(
         "--stop-history-eou",
-        default=-1,
+        default=400,
         type=int,
         help="Value (in milliseconds) to detect end of utterance for the 1st pass and generate an intermediate final transcript",
     )
     parser.add_argument(
         "--stop-threshold-eou",
-        default=-1.0,
+        default=0.85,
         type=float,
         help="Threshold value for likelihood of blanks before detecting end of utterance",
     )

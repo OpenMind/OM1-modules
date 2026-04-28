@@ -77,7 +77,7 @@ class CameraReader:
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             self.cap.set(cv2.CAP_PROP_FPS, fps)
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
 
             if not self.cap or not self.cap.isOpened():
                 raise RuntimeError(f"Failed to open camera device {device}")

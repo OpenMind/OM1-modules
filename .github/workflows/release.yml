@@ -1,4 +1,4 @@
-name: Release Riva Speech Server ARM64 Image
+name: ECR Release Workflow
 
 on:
   push:
@@ -10,8 +10,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-arm64:
+  build-riva-arm64:
     runs-on: ubuntu-22.04-arm
+    permissions:
+      id-token: write
+      contents: read
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
       metadata: ${{ steps.meta.outputs.json }}
@@ -19,8 +22,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to Amazon ECR Public
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
 
       - name: Login to Docker Hub
         uses: docker/login-action@v2
@@ -32,7 +46,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v4
         with:
-          images: openmindagi/riva-speech-server
+          images: public.ecr.aws/b8k9c8n5/openmind/riva-speech-server
           tags: |
             type=semver,pattern={{version}},prefix=v
             type=semver,pattern={{major}}.{{minor}},prefix=v
@@ -49,14 +63,87 @@ jobs:
           file: ./docker/Dockerfile.riva
           platforms: linux/arm64
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=openmindagi/riva-speech-server,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=public.ecr.aws/b8k9c8n5/openmind/riva-speech-server,push-by-digest=true,name-canonical=true,push=true
 
-  create-manifest:
-    runs-on: ubuntu-latest
-    needs: [build-arm64]
+  build-embedding-arm64:
+    runs-on: ubuntu-22.04-arm
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      metadata: ${{ steps.meta.outputs.json }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to Amazon ECR Public
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: public.ecr.aws/b8k9c8n5/openmind/embedding_service
+          tags: |
+            type=semver,pattern={{version}},prefix=v
+            type=semver,pattern={{major}}.{{minor}},prefix=v
+            type=ref,event=branch
+            type=sha
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=e5-small-v2-aarch64
+
+      - name: Build and push ARM64 image by digest
+        id: build
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./docker/Dockerfile.embed
+          platforms: linux/arm64
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=public.ecr.aws/b8k9c8n5/openmind/embedding_service,push-by-digest=true,name-canonical=true,push=true
+
+  create-riva-manifest:
+    runs-on: ubuntu-latest
+    needs: [build-riva-arm64]
+    permissions:
+      id-token: write
+      contents: read
+      deployments: write
+    environment:
+      name: ${{ startsWith(github.ref, 'refs/tags/v') && 'production-riva' || 'staging-riva' }}
+      url: https://gallery.ecr.aws/b8k9c8n5/openmind/riva-speech-server
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to Amazon ECR Public
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
 
       - name: Login to Docker Hub
         uses: docker/login-action@v2
@@ -67,7 +154,7 @@ jobs:
       - name: Create manifest list and push
         run: |
           # Get the metadata from arm64 build to extract tags
-          tags=$(echo '${{ needs.build-arm64.outputs.metadata }}' | jq -r '.tags[]')
+          tags=$(echo '${{ needs.build-riva-arm64.outputs.metadata }}' | jq -r '.tags[]')
 
           # Create manifest for each tag
           for tag in $tags; do
@@ -75,5 +162,46 @@ jobs:
 
             docker buildx imagetools create \
               --tag $tag \
-              openmindagi/riva-speech-server@${{ needs.build-arm64.outputs.image-digest }}
+              public.ecr.aws/b8k9c8n5/openmind/riva-speech-server@${{ needs.build-riva-arm64.outputs.image-digest }}
+          done
+
+  create-embedding-manifest:
+    runs-on: ubuntu-latest
+    needs: [build-embedding-arm64]
+    permissions:
+      id-token: write
+      contents: read
+      deployments: write
+    environment:
+      name: ${{ startsWith(github.ref, 'refs/tags/v') && 'production-embedding' || 'staging-embedding' }}
+      url: https://gallery.ecr.aws/b8k9c8n5/openmind/embedding_service
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to Amazon ECR Public
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        run: |
+          tags=$(echo '${{ needs.build-embedding-arm64.outputs.metadata }}' | jq -r '.tags[]')
+          for tag in $tags; do
+            echo "Creating manifest for: $tag"
+            docker buildx imagetools create \
+              --tag $tag \
+              public.ecr.aws/b8k9c8n5/openmind/embedding_service@${{ needs.build-embedding-arm64.outputs.image-digest }}
           done

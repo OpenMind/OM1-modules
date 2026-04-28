@@ -103,6 +103,12 @@ class Application:
             help="Run in server mode",
         )
         parser.add_argument(
+            "--server-timeout",
+            type=float,
+            default=300.0,
+            help="Connection timeout in seconds for server mode (default: 300s)",
+        )
+        parser.add_argument(
             "--remote-url",
             type=str,
             help="Remote webSocket URL server for audio stream input",
@@ -152,7 +158,7 @@ class Application:
         # Create thread processor
         if self.args.server_mode:
             self.connection_processor = ConnectionProcessor(
-                self.args, ASRProcessor, AudioStreamInput
+                self.args, ASRProcessor, AudioStreamInput, self.args.server_timeout
             )
             self.connection_processor.set_server(self.ws_server)
         else:

@@ -2,7 +2,6 @@ import base64
 import json
 import logging
 import multiprocessing as mp
-import queue
 import threading
 import time
 from queue import Empty, Full
@@ -136,6 +135,8 @@ class AudioRTSPInputStream:
         A callback function that receives audio data chunks (default: None)
     language_code: str, optional
         The language for the ASR to listen. (default: en-US)
+    alternative_language_codes: List[str], optional
+        A list of alternative language codes for the ASR to consider (default: None)
     rtsp_url : str, optional
         The RTSP URL of the audio stream. If None, uses device or device_name to determine the URL.
         (default: "rtsp://localhost:8554/audio")
@@ -149,6 +150,7 @@ class AudioRTSPInputStream:
         audio_data_callback: Optional[Callable] = None,
         audio_data_callbacks: Optional[List[Callable]] = None,
         language_code: Optional[str] = None,
+        alternative_language_codes: Optional[List[str]] = None,
         enable_tts_interrupt: bool = False,
     ):
         self._rate = rate
@@ -163,6 +165,9 @@ class AudioRTSPInputStream:
         else:
             self._language_code = language_code
             logger.info(f"Using specified language code: {self._language_code}")
+
+        # Alternative language codes
+        self._alternative_language_codes = alternative_language_codes or []
 
         # Callback for audio data
         self._audio_data_callbacks = audio_data_callbacks or []
@@ -411,16 +416,15 @@ class AudioRTSPInputStream:
 
     def generator(self) -> Generator[Dict[str, Union[bytes, int]], None, None]:
         """
-        Generates a stream of audio data chunks.
+        Generates a stream of audio data chunk.
 
-        This generator yields audio data chunks, combining multiple chunks when
-        available to reduce processing overhead. It skips yielding data when
-        TTS is active.
+        This generator yields audio data chunk.
+        It continuously retrieves audio data from the buffer and yields it as a dictionary.
 
         Yields
         ------
-        Dict[str, Union[bytes, int]]
-            Dictionary containing base64 encoded audio, rate, and language_code
+        bytes
+            The next chunk of audio data from the buffer
         """
         while self.running:
             chunk = self._buff.get()
@@ -431,22 +435,14 @@ class AudioRTSPInputStream:
                 if self._is_tts_active:
                     continue
 
-            # Collect additional chunks that are immediately available
             data = [chunk]
-            while True:
-                try:
-                    chunk = self._buff.get(block=False)
-                    if chunk is None:
-                        assert self.running
-                    if chunk:
-                        data.append(chunk)
-                except queue.Empty:
-                    break
 
             response = {
                 "audio": base64.b64encode(b"".join(data)).decode("utf-8"),
                 "rate": self._rate,
                 "language_code": self._language_code,
+                "alternative_language_codes": self._alternative_language_codes,
+                "timestamp": int(time.time()),
             }
             for audio_callback in self._audio_data_callbacks:
                 audio_callback(json.dumps(response))
