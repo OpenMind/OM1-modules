@@ -12,6 +12,7 @@ from typing import Callable, Dict, Optional
 import requests
 import zenoh
 
+from prometheus import om1_tts_latency, om1_tts_latency_last
 from zenoh_msgs import AudioStatus, String, open_zenoh_session, prepare_header
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
@@ -163,6 +164,7 @@ class AudioOutputStream:
         """
         while self.running:
             try:
+                start_time = time.time()
                 tts_request = self._pending_requests.get()
                 response = requests.post(
                     self._url,
@@ -171,6 +173,14 @@ class AudioOutputStream:
                     timeout=(5, 15),
                 )
                 logger.info(f"Received TTS response: {response.status_code}")
+
+                om1_tts_latency.labels(model="default").observe(
+                    time.time() - start_time
+                )
+                om1_tts_latency_last.labels(model="default").set(
+                    time.time() - start_time
+                )
+
                 if response.status_code == 200:
                     result = response.json()
                     if "response" in result:

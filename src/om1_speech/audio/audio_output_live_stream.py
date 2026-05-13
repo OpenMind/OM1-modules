@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Optional
 import openai
 import zenoh
 
+from prometheus import om1_tts_latency, om1_tts_latency_last
 from zenoh_msgs import AudioStatus, String, open_zenoh_session, prepare_header
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
@@ -205,6 +206,7 @@ class AudioOutputLiveStream:
                     AudioStatus.STATUS_SPEAKER.ACTIVE.value, request_id
                 )
 
+                start_time = time.time()
                 with self.openai_client.audio.speech.with_streaming_response.create(
                     model=self._tts_model,
                     voice=self._tts_voice if tts_request["voice_id"] is None else tts_request["voice_id"],  # type: ignore
@@ -212,6 +214,14 @@ class AudioOutputLiveStream:
                     input=tts_request["text"],  # type: ignore
                     extra_body=self._extra_body,
                 ) as response:
+
+                    om1_tts_latency.labels(model="default").observe(
+                        time.time() - start_time
+                    )
+                    om1_tts_latency_last.labels(model="default").set(
+                        time.time() - start_time
+                    )
+
                     for chunk in response.iter_bytes(chunk_size=1024):
                         if not self.running:
                             break
