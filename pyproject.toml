@@ -35,6 +35,7 @@ vulture = "^2.14"
 openai= "1.60.1"
 filelock = "3.20.3"
 prometheus-client = "0.25.0"
+urllib3="2.7.0"
 
 
 [tool.poetry.extras]
