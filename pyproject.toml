@@ -8,7 +8,8 @@ packages = [
     { include = "om1_speech", from = "src" },
     { include = "om1_utils", from = "src" },
     { include = "om1_vlm", from = "src" },
-    { include = "zenoh_msgs", from = "src" }
+    { include = "zenoh_msgs", from = "src" },
+    { include = "prometheus", from = "src" }
 ]
 
 [tool.poetry.scripts]
@@ -33,6 +34,7 @@ av = "^15.1.0"
 vulture = "^2.14"
 openai= "1.60.1"
 filelock = "3.20.3"
+prometheus-client = "0.25.0"
 
 
 [tool.poetry.extras]
