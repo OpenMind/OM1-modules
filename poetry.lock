@@ -2267,4 +2267,4 @@ realsense = ["pyrealsense2", "pyrealsense2-macosx"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<4.0"
-content-hash = "944d4f92d174d254e3e3d6b766b89955b931221c773012613e6121ca6501317c"
+content-hash = "a0d77d29cb6258768c9e66bafe3bc5979389e3b448561f539cc40d4157fa6f5f"
