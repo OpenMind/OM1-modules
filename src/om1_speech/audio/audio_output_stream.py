@@ -12,7 +12,7 @@ from typing import Callable, Dict, Optional
 import requests
 import zenoh
 
-from prometheus import om1_tts_latency, om1_tts_latency_last
+from om1_speech.prometheus import om1_tts_latency, om1_tts_latency_last
 from zenoh_msgs import AudioStatus, String, open_zenoh_session, prepare_header
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
