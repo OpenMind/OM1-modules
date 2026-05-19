@@ -616,20 +616,20 @@ def main() -> None:
         # Selection: score = (bbox_area / frame_area) * frontality, in [0,1].
         # Floor 0.005 = "face covers ~0.5% of frame AND is reasonably frontal".
         # CALIBRATE on GTC footage; see notes in selfie_logic.score_face docstring.
-        "selfie_min_engagement": 0.015,
+        "selfie_min_engagement": 0.005,
         "selfie_ambiguity_ratio": 0.80,  # top2/top1 > this → ambiguous
         # Quality gate on the chosen face crop
         "selfie_min_face_px": 70,
-        "selfie_min_conf": 0.7,
+        "selfie_min_conf": 0.4,
         "selfie_min_frontality": 0.4,
-        "selfie_sharp_thr": 50.0,
-        "selfie_brightness_min": 40,
-        "selfie_brightness_max": 220,
+        "selfie_sharp_thr": 5.0,
+        "selfie_brightness_min": 30,
+        "selfie_brightness_max": 230,
         # Multi-frame
-        "selfie_novelty_thr": 0.95,  # cosine > → duplicate, skip
+        "selfie_novelty_thr": 0.93,  # cosine > → duplicate, skip
         "selfie_consistency_thr": 0.50,  # cosine < → wrong person, skip
         # Dedup
-        "selfie_merge_thr": 0.45,  # same-name family → merge
+        "selfie_merge_thr": 0.5,  # same-name family → merge
         "selfie_cross_name_thr": 0.60,  # cross-name → reject (unless force)
     }
 
