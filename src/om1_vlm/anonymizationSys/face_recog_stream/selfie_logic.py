@@ -325,17 +325,11 @@ def update_running_mean(
     return (out / norm).astype(np.float32, copy=False)
 
 
-def cosine_to_mean(running_mean: Optional[np.ndarray], new_v: np.ndarray) -> float:
+def cosine_to_mean(running_mean: np.ndarray, new_v: np.ndarray) -> float:
     """
     Cosine similarity. Both inputs assumed unit-norm.
 
     Used for BOTH novelty (skip frames too similar to running mean)
     AND identity consistency (reject frames too different from collected so far).
-
-    Returns 0.0 if running_mean is None (no frames accepted yet). This is a
-    defensive default — call sites only invoke this after a first frame has
-    been accepted, so None shouldn't happen, but typing makes it possible.
     """
-    if running_mean is None:
-        return 0.0
     return float(np.dot(running_mean, new_v))
