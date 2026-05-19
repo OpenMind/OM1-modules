@@ -282,12 +282,108 @@ class GalleryManager:
         cv2.imwrite(absf, img_112_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
         # Embed & append
-        vec = self._embed_single(img_112_bgr)
+        vec = self.embed_aligned(img_112_bgr)
         row = self._append_vectors(vec[None, :])
         self._index["items"][rel] = {"row": row, "label": label}
         self._save_index()
         self._recompute_stats()
         return rel
+
+    def add_aligned_no_stats(
+        self,
+        label: str,
+        img_112_bgr: np.ndarray,
+        vec: Optional[np.ndarray] = None,
+        fname_hint: Optional[str] = None,
+    ) -> str:
+        """
+        Add a 112×112 aligned snapshot WITHOUT recomputing stats.
+
+        Designed for multi-shot batch enrollment (e.g. /selfie collects N frames
+        and saves them all in one go). Behaves like ``add_aligned_snapshot`` but:
+
+        - Skips the trailing ``_recompute_stats()`` call. Caller MUST invoke
+          ``recompute_stats()`` after the batch finishes; otherwise stats.json
+          stays stale until the next refresh.
+        - If ``vec`` is provided, uses it directly (must be L2-normalized).
+          Avoids re-embedding the same crop when the caller already has it
+          (e.g. /selfie pipeline embedded it for dedup/novelty/consistency).
+
+        Parameters
+        ----------
+        label : str
+            Identity name (subfolder under gallery).
+        img_112_bgr : np.ndarray
+            Aligned BGR crop of shape ``(112,112,3)`` (will be resized if needed).
+        vec : np.ndarray, optional
+            Pre-computed L2-normalized embedding of shape ``(dim,)``. If
+            supplied and valid, the crop is not re-embedded. If shape/norm
+            looks wrong, falls back to a fresh embedding.
+        fname_hint : str, optional
+            Preferred filename (``.jpg`` appended if missing), by default ``None``.
+
+        Returns
+        -------
+        str
+            Relative path of the saved aligned image
+            (e.g., ``"wendy/aligned/2026-05-19T18-30-00_00.jpg"``).
+        """
+        if img_112_bgr is None or img_112_bgr.size == 0:
+            raise ValueError("empty snapshot")
+
+        if img_112_bgr.shape[:2] != (self.aligned_size, self.aligned_size):
+            img_112_bgr = cv2.resize(
+                img_112_bgr, (self.aligned_size, self.aligned_size)
+            )
+
+        # Save to gallery/<label>/aligned/ with collision-safe filename
+        label_dir = osp.join(self.gallery_dir, label, "aligned")
+        _ensure_dir(label_dir)
+        base = (fname_hint or f"{_now_iso()}.jpg").strip()
+        if not base.lower().endswith(".jpg"):
+            base += ".jpg"
+        rel = osp.join(label, "aligned", base).replace("\\", "/")
+        absf = osp.join(self.gallery_dir, rel)
+        i = 0
+        while osp.exists(absf):
+            i += 1
+            stem, ext = osp.splitext(base)
+            rel = osp.join(label, "aligned", f"{stem}_{i}{ext}").replace("\\", "/")
+            absf = osp.join(self.gallery_dir, rel)
+
+        cv2.imwrite(absf, img_112_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+        # Embed (or use the provided vector with defensive validation)
+        if vec is None:
+            vec = self.embed_aligned(img_112_bgr)
+        else:
+            vec = np.asarray(vec, dtype=np.float32).reshape(-1)
+            if vec.shape[0] != self._dim:
+                vec = self.embed_aligned(img_112_bgr)
+            else:
+                n = float(np.linalg.norm(vec))
+                if n < 1e-9:
+                    vec = self.embed_aligned(img_112_bgr)
+                elif abs(n - 1.0) > 1e-4:
+                    vec = (vec / n).astype(np.float32, copy=False)
+
+        # Append to vectors.f32 + update index
+        row = self._append_vectors(vec[None, :])
+        self._index["items"][rel] = {"row": int(row), "label": label}
+        self._save_index()
+        # NB: deliberately NO self._recompute_stats() here — caller does it once
+        return rel
+
+    def recompute_stats(self) -> None:
+        """
+        Public wrapper for ``_recompute_stats()``.
+
+        Call once at the end of a batch of ``add_aligned_no_stats()`` to update
+        per-identity centroids in stats.json. Behaviorally identical to the
+        internal ``_recompute_stats``; the wrapper exists so external callers
+        don't have to reach into an underscored name.
+        """
+        self._recompute_stats()
 
     def delete_identity(self, label: str) -> tuple[bool, int, int, int]:
         """
@@ -568,8 +664,13 @@ class GalleryManager:
         )
         return len(rels), feats.shape[0]
 
-    def _embed_single(self, img_112_bgr: np.ndarray) -> np.ndarray:
+    def embed_aligned(self, img_112_bgr: np.ndarray) -> np.ndarray:
         """Embed a single aligned 112×112 BGR crop and L2-normalize the vector.
+
+        Public method used by:
+        - Internal save paths (``add_aligned_snapshot``, ``add_aligned_no_stats``)
+        - External callers (e.g. ``HttpAPI._handle_selfie``) for dedup,
+          consistency, and novelty checks — no disk I/O.
 
         Parameters
         ----------
@@ -579,7 +680,7 @@ class GalleryManager:
         Returns
         -------
         np.ndarray
-            Normalized embedding vector of shape ``(dim,)`` with dtype float32.
+            L2-normalized embedding of shape ``(dim,)`` with dtype float32.
         """
         vec = self.arc.infer([img_112_bgr])
         if vec.ndim == 2 and vec.shape[0] == 1:

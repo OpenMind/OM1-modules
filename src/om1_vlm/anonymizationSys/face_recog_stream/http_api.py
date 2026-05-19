@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional
 import cv2
 import numpy as np
 
+from . import selfie_logic as sl
 from .adaface import warp_face_by_5p
 
 
@@ -102,6 +103,12 @@ class HttpAPI:
         self.log = logger or logging.getLogger("http_api")
         self.server = None
         self.face_tracker = face_tracker
+
+        # Selfie pipeline state
+        self.selfie_lock = threading.Lock()  # serialize concurrent /selfie
+        self.enrollment_lock = threading.Lock()  # protect last_enrollment dict
+        self.audit_lock = threading.Lock()  # serialize corrections.log writes
+        self.last_enrollment: Optional[Dict[str, Any]] = None
 
     def stop(self) -> None:
         """Stop an attached HTTP server if present."""
@@ -201,6 +208,12 @@ class HttpAPI:
 
             if path in ("/gallery/identities", "/gallery/list_identities"):
                 return self._handle_gallery_identities()
+
+            if path == "/gallery/move_samples":
+                return self._handle_gallery_move_samples(payload)
+
+            if path == "/gallery/forget_last":
+                return self._handle_gallery_forget_last(payload)
 
             return {"error": f"unknown path {path}"}
         except Exception as e:
@@ -373,72 +386,270 @@ class HttpAPI:
 
     def _handle_selfie(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Save a clean snapshot from the latest frame (no overlays) into ALIGNED ONLY,
-        and embed immediately (no RAW for selfie).
+        Multi-frame selfie enrollment with score-based target selection,
+        dedup, identity-consistency check, and adaptive sample count.
 
-        Parameters
-        ----------
-        payload: { "id": "alice" }
-
-        Returns
+        Payload
         -------
-        dict
-            { ok, saved_aligned, identities }
+        id    : str  (required) — requested identity name (lowercase, alnum/_/-)
+        force : bool (optional) — bypass cross-name reject (twins/lookalikes)
 
-        Notes
-        -----
-        Uses the cached `frame_state` (clean frame + dets/kpss) to create one
-        aligned 112×112 crop without invoking extra inference in the HTTP thread.
-        The embedding and centroid update are executed on the main thread via
-        `run_job_sync`.
+        Returns (success)
+        -----------------
+        { ok:True, id, merged, forced, samples_saved, match_sim, identities }
+
+        Errors
+        ------
+        bad_id | recognition_disabled | busy | no_valid_frames |
+        insufficient_samples | ambiguous_subjects | face_belongs_to
         """
         if not self.gm:
-            return {"error": "recognition disabled"}
-        if not payload or "id" not in payload:
-            return {"error": "missing 'id'"}
-        person = str(payload["id"])
+            return {"error": "recognition_disabled"}
 
-        # Use last clean frame & cached dets/kpss captured in the main loop.
-        with self.frame_lock:
-            frm = (
-                None
-                if self.frame_state.frame_bgr is None
-                else self.frame_state.frame_bgr.copy()
+        payload = payload or {}
+        requested = str(payload.get("id", "")).strip().lower()
+        ok, reason = sl.validate_identity_name(requested)
+        if not ok:
+            return {"error": "bad_id", "detail": reason}
+
+        force = bool(payload.get("force", False))
+
+        # Serialize concurrent /selfie calls — gallery + last_enrollment can't
+        # tolerate interleaved enrollment from two callers at once.
+        if not self.selfie_lock.acquire(blocking=False):
+            return {"error": "busy"}
+
+        try:
+            return self._do_selfie(requested, force)
+        finally:
+            self.selfie_lock.release()
+
+    def _do_selfie(self, requested: str, force: bool) -> Dict[str, Any]:
+        """Core selfie collection loop. Caller holds self.selfie_lock."""
+        # Snapshot cfg once so thresholds stay consistent for this request
+        with self.cfg_lock:
+            cfg_snap = dict(self.cfg)
+
+        window_sec = float(cfg_snap["selfie_window_sec"])
+        tap_interval = float(cfg_snap["selfie_tap_interval_sec"])
+        min_samples = int(cfg_snap["selfie_min_samples"])
+        max_samples = int(cfg_snap["selfie_max_samples"])
+        score_floor = float(cfg_snap["selfie_min_engagement"])
+        ambig_ratio = float(cfg_snap["selfie_ambiguity_ratio"])
+        novelty_thr = float(cfg_snap["selfie_novelty_thr"])
+        consist_thr = float(cfg_snap["selfie_consistency_thr"])
+
+        deadline = time.monotonic() + window_sec
+        crops: List[np.ndarray] = []
+        embs: List[np.ndarray] = []
+        running_mean: Optional[np.ndarray] = None
+        target_id: Optional[str] = None
+        merged_flag = False
+        match_label: Optional[str] = None
+        match_sim_seen = 0.0
+        ambiguity_streak = 0
+        last_seen_token = -1  # frame-change detection (see below)
+
+        # ----- Phase 2: Collection loop -----
+        while len(crops) < max_samples and time.monotonic() < deadline:
+            # (A) Snapshot frame_state under lock, release fast
+            with self.frame_lock:
+                if self.frame_state.frame_bgr is None:
+                    frm = None
+                    dets = kpss = None
+                    ts = 0.0
+                else:
+                    frm = self.frame_state.frame_bgr.copy()
+                    dets = (
+                        None
+                        if self.frame_state.dets is None
+                        else self.frame_state.dets.copy()
+                    )
+                    kpss = (
+                        None
+                        if self.frame_state.kpss is None
+                        else self.frame_state.kpss.copy()
+                    )
+                    ts = float(getattr(self.frame_state, "last_ts", 0.0))
+
+            # Prefer explicit last_ts if run.py is up-to-date. If it's 0.0
+            # (older run.py without the field), fall back to id(frm) — the
+            # array's memory address changes per .copy(), so consecutive
+            # snapshots produce distinct tokens.
+            frame_token = ts if ts > 0 else (id(frm) if frm is not None else 0)
+
+            if frm is None or frame_token == last_seen_token:
+                time.sleep(0.02)
+                continue
+            last_seen_token = frame_token
+
+            # (B) No detections this frame
+            if dets is None or len(dets) == 0:
+                continue
+
+            # (C) Score every face: (bbox_area / frame_area) * frontality
+            h, w = frm.shape[:2]
+            frame_area = float(h * w)
+            scores = [
+                sl.score_face(
+                    dets[i],
+                    kpss[i] if kpss is not None and i < len(kpss) else None,
+                    frame_area,
+                )
+                for i in range(len(dets))
+            ]
+
+            # (D) Ambiguity — fail fast on 2 consecutive ambiguous frames
+            is_amb, top_ratio = sl.check_ambiguity(scores, ambig_ratio, score_floor)
+            if is_amb:
+                ambiguity_streak += 1
+                if ambiguity_streak >= 2:
+                    self.log.info(
+                        "selfie ambiguous: ratio=%.3f n_engaged=%d",
+                        top_ratio,
+                        sum(1 for s in scores if s >= score_floor),
+                    )
+                    return {
+                        "error": "ambiguous_subjects",
+                        "top_ratio": round(top_ratio, 3),
+                        "n_engaged": sum(1 for s in scores if s >= score_floor),
+                    }
+                continue
+            ambiguity_streak = 0  # reset on any clean frame
+
+            # (E) Pick target & engagement floor
+            target_idx = int(np.argmax(scores))
+            if scores[target_idx] < score_floor:
+                continue
+
+            # (F) Need landmarks for alignment
+            if kpss is None or target_idx >= len(kpss):
+                continue
+            target_kps = kpss[target_idx]
+
+            # (G) Build aligned 112×112 crop + quality gate
+            crop = warp_face_by_5p(frm, target_kps, 112)
+            ok_q, q_reason = sl.quality_check(
+                crop, dets[target_idx], target_kps, cfg_snap
             )
-            dets = (
-                None if self.frame_state.dets is None else self.frame_state.dets.copy()
-            )
-            kpss = (
-                None if self.frame_state.kpss is None else self.frame_state.kpss.copy()
-            )
+            if not ok_q:
+                self.log.debug("selfie frame rejected: %s", q_reason)
+                continue
 
-        if frm is None or dets is None or dets.shape[0] == 0:
-            return {"error": "no recent frame/detections yet"}
-        if dets.shape[0] != 1:
-            return {"error": f"expect exactly 1 face, got {int(dets.shape[0])}"}
+            # (H) Embed on main thread (GPU)
+            v = self.run_job_sync(lambda c=crop: self.gm.embed_aligned(c))
 
-        # Build aligned crop ONCE (no new inference)
-        if kpss is not None:
-            crop = warp_face_by_5p(frm, kpss[0], 112)
-        else:
-            x1, y1, x2, y2, _ = dets[0].astype(int)
-            face = frm[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
-            crop = cv2.resize(face if face.size > 0 else frm, (112, 112))
+            # (I) First valid frame: dedup. Subsequent: consistency + novelty.
+            if target_id is None:
+                with self.gal_lock:
+                    feats = self.gal_state.gal_feats
+                    labels = list(self.gal_state.gal_labels)
 
-        ts = time.strftime("%Y-%m-%dT%H-%M-%S")
+                decision = sl.resolve_target_id(
+                    v,
+                    requested,
+                    feats,
+                    labels,
+                    cfg_snap,
+                    force=force,
+                )
 
-        def _do_add():
-            rel = self.gm.add_aligned_snapshot(person, crop, fname_hint=f"{ts}.jpg")
+                if decision.reject:
+                    self.log.info(
+                        "selfie face_belongs_to label=%s sim=%.3f",
+                        decision.match_label,
+                        decision.match_sim,
+                    )
+                    return {
+                        "error": "face_belongs_to",
+                        "name": decision.match_label,
+                        "sim": round(decision.match_sim, 3),
+                    }
+
+                target_id = decision.id
+                merged_flag = decision.merged
+                match_label = decision.match_label
+                match_sim_seen = decision.match_sim
+            else:
+                sim = sl.cosine_to_mean(running_mean, v)
+                if sim < consist_thr:
+                    # Different person showed up mid-window
+                    self.log.debug("selfie frame rejected: consistency=%.3f", sim)
+                    continue
+                if sim > novelty_thr:
+                    # Near-duplicate of what we've already collected
+                    self.log.debug("selfie frame rejected: not novel (sim=%.3f)", sim)
+                    continue
+
+            # (J) Accept the frame
+            crops.append(crop)
+            embs.append(v)
+            running_mean = sl.update_running_mean(running_mean, v, len(embs))
+            time.sleep(tap_interval)
+
+        # ----- Phase 3: Finalize -----
+        n = len(crops)
+        if n == 0:
+            return {"error": "no_valid_frames"}
+        if n < min_samples:
+            return {"error": "insufficient_samples", "got": n}
+
+        ts_str = time.strftime("%Y-%m-%dT%H-%M-%S")
+
+        # Single main-thread batch: save each crop with its pre-computed vec,
+        # then recompute stats ONCE, then snapshot centroids into gal_state.
+        def _do_save_batch():
+            saved = []
+            for k, (c, v) in enumerate(zip(crops, embs)):
+                rel = self.gm.add_aligned_no_stats(
+                    target_id,
+                    c,
+                    vec=v,
+                    fname_hint=f"{ts_str}_{k:02d}.jpg",
+                )
+                saved.append(rel)
+            self.gm.recompute_stats()
             feats, labels = self.gm.get_identity_means()
             with self.gal_lock:
-                self.gal_state.gal_feats, self.gal_state.gal_labels = feats, labels
-            return rel, len(labels)
+                self.gal_state.gal_feats = feats
+                self.gal_state.gal_labels = labels
+            return saved, len(labels)
 
-        rel, n_id = self.run_job_sync(_do_add)
-        saved_aligned = os.path.join(
-            self.gallery_dir, rel
-        )  # absolute path for convenience
-        return {"ok": True, "saved_aligned": saved_aligned, "identities": int(n_id)}
+        saved_files, n_id = self.run_job_sync(_do_save_batch)
+
+        # Record for /gallery/move_samples and /gallery/forget_last
+        with self.enrollment_lock:
+            self.last_enrollment = {
+                "id": target_id,
+                "files": saved_files,
+                "monotonic_ts": time.monotonic(),
+                "wall_ts": time.time(),
+                "merged": merged_flag,
+                "forced": force,
+            }
+
+        if force:
+            self._audit_log(
+                f"selfie forced id={target_id} samples={n} "
+                f"matched={match_label or '-'} sim={match_sim_seen:.3f}"
+            )
+        else:
+            self.log.info(
+                "selfie ok id=%s merged=%s samples=%d",
+                target_id,
+                merged_flag,
+                n,
+            )
+
+        return {
+            "ok": True,
+            "id": target_id,
+            "merged": merged_flag,
+            "forced": force,
+            "samples_saved": n,
+            "match_sim": round(match_sim_seen, 3),
+            "identities": int(n_id),
+        }
 
     def _handle_gallery_delete(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Delete one or more identities and rebuild the embed store.
@@ -587,6 +798,263 @@ class HttpAPI:
             return {"ok": False, "error": str(e)}
 
         return {"ok": True, "total": len(identities), "identities": identities}
+
+    # -------------------- /gallery/move_samples --------------------- #
+    def _handle_gallery_move_samples(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Move samples from one identity to another.
+
+        Use cases:
+        - Rename (typo correction): to_id doesn't exist → folder is renamed.
+        - Merge into existing: to_id exists → samples merged in, from_id empty
+          folder deleted.
+
+        Payload
+        -------
+        from_id : str (required)
+        to_id   : str (required)
+        files   : List[str] (optional) — relative paths under gallery_dir.
+                  If omitted, uses last_enrollment.files (60s TTL; id must match).
+        """
+        if not self.gm:
+            return {"error": "recognition_disabled"}
+
+        payload = payload or {}
+        from_id = str(payload.get("from_id", "")).strip().lower()
+        to_id = str(payload.get("to_id", "")).strip().lower()
+
+        for label, name in (("from_id", from_id), ("to_id", to_id)):
+            ok, reason = sl.validate_identity_name(name)
+            if not ok:
+                return {"error": "bad_id", "detail": f"{label}: {reason}"}
+
+        if from_id == to_id:
+            return {"error": "same_id"}
+
+        payload_files = payload.get("files")
+        if payload_files:
+            files_to_move = [str(f) for f in payload_files]
+        else:
+            with self.enrollment_lock:
+                le = self.last_enrollment
+                if le is None or le["id"] != from_id:
+                    return {
+                        "error": "no_recent_enrollment",
+                        "detail": "supply files=[...] or call within 60s of /selfie",
+                    }
+                if time.monotonic() - le["monotonic_ts"] > 60.0:
+                    return {"error": "stale_enrollment"}
+                files_to_move = list(le["files"])
+
+        # Path traversal guard: every file must resolve to inside gallery_dir
+        safe_files = self._filter_safe_paths(files_to_move)
+        if not safe_files:
+            return {"error": "no_safe_files"}
+
+        t0 = time.monotonic()
+        moved, from_removed, n_id = self.run_job_sync(
+            lambda: self._do_move_samples(from_id, to_id, safe_files)
+        )
+
+        # Clear last_enrollment if we just consumed it
+        with self.enrollment_lock:
+            if (
+                self.last_enrollment is not None
+                and self.last_enrollment["id"] == from_id
+            ):
+                self.last_enrollment = None
+
+        return {
+            "ok": True,
+            "from_id": from_id,
+            "to_id": to_id,
+            "moved": int(moved),
+            "from_removed": bool(from_removed),
+            "identities": int(n_id),
+            "took_sec": round(time.monotonic() - t0, 3),
+        }
+
+    def _do_move_samples(
+        self, from_id: str, to_id: str, files: List[str]
+    ) -> "tuple[int, bool, int]":
+        """Main-thread worker. Returns (moved_count, from_removed, n_identities)."""
+        to_aligned = os.path.join(self.gallery_dir, to_id, "aligned")
+        os.makedirs(to_aligned, exist_ok=True)
+
+        moved = 0
+        for rel in files:
+            src = os.path.join(self.gallery_dir, rel)
+            if not os.path.isfile(src):
+                continue
+            fname = os.path.basename(rel)
+            dst = os.path.join(to_aligned, fname)
+            if os.path.exists(dst):
+                # Collision: append _moved<n> to disambiguate
+                base, ext = os.path.splitext(fname)
+                k = 1
+                while True:
+                    dst = os.path.join(to_aligned, f"{base}_moved{k}{ext}")
+                    if not os.path.exists(dst):
+                        break
+                    k += 1
+            shutil.move(src, dst)
+            moved += 1
+
+        from_removed = self._cleanup_empty_identity_dir(from_id)
+
+        # Rebuild from scratch — refresh() only adds, doesn't remove stale entries
+        self.gm.clear_and_rebuild()
+        feats, labels = self.gm.get_identity_means()
+        with self.gal_lock:
+            self.gal_state.gal_feats = feats
+            self.gal_state.gal_labels = labels
+
+        self._audit_log(
+            f"move {from_id}->{to_id} files={len(files)} moved={moved} "
+            f"from_removed={from_removed}"
+        )
+        return moved, from_removed, len(labels)
+
+    # -------------------- /gallery/forget_last --------------------- #
+    def _handle_gallery_forget_last(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Delete the samples saved by the most recent /selfie call.
+        Used when the wrong person was captured.
+
+        Payload (optional)
+        ------------------
+        id : str — if provided, must match last_enrollment.id (safety check)
+        """
+        if not self.gm:
+            return {"error": "recognition_disabled"}
+
+        payload = payload or {}
+
+        with self.enrollment_lock:
+            le = self.last_enrollment
+            if le is None:
+                return {"error": "no_recent_enrollment"}
+            if time.monotonic() - le["monotonic_ts"] > 60.0:
+                return {"error": "stale_enrollment"}
+
+            target_id = le["id"]
+            files = list(le["files"])
+
+            if "id" in payload:
+                requested = str(payload["id"]).strip().lower()
+                if requested != target_id:
+                    return {
+                        "error": "id_mismatch",
+                        "detail": f"last enrollment was {target_id}",
+                    }
+
+        safe_files = self._filter_safe_paths(files)
+        if not safe_files:
+            return {"error": "no_safe_files"}
+
+        t0 = time.monotonic()
+        deleted, identity_removed, n_id = self.run_job_sync(
+            lambda: self._do_forget_files(target_id, safe_files)
+        )
+
+        with self.enrollment_lock:
+            self.last_enrollment = None
+
+        return {
+            "ok": True,
+            "id": target_id,
+            "files_deleted": int(deleted),
+            "identity_removed": bool(identity_removed),
+            "identities": int(n_id),
+            "took_sec": round(time.monotonic() - t0, 3),
+        }
+
+    def _do_forget_files(
+        self, target_id: str, files: List[str]
+    ) -> "tuple[int, bool, int]":
+        """Main-thread worker for /gallery/forget_last."""
+        deleted = 0
+        for rel in files:
+            path = os.path.join(self.gallery_dir, rel)
+            if os.path.isfile(path):
+                try:
+                    os.remove(path)
+                    deleted += 1
+                except OSError as e:
+                    self.log.warning("failed to remove %s: %s", path, e)
+
+        identity_removed = self._cleanup_empty_identity_dir(target_id)
+
+        # Rebuild from scratch — refresh() leaves stale entries behind
+        self.gm.clear_and_rebuild()
+        feats, labels = self.gm.get_identity_means()
+        with self.gal_lock:
+            self.gal_state.gal_feats = feats
+            self.gal_state.gal_labels = labels
+
+        self._audit_log(
+            f"forget {target_id} files={len(files)} deleted={deleted} "
+            f"identity_removed={identity_removed}"
+        )
+        return deleted, identity_removed, len(labels)
+
+    # -------------------- helpers --------------------- #
+    def _filter_safe_paths(self, rel_paths: List[Any]) -> List[str]:
+        """
+        Return only the relative paths that resolve to inside gallery_dir.
+
+        Path-traversal guard for /gallery/move_samples (where `files` may
+        come from a payload). Rejects absolute paths, `../` escapes, and
+        anything pointing outside the gallery root.
+        """
+        safe: List[str] = []
+        base = os.path.abspath(self.gallery_dir) + os.sep
+        for rel in rel_paths:
+            if not isinstance(rel, str) or not rel:
+                continue
+            abs_path = os.path.abspath(os.path.join(self.gallery_dir, rel))
+            if not (abs_path + os.sep).startswith(base):
+                self.log.warning("rejecting path traversal attempt: %s", rel)
+                continue
+            safe.append(rel)
+        return safe
+
+    def _cleanup_empty_identity_dir(self, identity: str) -> bool:
+        """
+        Remove identity_dir and its empty subfolders. Returns True if removed.
+        Conservative: leaves the folder alone if anything (e.g. raw/*.jpg)
+        is still in it.
+        """
+        id_dir = os.path.join(self.gallery_dir, identity)
+        if not os.path.isdir(id_dir):
+            return False
+
+        for sub in ("aligned", "raw"):
+            sub_dir = os.path.join(id_dir, sub)
+            if os.path.isdir(sub_dir) and not os.listdir(sub_dir):
+                try:
+                    os.rmdir(sub_dir)
+                except OSError:
+                    pass
+
+        try:
+            if not os.listdir(id_dir):
+                os.rmdir(id_dir)
+                return True
+        except OSError:
+            pass
+        return False
+
+    def _audit_log(self, msg: str) -> None:
+        """Append a timestamped line to gallery_dir/corrections.log."""
+        log_path = os.path.join(self.gallery_dir, "corrections.log")
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        try:
+            with self.audit_lock:
+                with open(log_path, "a") as f:
+                    f.write(f"{ts} {msg}\n")
+        except Exception as e:
+            self.log.warning("audit log failed: %s", e)
 
     @staticmethod
     def _load_112(

@@ -176,6 +176,9 @@ class _FrameState:
         Detection array of shape (N, 5) with [x1, y1, x2, y2, score], or None.
     kpss : np.ndarray | None
         Optional 5-point landmarks per detection, shape (N, 5, 2), or None.
+    last_ts : float
+        Monotonic timestamp of the last commit. Used by `/selfie` to detect
+        frame changes between taps (so it doesn't re-process the same frame).
     """
 
     def __init__(self):
@@ -184,6 +187,7 @@ class _FrameState:
         self.kpss: Optional[np.ndarray] = None
         self.current_faces: list = []
         self.current_unknowns: list = []
+        self.last_ts: float = 0.0
 
 
 def get_platform_prefix() -> str:
@@ -600,6 +604,33 @@ def main() -> None:
         "draw_skeleton": bool(args.draw_skeleton),
         "draw_pose_boxes": bool(args.draw_pose_boxes),
         "draw_fall_status": bool(args.draw_fall_status),
+        # ---- Selfie pipeline (all hot-tunable via /config) ----
+        # Collection window
+        "selfie_window_sec": 1.5,
+        "selfie_tap_interval_sec": 0.20,
+        # Adaptive sample count: min=1 lets static users still enroll
+        # with just the first valid frame; max=4 caps active users to keep
+        # storage and embedding work bounded.
+        "selfie_min_samples": 1,
+        "selfie_max_samples": 4,
+        # Selection: score = (bbox_area / frame_area) * frontality, in [0,1].
+        # Floor 0.005 = "face covers ~0.5% of frame AND is reasonably frontal".
+        # CALIBRATE on GTC footage; see notes in selfie_logic.score_face docstring.
+        "selfie_min_engagement": 0.015,
+        "selfie_ambiguity_ratio": 0.80,  # top2/top1 > this → ambiguous
+        # Quality gate on the chosen face crop
+        "selfie_min_face_px": 70,
+        "selfie_min_conf": 0.7,
+        "selfie_min_frontality": 0.4,
+        "selfie_sharp_thr": 50.0,
+        "selfie_brightness_min": 40,
+        "selfie_brightness_max": 220,
+        # Multi-frame
+        "selfie_novelty_thr": 0.95,  # cosine > → duplicate, skip
+        "selfie_consistency_thr": 0.50,  # cosine < → wrong person, skip
+        # Dedup
+        "selfie_merge_thr": 0.45,  # same-name family → merge
+        "selfie_cross_name_thr": 0.60,  # cross-name → reject (unless force)
     }
 
     # Last clean frame & detections for /selfie
@@ -769,6 +800,7 @@ def main() -> None:
                 frame_state.frame_bgr = frame.copy()
                 frame_state.dets = None if dets is None else dets.copy()
                 frame_state.kpss = None if kpss is None else kpss.copy()
+                frame_state.last_ts = time.monotonic()
 
             # ---- Track-based recognition (BoTSORT + low-freq AdaFace) ----
             names: List[Optional[str]] = []
