@@ -48,7 +48,7 @@ def mock_ffplay():
 
 @pytest.fixture
 def mock_requests():
-    with patch("requests.post") as mock:
+    with patch("requests.Session.post") as mock:
         # Setup mock response
         mock_response = Mock()
         mock_response.status_code = 200

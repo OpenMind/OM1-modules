@@ -3,7 +3,7 @@ import subprocess
 import threading
 import time
 from queue import Queue
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import pytest
 
@@ -518,6 +518,7 @@ def test_openai_client_creation(mock_openai, mock_zenoh):
     mock_openai.assert_called_once_with(
         base_url="http://test-server/v1",
         api_key="test-key",
+        http_client=ANY,
     )
 
     stream.stop()
@@ -534,6 +535,7 @@ def test_openai_client_no_api_key(mock_openai, mock_zenoh):
     mock_openai.assert_called_once_with(
         base_url="http://test-server/v1",
         api_key="no-need-api-key",
+        http_client=ANY,
     )
 
     stream.stop()
