@@ -1,6 +1,8 @@
 import logging
+import multiprocessing as mp
 import threading
-from queue import Empty, Queue
+import time
+from queue import Empty
 from typing import Callable, Optional, Union
 
 import websockets
@@ -10,13 +12,107 @@ root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
 
 
+def _ws_worker_process(
+    url: str,
+    outbound_queue: mp.Queue,
+    inbound_queue: mp.Queue,
+    state_queue: mp.Queue,
+    control_queue: mp.Queue,
+):
+    websocket: Optional[ClientConnection] = None
+    connected = False
+    is_policy_violation = False
+    running = True
+
+    while running:
+        try:
+            while True:
+                command = control_queue.get_nowait()
+                if command == "stop":
+                    running = False
+        except Empty:
+            pass
+
+        if not running:
+            break
+
+        if not connected and not is_policy_violation:
+            try:
+                websocket = connect(url)
+                connected = True
+                state_queue.put(("connected", True))
+            except Exception as e:
+                state_queue.put(("connection_error", str(e)))
+                time.sleep(5)
+                continue
+
+        if not connected or websocket is None:
+            time.sleep(0.1)
+            continue
+
+        outbound_message: Optional[str | bytes] = None
+        try:
+            outbound_message = outbound_queue.get_nowait()
+        except Empty:
+            pass
+
+        if outbound_message is not None:
+            try:
+                websocket.send(outbound_message)
+            except Exception as e:
+                state_queue.put(("send_error", str(e)))
+                outbound_queue.put(outbound_message)
+                try:
+                    websocket.close()
+                except Exception:
+                    pass
+                connected = False
+                websocket = None
+                state_queue.put(("connected", False))
+                continue
+
+        try:
+            message = websocket.recv(timeout=0.1)
+            inbound_queue.put(("message", message))
+        except TimeoutError:
+            pass
+        except websockets.ConnectionClosed as e:
+            if e.code == 1008:
+                is_policy_violation = True
+                state_queue.put(("policy_violation", e.reason))
+            connected = False
+            state_queue.put(("connected", False))
+            try:
+                websocket.close()
+            except Exception:
+                pass
+            websocket = None
+        except Exception as e:
+            state_queue.put(("receive_error", str(e)))
+            connected = False
+            state_queue.put(("connected", False))
+            try:
+                websocket.close()
+            except Exception:
+                pass
+            websocket = None
+
+    if websocket is not None:
+        try:
+            websocket.close()
+        except Exception:
+            pass
+    state_queue.put(("connected", False))
+    state_queue.put(("stopped", True))
+
+
 class Client:
     """
     A WebSocket client implementation with support for asynchronous message handling.
 
-    This class provides a threaded WebSocket client that can maintain a persistent
-    connection, automatically reconnect, and handle message sending and receiving
-    asynchronously.
+    This class uses a worker process to manage the WebSocket connection, message
+    sending, and message receiving. The main process only dispatches callbacks and
+    tracks connection state.
 
     Parameters
     ----------
@@ -31,103 +127,129 @@ class Client:
         self.connected: bool = False
         self.websocket: Optional[ClientConnection] = None
         self.message_callback: Optional[Callable] = None
-        self.message_queue: Queue = Queue()
+
+        self.message_queue: mp.Queue = mp.Queue()
+        self._incoming_queue: mp.Queue = mp.Queue()
+        self._state_queue: mp.Queue = mp.Queue()
+        self._control_queue: mp.Queue = mp.Queue()
+
+        self._worker_process: Optional[mp.Process] = None
+        self._event_thread: Optional[threading.Thread] = None
+
         self.receiver_thread: Optional[threading.Thread] = None
         self.sender_thread: Optional[threading.Thread] = None
         self.client_thread: Optional[threading.Thread] = None
 
-    def _receive_messages(self):
-        """
-        Internal method to handle receiving messages from the WebSocket connection.
-
-        Continuously receives messages and processes them through the registered callback
-        if one exists. Runs in a separate thread.
-        """
-        while self.running and self.connected:
+    def _drain_state_queue(self):
+        while True:
             try:
-                if not self.websocket:
-                    self.connected = False
-                    break
-                message = self.websocket.recv()
-                formatted_msg = self.format_message(message)
-                logger.debug(f"Received WS Message: {formatted_msg}")
-                if self.message_callback:
-                    self.message_callback(message)
-            except websockets.ConnectionClosed as e:
-                close_code = e.code
-                close_reason = e.reason
-                if close_code == 1008:
-                    self.is_policy_violation = True
-                    logger.error("\n\n")
-                    logger.error("----- Policy Violation -----")
-                    logger.error(f"Policy violation: {close_reason}")
-                    logger.error("----- Policy Violation -----\n\n")
-                logger.info("WebSocket connection closed")
-                self.connected = False
-                break
-            except Exception as e:
-                logger.error(f"Error in message processing: {e}")
-                self.connected = False
-                break
-
-    def _send_messages(self):
-        """
-        Internal method to handle sending messages through the WebSocket connection.
-        """
-        while self.running:
-            try:
-                message = self.message_queue.get()
-                if self.connected and self.websocket:
-                    try:
-                        self.websocket.send(message)
-                        formatted_msg = self.format_message(message)
-                        logger.debug(f"Sent WS Message: {formatted_msg} to {self.url}")
-                    except Exception as e:
-                        logger.error(f"Failed to send message: {e}")
-                        self.message_queue.put(message)
-                else:
-                    self.message_queue.put(message)
+                state, payload = self._state_queue.get_nowait()
             except Empty:
+                break
+
+            if state == "connected":
+                self.connected = bool(payload)
+                if self.connected:
+                    logger.info(f"Connected to {self.url}")
+                else:
+                    logger.info("WebSocket connection closed")
+            elif state == "policy_violation":
+                self.is_policy_violation = True
+                logger.error("\n\n")
+                logger.error("----- Policy Violation -----")
+                logger.error(f"Policy violation: {payload}")
+                logger.error("----- Policy Violation -----\n\n")
+            elif state == "connection_error":
+                logger.error(f"Connection error: {payload}")
+            elif state == "send_error":
+                logger.error(f"Failed to send message: {payload}")
+            elif state == "receive_error":
+                logger.error(f"Error in message processing: {payload}")
+
+    def _drain_incoming_queue(self):
+        while True:
+            try:
+                kind, payload = self._incoming_queue.get_nowait()
+            except Empty:
+                break
+
+            if kind != "message":
                 continue
-            except Exception as e:
-                logger.error(f"Error in send queue processing: {e}")
-                self.connected = False
+
+            formatted_msg = self.format_message(payload)
+            logger.debug(f"Received WS Message: {formatted_msg}")
+            if self.message_callback:
+                self.message_callback(payload)
+
+    def _monitor_worker(self):
+        while self.running:
+            self._drain_state_queue()
+            self._drain_incoming_queue()
+
+            if (
+                self._worker_process
+                and not self._worker_process.is_alive()
+                and self.running
+                and not self.is_policy_violation
+            ):
+                logger.info("Worker process stopped, attempting reconnect")
+                self._start_worker_process()
+
+            time.sleep(0.05)
+
+    def _start_worker_process(self):
+        self._worker_process = mp.Process(
+            target=_ws_worker_process,
+            args=(
+                self.url,
+                self.message_queue,
+                self._incoming_queue,
+                self._state_queue,
+                self._control_queue,
+            ),
+            daemon=True,
+        )
+        self._worker_process.start()
+
+    def _start_event_thread(self):
+        if self._event_thread and self._event_thread.is_alive():
+            return
+        self._event_thread = threading.Thread(target=self._monitor_worker, daemon=True)
+        self._event_thread.start()
+        self.client_thread = self._event_thread
 
     def connect(self) -> bool:
         """
         Establish a connection to the WebSocket server.
 
-        Attempts to connect to the WebSocket server and starts the receiver and sender
-        threads if the connection is successful.
+        Starts the worker process and waits briefly for connection state updates.
 
         Returns
         -------
         bool
             True if connection was successful, False otherwise
         """
-        try:
-            self.websocket = connect(self.url)
-            self.connected = True
+        if self._worker_process and self._worker_process.is_alive():
+            self._drain_state_queue()
+            return self.connected
 
-            # Start receiver and sender threads
-            if not self.receiver_thread or not self.receiver_thread.is_alive():
-                self.receiver_thread = threading.Thread(
-                    target=self._receive_messages, daemon=True
-                )
-                self.receiver_thread.start()
+        self._start_worker_process()
+        self._start_event_thread()
 
-            if not self.sender_thread or not self.sender_thread.is_alive():
-                self.sender_thread = threading.Thread(
-                    target=self._send_messages, daemon=True
-                )
-                self.sender_thread.start()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            self._drain_state_queue()
+            if self.connected or self.is_policy_violation:
+                break
+            if self._worker_process and not self._worker_process.is_alive():
+                break
+            time.sleep(0.05)
 
-            logger.info(f"Connected to {self.url}")
+        if self.connected:
             return True
-        except Exception as e:
-            logger.error(f"Connection error: {e}")
-            self.connected = False
-            return False
+
+        logger.info("Connection failed, retrying in background")
+        return False
 
     def send_message(self, message: str | bytes):
         """
@@ -138,41 +260,29 @@ class Client:
         message : Union[str, bytes]
             The message to send, either as a string or bytes
         """
-        if self.connected:
+        if self.connected and self.running:
             self.message_queue.put(message)
 
     def _run_client(self):
         """
-        Internal method to manage the WebSocket client lifecycle.
-
-        Continuously attempts to maintain a connection to the WebSocket server,
-        implementing automatic reconnection with a delay between attempts.
+        Legacy no-op compatibility shim for old thread-based implementation.
         """
-        while self.running:
-            if not self.connected and not self.is_policy_violation:
-                if self.connect():
-                    logger.info("Connection established")
-                else:
-                    logger.info("Connection failed, retrying in 5 seconds")
-                    threading.Event().wait(5)  # Wait 5 seconds before retrying
-            else:
-                threading.Event().wait(1)
+        self._start_event_thread()
 
     def start(self):
         """
         Start the WebSocket client.
 
-        Initializes and starts the main client thread that manages the WebSocket
-        connection.
+        Starts a worker process that manages the WebSocket connection.
         """
-        if self.client_thread and self.client_thread.is_alive():
-            logger.warning("WebSocket client thread is already running")
+        if self._worker_process and self._worker_process.is_alive():
+            logger.warning("WebSocket client process is already running")
             return
 
         self.running = True
-        self.client_thread = threading.Thread(target=self._run_client, daemon=True)
-        self.client_thread.start()
-        logger.info("WebSocket client thread started")
+        self._start_worker_process()
+        self._start_event_thread()
+        logger.info("WebSocket client started")
 
     def register_message_callback(self, callback: Callable):
         """
@@ -228,31 +338,55 @@ class Client:
         """
         Stop the WebSocket client.
 
-        Closes the WebSocket connection, stops all threads, and cleans up resources.
+        Stops worker process and event thread, then cleans up resources.
         """
         self.running = False
-        if self.websocket:
-            try:
-                self.websocket.close()  # type: ignore
-                logger.info("WebSocket connection closed")
-            except Exception as _:
-                pass
 
-        if self.client_thread and self.client_thread.is_alive():
-            self.client_thread.join(timeout=2.0)
-            if self.client_thread.is_alive():
-                logger.warning("Client thread did not terminate gracefully")
+        try:
+            self._control_queue.put_nowait("stop")
+        except Exception:
+            pass
+
+        if self._worker_process and self._worker_process.is_alive():
+            self._worker_process.join(timeout=2.0)
+            if self._worker_process.is_alive():
+                self._worker_process.terminate()
+                self._worker_process.join(timeout=1.0)
+
+        if self._event_thread and self._event_thread.is_alive():
+            self._event_thread.join(timeout=2.0)
+            if self._event_thread.is_alive():
+                logger.warning("Client event thread did not terminate gracefully")
             else:
-                logger.info("Client thread stopped")
+                logger.info("Client event thread stopped")
 
         self.client_thread = None
+        self._event_thread = None
+        self._worker_process = None
         self.receiver_thread = None
         self.sender_thread = None
 
         try:
             while True:
                 self.message_queue.get_nowait()
-                self.message_queue.task_done()
+        except Empty:
+            pass
+
+        try:
+            while True:
+                self._incoming_queue.get_nowait()
+        except Empty:
+            pass
+
+        try:
+            while True:
+                self._state_queue.get_nowait()
+        except Empty:
+            pass
+
+        try:
+            while True:
+                self._control_queue.get_nowait()
         except Empty:
             pass
 
