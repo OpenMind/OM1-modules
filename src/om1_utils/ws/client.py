@@ -2,7 +2,7 @@ import logging
 import multiprocessing as mp
 import threading
 import time
-from queue import Empty
+from queue import Empty, Full
 from typing import Callable, Optional, Union
 
 import websockets
@@ -12,19 +12,38 @@ root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
 logger = logging.getLogger(root_package_name)
 
 
-def _ws_worker_process(
+def ws_worker_process(
     url: str,
     outbound_queue: mp.Queue,
     inbound_queue: mp.Queue,
     state_queue: mp.Queue,
     control_queue: mp.Queue,
 ):
+    """
+    Worker process function to manage WebSocket connection, sending, and receiving.
+
+    Parameters
+    ----------
+    url : str
+        The WebSocket server URL to connect to.
+    outbound_queue : mp.Queue
+        Queue for messages to be sent to the WebSocket server.
+    inbound_queue : mp.Queue
+        Queue for messages received from the WebSocket server.
+    state_queue : mp.Queue
+        Queue for connection state updates and errors.
+    control_queue : mp.Queue
+        Queue for control commands (e.g., stop signal).
+    """
     websocket: Optional[ClientConnection] = None
     connected_event = threading.Event()
     stop_event = threading.Event()
     is_policy_violation = False
 
     def sender_loop():
+        """
+        Loop to send messages from the outbound queue to the WebSocket server.
+        """
         while not stop_event.is_set():
             if not connected_event.is_set():
                 time.sleep(0.05)
@@ -46,6 +65,9 @@ def _ws_worker_process(
                 connected_event.clear()
 
     def receiver_loop():
+        """
+        Loop to receive messages from the WebSocket server and put them in the inbound queue.
+        """
         nonlocal is_policy_violation
         while not stop_event.is_set():
             if not connected_event.is_set() or websocket is None:
@@ -72,7 +94,6 @@ def _ws_worker_process(
     sender_thread.start()
     receiver_thread.start()
 
-    # Connection manager loop
     while not stop_event.is_set():
         try:
             command = control_queue.get_nowait()
@@ -98,7 +119,6 @@ def _ws_worker_process(
 
         time.sleep(0.1)
 
-    # Cleanup
     if websocket is not None:
         try:
             websocket.close()
@@ -123,6 +143,14 @@ class Client:
     """
 
     def __init__(self, url: str = "ws://localhost:6789"):
+        """
+        Initialize the WebSocket client instance.
+
+        Parameters
+        ----------
+        url : str
+            The WebSocket server URL to connect to
+        """
         self.url = url
         self.running: bool = True
         self.is_policy_violation: bool = False
@@ -130,7 +158,7 @@ class Client:
         self.websocket: Optional[ClientConnection] = None
         self.message_callback: Optional[Callable] = None
 
-        self.message_queue: mp.Queue = mp.Queue()
+        self.message_queue: mp.Queue = mp.Queue(maxsize=10)
         self._incoming_queue: mp.Queue = mp.Queue()
         self._state_queue: mp.Queue = mp.Queue()
         self._control_queue: mp.Queue = mp.Queue()
@@ -139,6 +167,9 @@ class Client:
         self._event_thread: Optional[threading.Thread] = None
 
     def _drain_state_queue(self):
+        """
+        Drain the state queue and update connection status and log any errors or policy violations.
+        """
         while True:
             try:
                 state, payload = self._state_queue.get_nowait()
@@ -165,6 +196,9 @@ class Client:
                 logger.error(f"Error in message processing: {payload}")
 
     def _drain_incoming_queue(self):
+        """
+        Drain the incoming message queue and dispatch messages to the registered callback.
+        """
         while True:
             try:
                 kind, payload = self._incoming_queue.get_nowait()
@@ -180,6 +214,9 @@ class Client:
                 self.message_callback(payload)
 
     def _monitor_worker(self):
+        """
+        Monitor the worker process for state updates and incoming messages, and handle reconnections if needed.
+        """
         while self.running:
             self._drain_state_queue()
             self._drain_incoming_queue()
@@ -196,8 +233,11 @@ class Client:
             time.sleep(0.05)
 
     def _start_worker_process(self):
+        """
+        Start the worker process to manage the WebSocket connection.
+        """
         self._worker_process = mp.Process(
-            target=_ws_worker_process,
+            target=ws_worker_process,
             args=(
                 self.url,
                 self.message_queue,
@@ -252,7 +292,7 @@ class Client:
         logger.info("Connection failed, retrying in background")
         return False
 
-    def send_message(self, message: str | bytes):
+    def send_message(self, message: Union[str, bytes]):
         """
         Queue a message to be sent through the WebSocket connection.
 
@@ -261,14 +301,27 @@ class Client:
         message : Union[str, bytes]
             The message to send, either as a string or bytes
         """
-        if self.connected and self.running:
-            self.message_queue.put(message)
+        if not (self.connected and self.running):
+            return
 
-    def _run_client(self):
-        """
-        Legacy no-op compatibility shim for old thread-based implementation.
-        """
-        self._start_event_thread()
+        try:
+            self.message_queue.put_nowait(message)
+        except Full:
+            try:
+                dropped = self.message_queue.get_nowait()
+                logger.warning(
+                    f"WebSocket queue full, dropped oldest message "
+                    f"(size={len(dropped) if hasattr(dropped, '__len__') else '?'})"
+                )
+            except Empty:
+                pass
+
+        try:
+            self.message_queue.put_nowait(message)
+        except Full:
+            logger.warning(
+                "WebSocket queue still full after drop, dropping new message"
+            )
 
     def start(self):
         """
