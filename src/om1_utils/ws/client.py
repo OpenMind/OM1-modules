@@ -20,83 +20,85 @@ def _ws_worker_process(
     control_queue: mp.Queue,
 ):
     websocket: Optional[ClientConnection] = None
-    connected = False
+    connected_event = threading.Event()
+    stop_event = threading.Event()
     is_policy_violation = False
-    running = True
 
-    while running:
+    def sender_loop():
+        while not stop_event.is_set():
+            if not connected_event.is_set():
+                time.sleep(0.05)
+                continue
+            try:
+                message = outbound_queue.get(timeout=0.1)
+            except Empty:
+                continue
+            if websocket is None or not connected_event.is_set():
+                continue
+            t0 = time.perf_counter()
+            try:
+                websocket.send(message)
+                elapsed = (time.perf_counter() - t0) * 1000
+                if elapsed > 50:
+                    state_queue.put(("slow_send", elapsed))
+            except Exception as e:
+                state_queue.put(("send_error", str(e)))
+                connected_event.clear()
+
+    def receiver_loop():
+        nonlocal is_policy_violation
+        while not stop_event.is_set():
+            if not connected_event.is_set() or websocket is None:
+                time.sleep(0.05)
+                continue
+            try:
+                message = websocket.recv(timeout=0.5)
+                inbound_queue.put(("message", message))
+            except TimeoutError:
+                continue
+            except websockets.ConnectionClosed as e:
+                if e.code == 1008:
+                    is_policy_violation = True
+                    state_queue.put(("policy_violation", e.reason))
+                connected_event.clear()
+                state_queue.put(("connected", False))
+            except Exception as e:
+                state_queue.put(("receive_error", str(e)))
+                connected_event.clear()
+                state_queue.put(("connected", False))
+
+    sender_thread = threading.Thread(target=sender_loop, daemon=True)
+    receiver_thread = threading.Thread(target=receiver_loop, daemon=True)
+    sender_thread.start()
+    receiver_thread.start()
+
+    # Connection manager loop
+    while not stop_event.is_set():
         try:
-            while True:
-                command = control_queue.get_nowait()
-                if command == "stop":
-                    running = False
+            command = control_queue.get_nowait()
+            if command == "stop":
+                stop_event.set()
+                break
         except Empty:
             pass
 
-        if not running:
+        if is_policy_violation:
+            stop_event.set()
             break
 
-        if not connected and not is_policy_violation:
+        if not connected_event.is_set():
             try:
                 websocket = connect(url)
-                connected = True
+                connected_event.set()
                 state_queue.put(("connected", True))
             except Exception as e:
                 state_queue.put(("connection_error", str(e)))
                 time.sleep(5)
                 continue
 
-        if not connected or websocket is None:
-            time.sleep(0.1)
-            continue
+        time.sleep(0.1)
 
-        outbound_message: Optional[str | bytes] = None
-        try:
-            outbound_message = outbound_queue.get_nowait()
-        except Empty:
-            pass
-
-        if outbound_message is not None:
-            try:
-                websocket.send(outbound_message)
-            except Exception as e:
-                state_queue.put(("send_error", str(e)))
-                outbound_queue.put(outbound_message)
-                try:
-                    websocket.close()
-                except Exception:
-                    pass
-                connected = False
-                websocket = None
-                state_queue.put(("connected", False))
-                continue
-
-        try:
-            message = websocket.recv(timeout=0.1)
-            inbound_queue.put(("message", message))
-        except TimeoutError:
-            pass
-        except websockets.ConnectionClosed as e:
-            if e.code == 1008:
-                is_policy_violation = True
-                state_queue.put(("policy_violation", e.reason))
-            connected = False
-            state_queue.put(("connected", False))
-            try:
-                websocket.close()
-            except Exception:
-                pass
-            websocket = None
-        except Exception as e:
-            state_queue.put(("receive_error", str(e)))
-            connected = False
-            state_queue.put(("connected", False))
-            try:
-                websocket.close()
-            except Exception:
-                pass
-            websocket = None
-
+    # Cleanup
     if websocket is not None:
         try:
             websocket.close()
