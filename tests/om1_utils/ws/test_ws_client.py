@@ -1,5 +1,5 @@
-import multiprocessing as mp
-import time
+import threading
+from queue import Queue
 from unittest.mock import Mock
 
 import pytest
@@ -33,8 +33,9 @@ def test_client_initialization(client):
     assert client.connected is False
     assert client.websocket is None
     assert client.message_callback is None
-    assert isinstance(client.message_queue, mp.queues.Queue)
-    assert client._event_thread is None
+    assert isinstance(client.message_queue, Queue)
+    assert client.receiver_thread is None
+    assert client.sender_thread is None
 
 
 def test_register_message_callback(client):
@@ -54,7 +55,8 @@ def test_send_message_when_connected(client):
 
     client.send_message(test_message)
 
-    assert client.message_queue.get(timeout=0.5) == test_message
+    assert client.message_queue.qsize() == 1
+    assert client.message_queue.get() == test_message
 
 
 def test_send_message_when_disconnected(client):
@@ -82,8 +84,9 @@ def test_format_message_long(client):
     assert "..." in formatted
 
 
-def test_stop_client(client):
+def test_stop_client(client, mock_websocket):
     """Test client stop functionality"""
+    client.websocket = mock_websocket
     client.connected = True
 
     client.stop()
@@ -91,21 +94,31 @@ def test_stop_client(client):
     assert client.running is False
     assert client.connected is False
     assert client.message_queue.empty()
-    assert client._event_thread is None
+    mock_websocket.close.assert_called_once()
 
 
-def test_drain_incoming_messages_with_callback(client):
-    """Test callback dispatch from incoming queue"""
+def test_receive_messages_with_callback(client, mock_websocket):
+    """Test message receiving with callback"""
     received_messages = []
 
     def callback(message):
         received_messages.append(message)
 
+    client.websocket = mock_websocket
+    client.connected = True
     client.register_message_callback(callback)
-    client._incoming_queue.put(("message", "test message"))
-    time.sleep(0.05)
 
-    client._drain_incoming_queue()
+    # Start receiver thread
+    receiver_thread = threading.Thread(target=client._receive_messages)
+    receiver_thread.daemon = True
+    receiver_thread.start()
+
+    # Let the thread run briefly
+    threading.Event().wait(0.1)
+
+    # Stop the client
+    client.running = False
+    receiver_thread.join(timeout=1)
 
     assert len(received_messages) > 0
     assert received_messages[0] == "test message"
