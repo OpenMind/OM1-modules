@@ -1,4 +1,5 @@
 import multiprocessing as mp
+import time
 from unittest.mock import Mock
 
 import pytest
@@ -33,7 +34,7 @@ def test_client_initialization(client):
     assert client.websocket is None
     assert client.message_callback is None
     assert isinstance(client.message_queue, mp.queues.Queue)
-    assert client.client_thread is None
+    assert client._event_thread is None
 
 
 def test_register_message_callback(client):
@@ -90,7 +91,7 @@ def test_stop_client(client):
     assert client.running is False
     assert client.connected is False
     assert client.message_queue.empty()
-    assert client.client_thread is None
+    assert client._event_thread is None
 
 
 def test_drain_incoming_messages_with_callback(client):
@@ -102,6 +103,7 @@ def test_drain_incoming_messages_with_callback(client):
 
     client.register_message_callback(callback)
     client._incoming_queue.put(("message", "test message"))
+    time.sleep(0.05)
 
     client._drain_incoming_queue()
 
