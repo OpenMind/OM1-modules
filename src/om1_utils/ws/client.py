@@ -138,10 +138,6 @@ class Client:
         self._worker_process: Optional[mp.Process] = None
         self._event_thread: Optional[threading.Thread] = None
 
-        self.receiver_thread: Optional[threading.Thread] = None
-        self.sender_thread: Optional[threading.Thread] = None
-        self.client_thread: Optional[threading.Thread] = None
-
     def _drain_state_queue(self):
         while True:
             try:
@@ -214,11 +210,14 @@ class Client:
         self._worker_process.start()
 
     def _start_event_thread(self):
+        """
+        Start the event monitoring thread if it's not already running.
+        """
         if self._event_thread and self._event_thread.is_alive():
             return
+
         self._event_thread = threading.Thread(target=self._monitor_worker, daemon=True)
         self._event_thread.start()
-        self.client_thread = self._event_thread
 
     def connect(self) -> bool:
         """
@@ -362,11 +361,8 @@ class Client:
             else:
                 logger.info("Client event thread stopped")
 
-        self.client_thread = None
         self._event_thread = None
         self._worker_process = None
-        self.receiver_thread = None
-        self.sender_thread = None
 
         try:
             while True:
