@@ -158,7 +158,7 @@ class Client:
         self.websocket: Optional[ClientConnection] = None
         self.message_callback: Optional[Callable] = None
 
-        self.message_queue: mp.Queue = mp.Queue(maxsize=10)
+        self.message_queue: mp.Queue = mp.Queue(maxsize=20)
         self._incoming_queue: mp.Queue = mp.Queue()
         self._state_queue: mp.Queue = mp.Queue()
         self._control_queue: mp.Queue = mp.Queue()
