@@ -6,7 +6,7 @@ import struct
 import threading
 import time
 from queue import Empty, Full
-from typing import Callable, Dict, Generator, List, Optional, Union
+from typing import Callable, Generator, List, Optional, Union
 
 import av
 import numpy as np

@@ -8,7 +8,7 @@ import queue
 import struct
 import threading
 import time
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Callable, Generator, List, Optional, Tuple, Union
 
 import pyaudio
 import zenoh
