@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import multiprocessing as mp
+import struct
 import threading
 import time
 from queue import Empty, Full
@@ -414,7 +415,7 @@ class AudioRTSPInputStream:
                 self._rate = rate
                 self._language_code = language_code
 
-    def generator(self) -> Generator[Dict[str, Union[bytes, int]], None, None]:
+    def generator(self) -> Generator[bytes, None, None]:
         """
         Generates a stream of audio data chunk.
 
@@ -435,17 +436,17 @@ class AudioRTSPInputStream:
                 if self._is_tts_active:
                     continue
 
-            data = [chunk]
-
-            response = {
-                "audio": base64.b64encode(b"".join(data)).decode("utf-8"),
+            config = {
                 "rate": self._rate,
                 "language_code": self._language_code,
                 "alternative_language_codes": self._alternative_language_codes,
-                "timestamp": int(time.time()),
             }
+
+            config["timestamp"] = int(time.time() * 1000)
+            header = json.dumps(config).encode("utf-8")
+            response = struct.pack(">I", len(header)) + header + chunk
             for audio_callback in self._audio_data_callbacks:
-                audio_callback(json.dumps(response))
+                audio_callback(response)
 
             yield response
 
