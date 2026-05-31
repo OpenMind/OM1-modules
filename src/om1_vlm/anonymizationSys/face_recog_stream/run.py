@@ -606,8 +606,8 @@ def main() -> None:
         "draw_fall_status": bool(args.draw_fall_status),
         # ---- Selfie pipeline (all hot-tunable via /config) ----
         # Collection window
-        "selfie_window_sec": 1.5,
-        "selfie_tap_interval_sec": 0.20,
+        "selfie_window_sec": 0.8,
+        "selfie_tap_interval_sec": 0.10,
         # Adaptive sample count: min=1 lets static users still enroll
         # with just the first valid frame; max=4 caps active users to keep
         # storage and embedding work bounded.
