@@ -1,23 +1,48 @@
 """
-Gallery & embedding manager for face recognition.
+UUID-keyed face gallery with per-identity self-contained folders.
 
-This module manages a disk-backed face gallery and its embedding store.
-It aligns new photos (optionally from `raw/` using SCRFD) into 112×112
-`aligned/` crops, embeds them with AdaFace (TensorRT), and persists the
-results under `embeds/<model_sig>/{index.json,vectors.f32,stats.json}`.
-It supports incremental refresh (only process new files), adding single
-aligned snapshots, clearing & rebuilding, and computing per-identity mean
-vectors for fast runtime recognition.
+Layout
+------
+gallery/
+  <uuid>/
+    metadata.json     # {uuid, name, created_at, updated_at, sample_count,
+                      #  source, notes?}
+    aligned/          # 112x112 BGR JPGs
+      sample_001.jpg
+      sample_002.jpg
+      ...
+    embeddings.npy    # (k, 512) float32, L2-normalized, one row per sample
+    centroid.npy      # (512,) float32, L2-normalized incremental mean
+  _legacy/            # one-shot migration moves old <name>/ folders here
+  _trash/             # forget()'d UUIDs (soft delete, restorable)
 
-Typical usage:
-- At startup (or after HTTP actions like /gallery/refresh, /gallery/add_aligned,
-  /gallery/add_raw, /selfie), refresh the gallery and fetch identity means.
-- At inference time, compare a face embedding to the returned per-identity means.
+Why UUIDs not names
+-------------------
+- Renames are O(1): just update metadata.name (no folder rename, no GPU work,
+  no embedding store rewrite).
+- Multiple "profiles" per name are natural: two distinct UUIDs can both be
+  named "wendy" (e.g. one auto-enrolled, one selfie). Either can be deleted
+  independently.
+- Auto-enrolled identities start with name="" (anonymous) and get named
+  later when the LLM asks. The UUID never changes — only the metadata.
+- Privacy: filenames don't leak identities; the UUID is opaque on disk.
+  metadata.json is the only place names live, and can be encrypted later.
 
-Notes
------
-- Embeddings are float32; vectors are L2-normalized before similarity.
-- Batch size respects the AdaFace TensorRT optimization profile (`arc_max_bs`).
+Why per-folder embeddings (vs one global file)
+----------------------------------------------
+- forget(uuid) is rmtree on one folder — O(1) filesystem op, no GPU.
+  The old design rebuilt the entire embedding store on every delete, which
+  was ~25 seconds at 1000 identities × 5 samples.
+- add_sample updates one centroid incrementally — O(1), no scan of others.
+- get_centroids() scans folders at load and caches; in-memory after that.
+
+Threading model
+---------------
+All gallery write operations should be called from a single thread (the
+main loop, via run_job_sync). This module does NOT take internal locks —
+the caller is responsible for serialization. Reads (get_centroids,
+list_identities) are safe to call from any thread but should ideally also
+be serialized with writes.
 """
 
 from __future__ import annotations
@@ -26,19 +51,33 @@ import json
 import logging
 import os
 import os.path as osp
+import re
 import shutil
 import time
+import uuid as uuidlib
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from .adaface import TRTFaceRecognition, warp_face_by_5p
-from .scrfd import TRTSCRFD
-from .utils import infer_arc_batched, list_images  # helpers
+from .adaface import TRTFaceRecognition
 
 log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+
+# UUIDs are written as plain hex strings (no dashes) to keep filenames short.
+# Regex matches both lowercase hex strings and standard 8-4-4-4-12 format.
+_UUID_RE = re.compile(
+    r"^[a-f0-9]{32}$|^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+)
+
+# Reserved directory names — never treated as UUIDs.
+_RESERVED_DIRS = frozenset({"_legacy", "_trash", "embeds"})
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _ensure_dir(d: str) -> None:
@@ -46,755 +85,864 @@ def _ensure_dir(d: str) -> None:
 
 
 def _now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H-%M-%S")
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def make_model_sig(arc: TRTFaceRecognition, extra: Optional[str] = None) -> str:
-    """Build a readable, deterministic model signature for the embedding store.
+def _is_uuid_dir(name: str) -> bool:
+    return bool(_UUID_RE.match(name))
+
+
+def _atomic_write_json(path: str, obj: dict) -> None:
+    """Write JSON via temp-file + rename so partial writes can't corrupt.
+
+    Crashes between the write and rename leave the previous file intact.
+    """
+    _ensure_dir(osp.dirname(path))
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _atomic_write_npy(path: str, arr: np.ndarray) -> None:
+    """Write .npy via temp + rename. Same crash-safety as JSON above."""
+    _ensure_dir(osp.dirname(path))
+    tmp = f"{path}.tmp.{os.getpid()}"
+    np.save(tmp, arr.astype(np.float32, copy=False))
+    # np.save appends .npy automatically if extension missing — handle that.
+    if not osp.exists(tmp) and osp.exists(tmp + ".npy"):
+        tmp = tmp + ".npy"
+    os.replace(tmp, path)
+
+
+def _l2_normalize(v: np.ndarray) -> np.ndarray:
+    """L2-normalize, defensive against zero vectors."""
+    n = float(np.linalg.norm(v))
+    if n < 1e-12:
+        return v.astype(np.float32, copy=False)
+    return (v / n).astype(np.float32, copy=False)
+
+
+def _new_uuid(existing: set) -> str:
+    """Generate a fresh UUID4 (hex form, 32 chars).
+
+    UUID4 collision is astronomically unlikely (~10^-15 at 100M UUIDs), but
+    we retry on the off chance to be safe — also catches the case where a
+    user manually copied a folder.
+    """
+    for _ in range(10):
+        u = uuidlib.uuid4().hex
+        if u not in existing:
+            return u
+    raise RuntimeError("UUID generation collision (10x). Bug or corrupt state.")
+
+
+# ---------------------------------------------------------------------------
+# Per-UUID record (in-memory representation)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class IdentityRecord:
+    """In-memory snapshot of one UUID folder.
+
+    Fields are populated from metadata.json + centroid.npy + the aligned/ dir.
+    Mutations on this object are NOT written back automatically — call
+    ``UUIDGallery.save_metadata(record)`` after mutating ``record.metadata``.
+
+    Centroid representation
+    -----------------------
+    ``centroid_sum`` is the UN-normalized sum of all sample embeddings — i.e.
+    ``sum(embeddings)``, not ``mean(embeddings)`` and not L2-normalized. This
+    is what we persist in ``centroid.npy``.
+
+    Why store the sum (not the L2-normalized mean):
+    Adding a new sample is just ``sum_new = sum_old + emb``. If we stored the
+    L2-normalized mean, we'd lose the magnitude information needed to weight
+    the existing mean correctly when folding in a new vector. Storing the
+    sum keeps the add operation O(1) and mathematically equivalent to a
+    full recompute.
+
+    The L2-normalized form (what face recognition actually uses) is computed
+    on the fly in :meth:`UUIDGallery.get_centroids` — that's just N vector
+    normalizations, trivial even at thousands of identities.
+    """
+
+    uuid: str
+    name: str
+    sample_count: int
+    centroid_sum: Optional[np.ndarray] = None  # un-normalized sum, (512,)
+    metadata: dict = field(default_factory=dict)
+
+    @property
+    def is_named(self) -> bool:
+        """True if this identity has a non-empty display name (i.e. not anon)."""
+        return bool(self.name and self.name.strip())
+
+    @property
+    def centroid_normalized(self) -> Optional[np.ndarray]:
+        """Lazy L2-normalized centroid for similarity comparisons."""
+        if self.centroid_sum is None:
+            return None
+        return _l2_normalize(self.centroid_sum)
+
+
+# ---------------------------------------------------------------------------
+# UUIDGallery
+# ---------------------------------------------------------------------------
+
+
+class UUIDGallery:
+    """Disk-backed face gallery keyed by UUID.
 
     Parameters
     ----------
-    arc : TRTFaceRecognition
-        AdaFace TensorRT wrapper; used to read model name and embedding dimension.
-    extra : str, optional
-        Extra token to append (e.g., engine variant), by default ``None``.
-
-    Returns
-    -------
-    str
-        Signature string like ``"{name}-trt-l2-{dim}[-{extra}]"``.
-    """
-    name = getattr(arc, "name", None) or getattr(arc, "model_name", None) or "arc"
-    dim = int(getattr(arc, "embedding_dim", 512))
-    backend = "trt"
-    norm = "l2"
-    parts = [str(name), backend, norm, str(dim)]
-    if extra:
-        parts.append(str(extra))
-    return "-".join(parts)
-
-
-def _align_largest_face_bgr(
-    img_bgr: np.ndarray,
-    det: TRTSCRFD,
-    conf: float,
-    size: int = 112,
-) -> Optional[np.ndarray]:
-    """
-    Detect faces, choose the largest, align with 5p if available, else crop+resize.
-    Returns a size×size BGR crop or None if no face.
-    """
-    dets, kpss = det.detect(img_bgr, conf=conf)
-    if dets is None or dets.shape[0] == 0:
-        return None
-    areas = (dets[:, 2] - dets[:, 0]) * (dets[:, 3] - dets[:, 1])
-    idx = int(np.argmax(areas))
-    if kpss is not None:
-        try:
-            return warp_face_by_5p(img_bgr, kpss[idx], size)
-        except Exception:
-            pass
-    x1, y1, x2, y2, _ = dets[idx].astype(int)
-    face = img_bgr[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
-    if face.size == 0:
-        return None
-    return cv2.resize(face, (size, size))
-
-
-class GalleryManager:
-    """
-    Gallery manager for face recognition.
-
-    Manages a face gallery with aligned crops and an embedding store. It supports incremental refresh from
-    ``raw/`` and ``aligned/``, batched embedding respecting the AdaFace TensorRT max batch size, and per-identity statistics (counts and mean vectors)
-
-    Layout:
-      gallery/
-        Alice/ aligned/*.jpg   (112x112)  [source of truth]
-               raw/*.jpg       (optional; will be aligned -> aligned/]
-        Bob/   aligned/*.jpg
-      embeds/
-        <model_sig>/
-          index.json    { "meta": {...}, "items": { "Alice/aligned/foo.jpg": {"row":0,"label":"Alice"}, ... } }
-          vectors.f32   float32 raw, concatenated (N * dim)
-          stats.json    { "labels": {"Alice": {"count": X, "mean": [...]}}, "count": N, "dim": dim }
-
-    Typical usage:
-      gm = GalleryManager(gallery_dir, embeds_dir, arc, scrfd)
-      gm.refresh()                    # incremental: align new raw/, embed new aligned/
-      feats, labels = gm.get_identity_means()  # per-identity means (for recognition)
-
-    Attributes
-    ----------
     gallery_dir : str
-        Absolute path to the gallery root (one subfolder per identity).
-    embeds_root : str
-        Absolute path to the embeddings root folder.
+        Root directory containing the UUID folders.
     arc : TRTFaceRecognition
-        AdaFace TensorRT wrapper used for feature extraction.
-    scrfd : TRTSCRFD or None
-        SCRFD detector used to align new images from ``raw/``.
-    det_conf : float
-        Detection confidence threshold for alignment.
-    aligned_size : int
-        Aligned face crop size (pixels).
-    model_sig : str
-        Model signature used to segregate embed stores.
-    arc_max_bs : int
-        Maximum AdaFace batch size (matches TRT optimization profile).
-    store_dir : str
-        Directory under ``embeds_root`` for this model signature.
-    index_path : str
-        JSON index mapping relative image paths to row indices and labels.
-    vectors_path : str
-        Binary file storing concatenated float32 embeddings ``(N * dim)``.
-    stats_path : str
-        JSON file with per-identity counts and mean vectors.
+        AdaFace TRT engine for embedding extraction. Used by ``embed_aligned``
+        and any operation that adds a sample without a pre-computed vector.
+    aligned_size : int, default 112
+        Face crop dimension. Almost always 112 for AdaFace/ArcFace.
     """
 
     def __init__(
         self,
         gallery_dir: str,
-        embeds_dir: str,
         *,
         arc: TRTFaceRecognition,
-        scrfd: Optional[TRTSCRFD] = None,
-        det_conf: float = 0.5,
         aligned_size: int = 112,
-        model_sig: Optional[str] = None,
-        arc_max_bs: int = 4,  # IMPORTANT: respect TensorRT optimization profile (e.g., 1..4)
     ) -> None:
-        """
-        Initialize the gallery manager and load/create the embed store.
-        """
         self.gallery_dir = osp.abspath(gallery_dir)
-        self.embeds_root = osp.abspath(embeds_dir)
         self.arc = arc
-        self.scrfd = scrfd
-        self.det_conf = float(det_conf)
         self.aligned_size = int(aligned_size)
-        self.model_sig = model_sig or make_model_sig(arc)
-        self.arc_max_bs = int(arc_max_bs)
+        self._dim = int(getattr(arc, "embedding_dim", 512))
 
-        # Paths under embeds/
-        self.store_dir = osp.join(self.embeds_root, self.model_sig)
-        self.index_path = osp.join(self.store_dir, "index.json")
-        self.vectors_path = osp.join(self.store_dir, "vectors.f32")
-        self.stats_path = osp.join(self.store_dir, "stats.json")
+        _ensure_dir(self.gallery_dir)
+        _ensure_dir(osp.join(self.gallery_dir, "_trash"))
 
-        _ensure_dir(self.store_dir)
-        self._index = self._load_index()
-        self._dim = int(getattr(self.arc, "embedding_dim", 512))
+        # In-memory cache: uuid → IdentityRecord. Populated on demand by
+        # _load() and refreshed by reload().
+        self._records: Dict[str, IdentityRecord] = {}
+        self.reload()
 
-    def refresh(self, process_raw: bool = True) -> Tuple[int, int]:
+    # ==================================================================
+    # Loading
+    # ==================================================================
+
+    def reload(self) -> int:
+        """Scan ``gallery_dir`` and rebuild the in-memory record cache.
+
+        Returns the number of UUIDs loaded. Call this after external
+        modifications to ``gallery_dir`` (e.g. file-level rsync).
         """
-        Incrementally update the embed store.
-
-        - Optionally process new images in `raw/`: detect→align→write into `aligned/`.
-        - Embed any new 112×112 crops under `aligned/` and append to vectors.
-
-        Parameters
-        ----------
-        process_raw : bool, optional
-            Whether to detect→align images from ``raw/`` into ``aligned/``, by default ``True``.
-
-        Returns
-        -------
-          (num_aligned_added, num_vectors_appended)
-        """
-        if process_raw and self.scrfd is None:
-            log.warning(
-                "refresh(): 'process_raw=True' but SCRFD was not provided; skipping raw/"
-            )
-
-        if process_raw and self.scrfd is not None:
-            self._harvest_raw_to_aligned()
-
-        added = self._embed_new_aligned()
-        self._recompute_stats()
-        return added
-
-    def clear_and_rebuild(self) -> Tuple[int, int]:
-        """Delete current vectors and rebuild embeddings from ``aligned/`` only.
-
-        Returns
-        -------
-        tuple[int, int]
-            ``(num_aligned_added, num_vectors_appended)`` after rebuild.
-        """
-        if osp.exists(self.vectors_path):
+        self._records.clear()
+        if not osp.isdir(self.gallery_dir):
+            return 0
+        for entry in os.listdir(self.gallery_dir):
+            if entry in _RESERVED_DIRS:
+                continue
+            path = osp.join(self.gallery_dir, entry)
+            if not osp.isdir(path):
+                continue
+            if not _is_uuid_dir(entry):
+                # Legacy folder; needs migration via migrate_legacy().
+                log.warning(
+                    "Skipping non-UUID directory '%s' (run migrate_legacy)",
+                    entry,
+                )
+                continue
             try:
-                os.remove(self.vectors_path)
-            except Exception:
-                pass
-        self._index = {"meta": self._index.get("meta", {}), "items": {}}
-        self._save_index()
+                rec = self._load(entry)
+                if rec is not None:
+                    self._records[entry] = rec
+            except Exception as e:
+                log.warning("Failed to load UUID %s: %s", entry, e)
+        log.info("Gallery loaded: %d UUIDs", len(self._records))
+        return len(self._records)
 
-        added = self._embed_new_aligned()
-        self._recompute_stats()
-        return added
+    def _load(self, uuid: str) -> Optional[IdentityRecord]:
+        """Load one UUID's record from disk. Returns None on corrupted entry."""
+        uuid_dir = osp.join(self.gallery_dir, uuid)
+        meta_path = osp.join(uuid_dir, "metadata.json")
+        centroid_path = osp.join(uuid_dir, "centroid.npy")
 
-    def add_aligned_snapshot(
-        self, label: str, img_112_bgr: np.ndarray, fname_hint: Optional[str] = None
-    ) -> str:
-        """
-        Add a new 112×112 face (already aligned) under gallery/<label>/aligned,
-        then embed and append to the store. Returns the relative aligned path.
+        if not osp.exists(meta_path):
+            log.warning("UUID %s missing metadata.json", uuid)
+            return None
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception as e:
+            log.warning("UUID %s metadata.json invalid: %s", uuid, e)
+            return None
 
-        Parameters
-        ----------
-        label : str
-            Identity name (subfolder under gallery).
-        img_112_bgr : np.ndarray
-            Aligned BGR crop of shape ``(112,112,3)`` (will be resized if needed).
-        fname_hint : str, optional
-            Preferred filename (``.jpg`` added if missing), by default ``None``.
+        centroid_sum: Optional[np.ndarray] = None
+        if osp.exists(centroid_path):
+            try:
+                centroid_sum = np.load(centroid_path).astype(np.float32)
+                if centroid_sum.shape != (self._dim,):
+                    log.warning(
+                        "UUID %s centroid shape %s, expected (%d,)",
+                        uuid,
+                        centroid_sum.shape,
+                        self._dim,
+                    )
+                    centroid_sum = None
+            except Exception as e:
+                log.warning("UUID %s centroid.npy invalid: %s", uuid, e)
+
+        sample_count = int(meta.get("sample_count", 0))
+        # Cross-check sample_count against actual files (cheap sanity check)
+        aligned_dir = osp.join(uuid_dir, "aligned")
+        if osp.isdir(aligned_dir):
+            actual = len([f for f in os.listdir(aligned_dir) if f.endswith(".jpg")])
+            if actual != sample_count:
+                log.debug(
+                    "UUID %s: metadata sample_count=%d, actual files=%d (will fix)",
+                    uuid,
+                    sample_count,
+                    actual,
+                )
+                sample_count = actual
+                meta["sample_count"] = actual
+
+        return IdentityRecord(
+            uuid=uuid,
+            name=str(meta.get("name", "")),
+            sample_count=sample_count,
+            centroid_sum=centroid_sum,
+            metadata=meta,
+        )
+
+    # ==================================================================
+    # Read APIs (called from recognition + UI)
+    # ==================================================================
+
+    def get_centroids(self) -> Tuple[np.ndarray, List[str], List[str]]:
+        """Build the (feats, names, uuids) triple consumed by face_tracker.
+
+        Only includes UUIDs with at least one sample. Names are the
+        human-readable labels from metadata.json — they may be empty for
+        auto-enrolled (yet-to-be-named) identities.
 
         Returns
         -------
-        str
-            Relative path of the saved aligned image (e.g., ``"Alice/aligned/xxx.jpg"``).
+        feats : (N, 512) float32
+            L2-normalized centroids, one row per included UUID.
+        names : list[str]
+            Display names, parallel to ``feats``.
+        uuids : list[str]
+            UUIDs, parallel to ``feats``. Use this for stable identity refs
+            (e.g. /set_name, /forget).
         """
-        if img_112_bgr is None or img_112_bgr.size == 0:
-            raise ValueError("empty snapshot")
+        feats_list: List[np.ndarray] = []
+        names: List[str] = []
+        uuids: List[str] = []
+        for u, rec in self._records.items():
+            if rec.centroid_sum is None or rec.sample_count == 0:
+                continue
+            # Normalize the running sum for cosine-similarity use. Storing
+            # the un-normalized sum on disk lets add_sample stay O(1); the
+            # per-frame normalization here is N vector norms (trivial).
+            feats_list.append(_l2_normalize(rec.centroid_sum))
+            names.append(rec.name)
+            uuids.append(u)
+        if not feats_list:
+            return np.zeros((0, self._dim), dtype=np.float32), [], []
+        return np.stack(feats_list, axis=0).astype(np.float32), names, uuids
 
-        if img_112_bgr.shape[:2] != (self.aligned_size, self.aligned_size):
-            img_112_bgr = cv2.resize(
-                img_112_bgr, (self.aligned_size, self.aligned_size)
+    def get_record(self, uuid: str) -> Optional[IdentityRecord]:
+        """Look up a single UUID's record."""
+        return self._records.get(uuid)
+
+    def get_metadata(self, uuid: str) -> Optional[dict]:
+        """Return metadata.json contents for ``uuid``, or None if unknown."""
+        rec = self._records.get(uuid)
+        return dict(rec.metadata) if rec is not None else None
+
+    def list_identities(self, include_unnamed: bool = True) -> List[dict]:
+        """Public listing of all identities (one dict per UUID).
+
+        Used by /gallery/identities. Returns lightweight summary dicts —
+        not full centroids.
+        """
+        out: List[dict] = []
+        for u, rec in sorted(self._records.items()):
+            if not include_unnamed and not rec.is_named:
+                continue
+            out.append(
+                {
+                    "uuid": u,
+                    "name": rec.name,
+                    "sample_count": rec.sample_count,
+                    "created_at": rec.metadata.get("created_at"),
+                    "updated_at": rec.metadata.get("updated_at"),
+                    "source": rec.metadata.get("source"),
+                }
             )
+        return out
 
-        # Save
-        label_dir = osp.join(self.gallery_dir, label, "aligned")
-        _ensure_dir(label_dir)
-        base = (fname_hint or f"{_now_iso()}.jpg").strip()
-        if not base.lower().endswith(".jpg"):
-            base += ".jpg"
-        rel = osp.join(label, "aligned", base).replace("\\", "/")
-        absf = osp.join(self.gallery_dir, rel)
-        # unique filename if exists
-        i = 0
-        while osp.exists(absf):
-            i += 1
-            stem, ext = osp.splitext(base)
-            rel = osp.join(label, "aligned", f"{stem}_{i}{ext}").replace("\\", "/")
-            absf = osp.join(self.gallery_dir, rel)
+    def find_by_name(self, name: str) -> List[str]:
+        """All UUIDs whose name matches ``name`` (case-insensitive).
 
-        cv2.imwrite(absf, img_112_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        Multiple UUIDs may share the same name (e.g. enrolled twice). The
+        caller decides what to do — typically, the first or the one with
+        the most samples.
+        """
+        target = name.strip().lower()
+        return [
+            u for u, rec in self._records.items() if rec.name.strip().lower() == target
+        ]
 
-        # Embed & append
-        vec = self.embed_aligned(img_112_bgr)
-        row = self._append_vectors(vec[None, :])
-        self._index["items"][rel] = {"row": row, "label": label}
-        self._save_index()
-        self._recompute_stats()
-        return rel
+    def num_identities(self) -> int:
+        """Number of UUIDs with at least one sample."""
+        return sum(1 for r in self._records.values() if r.sample_count > 0)
 
-    def add_aligned_no_stats(
+    # ==================================================================
+    # Write APIs — create / append / rename / delete
+    # ==================================================================
+
+    def create(self, name: str = "", source: str = "selfie", **extra) -> str:
+        """Create an empty UUID folder. Returns the new UUID.
+
+        The folder is created on disk immediately; ``add_sample`` is required
+        before the UUID will show up in ``get_centroids``.
+
+        Parameters
+        ----------
+        name : str
+            Display name. Use ``""`` for auto-enrolled / anonymous identities;
+            ``set_name`` later when the name is known.
+        source : str
+            Provenance tag (``"selfie"``, ``"auto_enroll"``, ``"migration"``,
+            ``"add_raw"``, ...). Helps with debugging and audit.
+        extra : dict
+            Extra metadata key/values to merge into metadata.json (e.g.
+            ``notes="enrolled at GTC"``).
+        """
+        u = _new_uuid(set(self._records.keys()))
+        uuid_dir = osp.join(self.gallery_dir, u)
+        _ensure_dir(uuid_dir)
+        _ensure_dir(osp.join(uuid_dir, "aligned"))
+
+        meta = {
+            "uuid": u,
+            "name": name,
+            "created_at": _now_iso(),
+            "updated_at": _now_iso(),
+            "sample_count": 0,
+            "source": source,
+            **extra,
+        }
+        _atomic_write_json(osp.join(uuid_dir, "metadata.json"), meta)
+
+        self._records[u] = IdentityRecord(
+            uuid=u,
+            name=name,
+            sample_count=0,
+            centroid_sum=None,
+            metadata=meta,
+        )
+        log.info("Created UUID %s (name=%r, source=%s)", u, name, source)
+        return u
+
+    def add_sample(
         self,
-        label: str,
-        img_112_bgr: np.ndarray,
-        vec: Optional[np.ndarray] = None,
+        uuid: str,
+        aligned_112_bgr: np.ndarray,
+        embedding: Optional[np.ndarray] = None,
+        *,
         fname_hint: Optional[str] = None,
     ) -> str:
-        """
-        Add a 112×112 aligned snapshot WITHOUT recomputing stats.
-
-        Designed for multi-shot batch enrollment (e.g. /selfie collects N frames
-        and saves them all in one go). Behaves like ``add_aligned_snapshot`` but:
-
-        - Skips the trailing ``_recompute_stats()`` call. Caller MUST invoke
-          ``recompute_stats()`` after the batch finishes; otherwise stats.json
-          stays stale until the next refresh.
-        - If ``vec`` is provided, uses it directly (must be L2-normalized).
-          Avoids re-embedding the same crop when the caller already has it
-          (e.g. /selfie pipeline embedded it for dedup/novelty/consistency).
-
-        Parameters
-        ----------
-        label : str
-            Identity name (subfolder under gallery).
-        img_112_bgr : np.ndarray
-            Aligned BGR crop of shape ``(112,112,3)`` (will be resized if needed).
-        vec : np.ndarray, optional
-            Pre-computed L2-normalized embedding of shape ``(dim,)``. If
-            supplied and valid, the crop is not re-embedded. If shape/norm
-            looks wrong, falls back to a fresh embedding.
-        fname_hint : str, optional
-            Preferred filename (``.jpg`` appended if missing), by default ``None``.
-
-        Returns
-        -------
-        str
-            Relative path of the saved aligned image
-            (e.g., ``"wendy/aligned/2026-05-19T18-30-00_00.jpg"``).
-        """
-        if img_112_bgr is None or img_112_bgr.size == 0:
-            raise ValueError("empty snapshot")
-
-        if img_112_bgr.shape[:2] != (self.aligned_size, self.aligned_size):
-            img_112_bgr = cv2.resize(
-                img_112_bgr, (self.aligned_size, self.aligned_size)
-            )
-
-        # Save to gallery/<label>/aligned/ with collision-safe filename
-        label_dir = osp.join(self.gallery_dir, label, "aligned")
-        _ensure_dir(label_dir)
-        base = (fname_hint or f"{_now_iso()}.jpg").strip()
-        if not base.lower().endswith(".jpg"):
-            base += ".jpg"
-        rel = osp.join(label, "aligned", base).replace("\\", "/")
-        absf = osp.join(self.gallery_dir, rel)
-        i = 0
-        while osp.exists(absf):
-            i += 1
-            stem, ext = osp.splitext(base)
-            rel = osp.join(label, "aligned", f"{stem}_{i}{ext}").replace("\\", "/")
-            absf = osp.join(self.gallery_dir, rel)
-
-        cv2.imwrite(absf, img_112_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
-
-        # Embed (or use the provided vector with defensive validation)
-        if vec is None:
-            vec = self.embed_aligned(img_112_bgr)
-        else:
-            vec = np.asarray(vec, dtype=np.float32).reshape(-1)
-            if vec.shape[0] != self._dim:
-                vec = self.embed_aligned(img_112_bgr)
-            else:
-                n = float(np.linalg.norm(vec))
-                if n < 1e-9:
-                    vec = self.embed_aligned(img_112_bgr)
-                elif abs(n - 1.0) > 1e-4:
-                    vec = (vec / n).astype(np.float32, copy=False)
-
-        # Append to vectors.f32 + update index
-        row = self._append_vectors(vec[None, :])
-        self._index["items"][rel] = {"row": int(row), "label": label}
-        self._save_index()
-        # NB: deliberately NO self._recompute_stats() here — caller does it once
-        return rel
-
-    def recompute_stats(self) -> None:
-        """
-        Public wrapper for ``_recompute_stats()``.
-
-        Call once at the end of a batch of ``add_aligned_no_stats()`` to update
-        per-identity centroids in stats.json. Behaviorally identical to the
-        internal ``_recompute_stats``; the wrapper exists so external callers
-        don't have to reach into an underscored name.
-        """
-        self._recompute_stats()
-
-    def delete_identity(self, label: str) -> tuple[bool, int, int, int]:
-        """
-        Delete one identity from the gallery and rebuild the embedding store.
+        """Append one sample to an existing UUID.
 
         Steps
         -----
-        - Remove the folder `gallery/<label>/` (both raw/ and aligned/).
-        - Clear & rebuild the embed store from remaining `aligned/` photos.
-        - Recompute stats, so runtime recognition stops matching this label.
+        1. Compute embedding if not provided (GPU work).
+        2. Write JPG to ``aligned/``.
+        3. Append the embedding to ``embeddings.npy`` (full rewrite, since
+           numpy lacks streaming append for ``.npy`` format — but it's still
+           cheap, embeddings are ~2KB per row).
+        4. Update centroid incrementally: ``new = norm((old*N + emb))``.
+        5. Update metadata.sample_count and updated_at.
 
-        Parameters
-        ----------
-        label: person name: wendy
-
-        Returns
-        -------
-        (removed_gallery, aligned_used, vectors_rebuilt, identities_left)
+        Returns the filename of the saved sample (e.g. ``"sample_004.jpg"``).
         """
-        p = osp.join(self.gallery_dir, label)
-        removed_gallery = False
-        if osp.isdir(p):
-            shutil.rmtree(p)
-            removed_gallery = True
+        rec = self._records.get(uuid)
+        if rec is None:
+            raise KeyError(f"UUID not found: {uuid}")
 
-        aligned_used, vectors_rebuilt = self.clear_and_rebuild()
+        # Normalize/validate the crop
+        if aligned_112_bgr is None or aligned_112_bgr.size == 0:
+            raise ValueError("empty aligned crop")
+        crop = aligned_112_bgr
+        if crop.shape[:2] != (self.aligned_size, self.aligned_size):
+            crop = cv2.resize(crop, (self.aligned_size, self.aligned_size))
 
-        feats, labels = self.get_identity_means()
-        return removed_gallery, aligned_used, vectors_rebuilt, len(labels)
-
-    def get_all_vectors_and_labels(self) -> Tuple[np.ndarray, List[str]]:
-        """
-        Load the whole vectors file into RAM and return (vectors, labels_per_row).
-
-        Returns
-        -------
-        tuple[np.ndarray, list[str]]
-            ``(vectors, labels_per_row)`` where ``vectors`` is ``(N, dim)`` float32.
-        """
-        if not osp.exists(self.vectors_path):
-            return np.zeros((0, self._dim), np.float32), []
-        arr = np.fromfile(self.vectors_path, dtype=np.float32)
-        if arr.size % self._dim != 0:
-            raise RuntimeError("vectors.f32 is corrupted or wrong dim")
-        arr = arr.reshape((-1, self._dim))
-        labels = self._row_labels(len(arr))
-        return arr, labels
-
-    def get_identity_means(self) -> Tuple[np.ndarray, List[str]]:
-        """
-        Return per-identity mean vectors (N_id × dim) and label list.
-        Mirrors your old build_gallery_embeddings() contract.
-
-        Returns
-        -------
-        tuple[np.ndarray, list[str]]
-            ``(means, labels)`` where ``means`` is ``(N_id, dim)`` float32 and
-            each row is L2-normalized.
-        """
-        stats = self._load_stats()
-        labels: List[str] = []
-        means: List[np.ndarray] = []
-        if stats and "labels" in stats:
-            for lab, rec in stats["labels"].items():
-                if rec.get("count", 0) > 0 and "mean" in rec:
-                    labels.append(lab)
-                    means.append(np.asarray(rec["mean"], dtype=np.float32))
-        if not means:
-            return np.zeros((0, self._dim), np.float32), []
-        return np.stack(means, axis=0).astype(np.float32), labels
-
-    def legacy_build_gallery_embeddings(
-        self, det_conf: Optional[float] = None
-    ) -> Tuple[np.ndarray, List[str]]:
-        """
-        Backward-compatible shim for older call sites:
-            feats, labels = build_gallery_embeddings(gallery, scrfd, arc, det_conf)
-        Under the hood, we refresh and return per-identity means.
-
-        Parameters
-        ----------
-        det_conf : float, optional
-            Detection confidence to use during refresh, by default ``None`` (keep current).
-
-        Returns
-        -------
-        tuple[np.ndarray, list[str]]
-            ``(means, labels)`` as in :meth:`get_identity_means`.
-        """
-        if det_conf is not None:
-            self.det_conf = float(det_conf)
-        self.refresh(process_raw=True)
-        return self.get_identity_means()
-
-    def _load_index(self) -> Dict:
-        """Load or initialize the JSON index file.
-
-        Returns
-        -------
-        dict
-            Index structure with ``meta`` and ``items`` keys. ``items`` maps
-            relative image paths to ``{"row": int, "label": str}``.
-        """
-        if osp.exists(self.index_path):
-            try:
-                with open(self.index_path, "r", encoding="utf-8") as f:
-                    idx = json.load(f)
-                if "items" not in idx:
-                    idx = {"meta": {}, "items": {}}
-            except Exception:
-                idx = {"meta": {}, "items": {}}
+        # Compute or validate embedding
+        if embedding is None:
+            embedding = self.embed_aligned(crop)
         else:
-            idx = {"meta": {}, "items": {}}
-
-        idx["meta"].update(
-            {
-                "model_sig": self.model_sig,
-                "dim": int(getattr(self.arc, "embedding_dim", 512)),
-                "created": idx["meta"].get("created") or _now_iso(),
-                "updated": _now_iso(),
-            }
-        )
-        self._save_json(self.index_path, idx)
-        return idx
-
-    def _save_index(self) -> None:
-        """Update the index ``updated`` timestamp and persist to disk."""
-        self._index["meta"]["updated"] = _now_iso()
-        self._save_json(self.index_path, self._index)
-
-    def _save_json(self, path: str, obj: Dict) -> None:
-        """Write a JSON object to a file (ensuring parent directory exists)."""
-        _ensure_dir(osp.dirname(path))
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=2)
-
-    def _load_stats(self) -> Optional[Dict]:
-        """Load per-identity statistics from ``stats.json`` if present."""
-        if not osp.exists(self.stats_path):
-            return None
-        try:
-            with open(self.stats_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return None
-
-    def _recompute_stats(self) -> None:
-        """
-        Build per-identity means and counts; write to stats.json.
-        """
-        if not osp.exists(self.vectors_path):
-            stats = {
-                "count": 0,
-                "dim": self._dim,
-                "labels": {},
-                "updated": _now_iso(),
-            }
-            self._save_json(self.stats_path, stats)
-            return
-
-        vecs, row_labels = self.get_all_vectors_and_labels()
-        per: Dict[str, Dict[str, object]] = {}
-        uniq = sorted(set(row_labels))
-        for lab in uniq:
-            idxs = [i for i, L in enumerate(row_labels) if L == lab]
-            if not idxs:
-                continue
-            m = vecs[idxs].mean(axis=0)
-            m /= np.linalg.norm(m) + 1e-9
-            per[lab] = {"count": int(len(idxs)), "mean": m.tolist()}
-        stats = {
-            "count": int(vecs.shape[0]),
-            "dim": int(self._dim),
-            "labels": per,
-            "updated": _now_iso(),
-        }
-        self._save_json(self.stats_path, stats)
-
-    def _row_labels(self, n_rows: int) -> List[str]:
-        """
-        Build a dense row->label list from index.json.
-        """
-        lab = [""] * n_rows
-        for _rel, rec in self._index["items"].items():
-            r = int(rec["row"])
-            if 0 <= r < n_rows:
-                lab[r] = rec["label"]
-        return lab
-
-    def _harvest_raw_to_aligned(self) -> None:
-        """
-        For every gallery/<id>/raw/*.jpg, if there isn't a corresponding file
-        under gallery/<id>/aligned/, detect & align and save it.
-        """
-        if self.scrfd is None:
-            return
-
-        ids = self._iter_identities(self.gallery_dir)
-        if not ids:
-            return
-        for label, (aligned_dir, raw_dir) in ids:
-            if not osp.isdir(raw_dir):
-                continue
-            for p in list_images(raw_dir):
-                base = osp.splitext(osp.basename(p))[0]
-                tgt_dir = aligned_dir
-                _ensure_dir(tgt_dir)
-                tgt = osp.join(tgt_dir, f"{base}.jpg")
-                if osp.exists(tgt):
-                    continue  # already aligned once
-                img = cv2.imread(p)
-                if img is None or img.size == 0:
-                    continue
-                crop = _align_largest_face_bgr(
-                    img, self.scrfd, self.det_conf, self.aligned_size
+            embedding = np.asarray(embedding, dtype=np.float32).reshape(-1)
+            if embedding.shape[0] != self._dim:
+                # Caller gave a malformed vector — recompute defensively
+                log.warning(
+                    "add_sample: embedding shape %s, expected (%d,), re-embedding",
+                    embedding.shape,
+                    self._dim,
                 )
-                if crop is None:
-                    continue
-                cv2.imwrite(tgt, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                embedding = self.embed_aligned(crop)
+            else:
+                # Ensure L2-normalized (caller might have skipped)
+                embedding = _l2_normalize(embedding)
 
-    def _embed_new_aligned(self) -> Tuple[int, int]:
+        uuid_dir = osp.join(self.gallery_dir, uuid)
+        aligned_dir = osp.join(uuid_dir, "aligned")
+        _ensure_dir(aligned_dir)
+
+        # Pick a filename: ``sample_NNN.jpg`` keeps things sortable.
+        if fname_hint:
+            fname = fname_hint if fname_hint.endswith(".jpg") else f"{fname_hint}.jpg"
+        else:
+            fname = f"sample_{rec.sample_count + 1:04d}.jpg"
+
+        # Collision-safe filename. Compute stem ONCE from the original; the
+        # suffix counter keeps the chain `snap.jpg`, `snap_1.jpg`,
+        # `snap_2.jpg` instead of compounding as `snap_1_2.jpg`.
+        stem = fname.removesuffix(".jpg")
+        full_path = osp.join(aligned_dir, fname)
+        i = 0
+        while osp.exists(full_path):
+            i += 1
+            fname = f"{stem}_{i}.jpg"
+            full_path = osp.join(aligned_dir, fname)
+
+        # Write image (NB: this is not atomic — cv2.imwrite goes direct. A
+        # crash mid-write could leave a partial JPG. We accept this risk
+        # because (a) the embedding+centroid update happens after, so a
+        # half-JPG just orphans bytes, doesn't corrupt the gallery; (b)
+        # atomic JPG write would require a temp file dance for every sample.)
+        ok = cv2.imwrite(full_path, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        if not ok:
+            raise IOError(f"failed to write {full_path}")
+
+        # Append embedding to embeddings.npy
+        embeddings_path = osp.join(uuid_dir, "embeddings.npy")
+        if osp.exists(embeddings_path):
+            try:
+                prev = np.load(embeddings_path).astype(np.float32)
+            except Exception:
+                log.warning("UUID %s embeddings.npy corrupt; resetting", uuid)
+                prev = np.zeros((0, self._dim), dtype=np.float32)
+        else:
+            prev = np.zeros((0, self._dim), dtype=np.float32)
+        new_arr = np.vstack([prev, embedding[None, :]]).astype(np.float32)
+        _atomic_write_npy(embeddings_path, new_arr)
+
+        N_prev = prev.shape[0]
+        # Incremental centroid sum: new_sum = old_sum + embedding.
+        # We store the un-normalized sum so this stays exact under O(1).
+        # The L2-normalized form used for similarity is computed on the fly
+        # in get_centroids().
+        if rec.centroid_sum is not None and N_prev > 0:
+            new_sum = rec.centroid_sum + embedding
+        else:
+            new_sum = embedding.copy()
+        _atomic_write_npy(osp.join(uuid_dir, "centroid.npy"), new_sum)
+
+        # Update metadata
+        rec.metadata["sample_count"] = N_prev + 1
+        rec.metadata["updated_at"] = _now_iso()
+        _atomic_write_json(osp.join(uuid_dir, "metadata.json"), rec.metadata)
+
+        # Update in-memory record
+        rec.sample_count = N_prev + 1
+        rec.centroid_sum = new_sum
+
+        log.debug("add_sample: uuid=%s file=%s count=%d", uuid, fname, rec.sample_count)
+        return fname
+
+    def add_samples(
+        self,
+        uuid: str,
+        aligned_list: List[np.ndarray],
+        embeddings: Optional[List[np.ndarray]] = None,
+    ) -> List[str]:
+        """Batch-add multiple samples. More efficient than N add_sample calls
+        because the centroid + metadata are written once at the end.
+
+        ``embeddings`` may contain ``None`` entries for samples that need
+        re-embedding; pass a complete list with all entries valid for the
+        fast path.
         """
-        Scan aligned/ for images not in index; embed and append to vectors.
+        rec = self._records.get(uuid)
+        if rec is None:
+            raise KeyError(f"UUID not found: {uuid}")
+        if not aligned_list:
+            return []
 
-        Returns
-        -------
-        tuple[int, int]
-            ``(num_aligned_added, total_vectors_now)``.
+        # Normalize embeddings input
+        if embeddings is None:
+            embeddings = [None] * len(aligned_list)
+        if len(embeddings) != len(aligned_list):
+            raise ValueError("embeddings/aligned_list length mismatch")
+
+        uuid_dir = osp.join(self.gallery_dir, uuid)
+        aligned_dir = osp.join(uuid_dir, "aligned")
+        _ensure_dir(aligned_dir)
+
+        # Embed any missing vectors in a single batch
+        to_embed_idx = [i for i, e in enumerate(embeddings) if e is None]
+        if to_embed_idx:
+            crops_to_embed = [aligned_list[i] for i in to_embed_idx]
+            vecs = self.arc.infer(crops_to_embed)
+            for k, i in enumerate(to_embed_idx):
+                embeddings[i] = _l2_normalize(vecs[k])
+
+        # Validate / normalize provided embeddings
+        clean_embs: List[np.ndarray] = []
+        for e in embeddings:
+            e = np.asarray(e, dtype=np.float32).reshape(-1)
+            if e.shape[0] != self._dim:
+                raise ValueError(f"embedding shape {e.shape}, expected ({self._dim},)")
+            clean_embs.append(_l2_normalize(e))
+
+        # Write all crops
+        saved: List[str] = []
+        for k, (crop, emb) in enumerate(zip(aligned_list, clean_embs)):
+            if crop.shape[:2] != (self.aligned_size, self.aligned_size):
+                crop = cv2.resize(crop, (self.aligned_size, self.aligned_size))
+            fname = f"sample_{rec.sample_count + k + 1:04d}.jpg"
+            full_path = osp.join(aligned_dir, fname)
+            i = 0
+            while osp.exists(full_path):
+                i += 1
+                fname = f"sample_{rec.sample_count + k + 1:04d}_{i}.jpg"
+                full_path = osp.join(aligned_dir, fname)
+            ok = cv2.imwrite(full_path, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            if not ok:
+                raise IOError(f"failed to write {full_path}")
+            saved.append(fname)
+
+        # Embeddings: append all in one rewrite
+        embeddings_path = osp.join(uuid_dir, "embeddings.npy")
+        if osp.exists(embeddings_path):
+            try:
+                prev = np.load(embeddings_path).astype(np.float32)
+            except Exception:
+                prev = np.zeros((0, self._dim), dtype=np.float32)
+        else:
+            prev = np.zeros((0, self._dim), dtype=np.float32)
+        new_arr = np.vstack([prev] + [e[None, :] for e in clean_embs]).astype(
+            np.float32
+        )
+        _atomic_write_npy(embeddings_path, new_arr)
+
+        # Centroid sum: just add all new embeddings to the running sum.
+        # See IdentityRecord.centroid_sum for why we store un-normalized.
+        if rec.centroid_sum is not None and prev.shape[0] > 0:
+            new_sum = rec.centroid_sum.copy()
+        else:
+            new_sum = np.zeros(self._dim, dtype=np.float32)
+        for e in clean_embs:
+            new_sum = new_sum + e
+        _atomic_write_npy(osp.join(uuid_dir, "centroid.npy"), new_sum)
+
+        # Metadata
+        N = prev.shape[0] + len(clean_embs)
+        rec.metadata["sample_count"] = N
+        rec.metadata["updated_at"] = _now_iso()
+        _atomic_write_json(osp.join(uuid_dir, "metadata.json"), rec.metadata)
+
+        rec.sample_count = N
+        rec.centroid_sum = new_sum
+
+        log.info("add_samples: uuid=%s +%d (total=%d)", uuid, len(saved), N)
+        return saved
+
+    def set_name(self, uuid: str, name: str) -> None:
+        """Update the display name for a UUID. O(1), no GPU work.
+
+        Used by ``/set_name`` when the LLM learns who an auto-enrolled
+        identity actually is. The UUID never changes, so existing references
+        from face_tracker tracks remain valid.
         """
-        ids = self._iter_identities(self.gallery_dir)
-        if not ids:
-            return 0, 0
+        rec = self._records.get(uuid)
+        if rec is None:
+            raise KeyError(f"UUID not found: {uuid}")
 
-        new_paths: List[Tuple[str, str]] = []  # (label, rel_path)
-        for label, (aligned_dir, _raw_dir) in ids:
-            if not osp.isdir(aligned_dir):
-                continue
-            for ap in list_images(aligned_dir):
-                rel = osp.relpath(ap, self.gallery_dir).replace("\\", "/")
-                if rel in self._index["items"]:
-                    continue
-                new_paths.append((label, rel))
+        rec.name = name
+        rec.metadata["name"] = name
+        rec.metadata["updated_at"] = _now_iso()
+        _atomic_write_json(
+            osp.join(self.gallery_dir, uuid, "metadata.json"),
+            rec.metadata,
+        )
+        log.info("set_name: uuid=%s name=%r", uuid, name)
 
-        if not new_paths:
-            return 0, 0
+    def merge_into(self, source_uuid: str, target_uuid: str) -> int:
+        """Merge all samples from ``source_uuid`` into ``target_uuid``, then
+        delete the source. Returns the number of samples merged.
 
-        imgs: List[np.ndarray] = []
-        rels: List[str] = []
-        labels: List[str] = []
-        for label, rel in new_paths:
-            absf = osp.join(self.gallery_dir, rel)
-            img = cv2.imread(absf)
+        Use case: an anonymous auto-enrolled UUID turns out to be someone we
+        already know. Rather than carry two UUIDs for the same person (one
+        with front-face samples, one with side-face), fold them into one.
+        Recognition then matches the union of poses/angles.
+
+        Mechanics:
+          1. Read source's ``aligned/*.jpg`` crops.
+          2. Re-embed via AdaFace (cost: a few ms per crop).
+          3. ``add_samples(target, crops, embeddings)`` — updates centroid +
+             metadata atomically.
+          4. ``forget(source)`` — moves source to ``_trash/`` so the merge
+             is undoable for ~one delete cycle.
+
+        Raises
+        ------
+        KeyError
+            If either UUID isn't in the gallery.
+        """
+        src_rec = self._records.get(source_uuid)
+        tgt_rec = self._records.get(target_uuid)
+        if src_rec is None:
+            raise KeyError(f"source UUID not found: {source_uuid}")
+        if tgt_rec is None:
+            raise KeyError(f"target UUID not found: {target_uuid}")
+        if source_uuid == target_uuid:
+            return 0
+
+        # Read source's aligned crops from disk
+        aligned_dir = osp.join(self.gallery_dir, source_uuid, "aligned")
+        if not osp.isdir(aligned_dir):
+            log.warning("merge_into: source %s has no aligned/ dir", source_uuid)
+            self.forget(source_uuid)
+            return 0
+
+        files = sorted(f for f in os.listdir(aligned_dir) if f.endswith(".jpg"))
+        if not files:
+            log.warning("merge_into: source %s has no samples", source_uuid)
+            self.forget(source_uuid)
+            return 0
+
+        crops: List[np.ndarray] = []
+        for f in files:
+            path = osp.join(aligned_dir, f)
+            img = cv2.imread(path)
             if img is None:
+                log.warning("merge_into: skipping unreadable %s", path)
                 continue
             if img.shape[:2] != (self.aligned_size, self.aligned_size):
                 img = cv2.resize(img, (self.aligned_size, self.aligned_size))
-            imgs.append(img)
-            rels.append(rel)
-            labels.append(label)
+            crops.append(img)
 
-        if not imgs:
-            return 0, 0
+        if not crops:
+            log.warning("merge_into: no readable crops in source %s", source_uuid)
+            self.forget(source_uuid)
+            return 0
 
-        # >>> respect TensorRT optimization profile (e.g., max batch = 4)
-        feats = self._embed_batch(imgs)
-        norms = np.linalg.norm(feats, axis=1, keepdims=True) + 1e-9
-        feats = (feats / norms).astype(np.float32)
+        # add_samples re-embeds (when embeddings=None) and updates target centroid
+        saved = self.add_samples(target_uuid, crops, embeddings=None)
 
-        start_row = self._append_vectors(feats)
-        for i, rel in enumerate(rels):
-            self._index["items"][rel] = {"row": int(start_row + i), "label": labels[i]}
-        self._save_index()
+        # Soft-delete source (still in _trash if user wants to undo)
+        self.forget(source_uuid)
 
         log.info(
-            "gallery: appended %d vectors (total now: %d)",
-            feats.shape[0],
-            start_row + feats.shape[0],
+            "merge_into: %d samples from %s → %s",
+            len(saved),
+            source_uuid,
+            target_uuid,
         )
-        return len(rels), feats.shape[0]
+        return len(saved)
+
+    def forget(self, uuid: str) -> bool:
+        """Soft-delete: move UUID folder to ``_trash/``. O(1) filesystem op.
+
+        Returns True if removed, False if UUID didn't exist. Use ``restore``
+        to undo, or ``hard_delete`` / ``empty_trash`` to commit permanently.
+        """
+        if uuid not in self._records:
+            return False
+        src = osp.join(self.gallery_dir, uuid)
+        if not osp.isdir(src):
+            self._records.pop(uuid, None)
+            return False
+        dst_root = osp.join(self.gallery_dir, "_trash")
+        _ensure_dir(dst_root)
+        # If a trash entry with the same UUID already exists (shouldn't, but
+        # safe), suffix it with a timestamp.
+        dst = osp.join(dst_root, uuid)
+        if osp.exists(dst):
+            dst = osp.join(dst_root, f"{uuid}_{int(time.time())}")
+        shutil.move(src, dst)
+        self._records.pop(uuid, None)
+        log.info("forget: uuid=%s → _trash", uuid)
+        return True
+
+    def restore(self, uuid: str) -> bool:
+        """Move a UUID back from ``_trash/`` to active gallery.
+
+        Returns True on success, False if not found in trash.
+        """
+        src = osp.join(self.gallery_dir, "_trash", uuid)
+        if not osp.isdir(src):
+            return False
+        dst = osp.join(self.gallery_dir, uuid)
+        if osp.exists(dst):
+            log.warning("restore: uuid=%s already active; skipping", uuid)
+            return False
+        shutil.move(src, dst)
+        rec = self._load(uuid)
+        if rec is not None:
+            self._records[uuid] = rec
+        log.info("restore: uuid=%s ← _trash", uuid)
+        return True
+
+    def hard_delete(self, uuid: str) -> bool:
+        """Permanently delete a UUID from ``_trash/``. Returns True if removed.
+
+        Use ``forget`` first to move into trash, ``hard_delete`` to commit.
+        For "delete immediately" workflows, call both in sequence.
+        """
+        target = osp.join(self.gallery_dir, "_trash", uuid)
+        if osp.isdir(target):
+            shutil.rmtree(target)
+            log.info("hard_delete: uuid=%s removed from _trash", uuid)
+            return True
+        # If not in trash, check active (shouldn't happen unless caller skipped forget)
+        active = osp.join(self.gallery_dir, uuid)
+        if osp.isdir(active):
+            shutil.rmtree(active)
+            self._records.pop(uuid, None)
+            log.info("hard_delete: uuid=%s removed from active (skipped trash)", uuid)
+            return True
+        return False
+
+    def empty_trash(self) -> int:
+        """Delete everything in ``_trash/``. Returns number of UUIDs removed."""
+        trash = osp.join(self.gallery_dir, "_trash")
+        if not osp.isdir(trash):
+            return 0
+        count = 0
+        for entry in os.listdir(trash):
+            p = osp.join(trash, entry)
+            if osp.isdir(p):
+                shutil.rmtree(p)
+                count += 1
+        log.info("empty_trash: removed %d entries", count)
+        return count
+
+    # ==================================================================
+    # Embedding (passthrough to AdaFace)
+    # ==================================================================
 
     def embed_aligned(self, img_112_bgr: np.ndarray) -> np.ndarray:
-        """Embed a single aligned 112×112 BGR crop and L2-normalize the vector.
+        """Compute L2-normalized embedding for one aligned 112×112 BGR crop.
 
-        Public method used by:
-        - Internal save paths (``add_aligned_snapshot``, ``add_aligned_no_stats``)
-        - External callers (e.g. ``HttpAPI._handle_selfie``) for dedup,
-          consistency, and novelty checks — no disk I/O.
-
-        Parameters
-        ----------
-        img_112_bgr : np.ndarray
-            Aligned crop of shape ``(112,112,3)`` (will be resized if needed).
-
-        Returns
-        -------
-        np.ndarray
-            L2-normalized embedding of shape ``(dim,)`` with dtype float32.
+        Exposed publicly so HttpAPI can pre-compute embeddings during selfie
+        (for dedup) without writing to the gallery yet.
         """
         vec = self.arc.infer([img_112_bgr])
         if vec.ndim == 2 and vec.shape[0] == 1:
             vec = vec[0]
-        vec = vec.astype(np.float32, copy=False)
-        n = np.linalg.norm(vec) + 1e-9
-        return (vec / n).astype(np.float32, copy=False)
+        return _l2_normalize(vec.astype(np.float32, copy=False))
 
-    def _embed_batch(self, imgs_112_bgr: List[np.ndarray]) -> np.ndarray:
-        """Embed a list of aligned crops, chunked to respect AdaFace max batch.
+    # ==================================================================
+    # Migration from legacy gallery layout
+    # ==================================================================
 
-        Parameters
-        ----------
-        imgs_112_bgr : list[np.ndarray]
-            List of aligned BGR crops, each ``(112,112,3)``.
+    def migrate_legacy(self, legacy_root: Optional[str] = None) -> int:
+        """One-shot migration from the old name-keyed layout.
 
-        Returns
-        -------
-        np.ndarray
-            Float32 array of shape ``(K, dim)`` containing raw (unnormalized) vectors.
-        """
-        if not imgs_112_bgr:
-            return np.empty((0, self._dim), np.float32)
-        # Use your shared helper (already used at runtime)
-        vecs = infer_arc_batched(self.arc, imgs_112_bgr, max_bs=self.arc_max_bs)
-        return np.asarray(vecs, dtype=np.float32)
+        Old layout:
+            <legacy_root>/<name>/aligned/*.jpg  (112x112 BGR)
+            <legacy_root>/<name>/raw/*.jpg      (optional, not migrated)
 
-    def _append_vectors(self, vecs: np.ndarray) -> int:
-        """Append embeddings to ``vectors.f32`` and return the starting row index.
+        For each old identity:
+          - Create a new UUID via :meth:`create` with the same name.
+          - Re-embed the aligned crops (one-time GPU cost) and add them via
+            :meth:`add_samples`.
+          - Move the original folder under ``_legacy/<name>/`` for safety.
 
         Parameters
         ----------
-        vecs : np.ndarray
-            Float32 array of shape ``(K, dim)`` to append.
+        legacy_root : str, optional
+            Directory containing the old format. Defaults to
+            ``self.gallery_dir`` — useful when migration is in-place (old
+            non-UUID folders sit alongside new UUID folders during migration).
 
         Returns
         -------
         int
-            Starting row index where the first appended vector was written.
-
-        Raises
-        ------
-        AssertionError
-            If ``vecs`` does not have shape ``(K, dim)``.
+            Number of identities migrated.
         """
-        assert (
-            vecs.ndim == 2 and vecs.shape[1] == self._dim
-        ), f"expected (K,{self._dim}) got {vecs.shape}"
-        prev_rows = 0
-        if osp.exists(self.vectors_path):
-            sz = osp.getsize(self.vectors_path)
-            prev_rows = sz // (4 * self._dim)
-        with open(self.vectors_path, "ab") as f:
-            vecs.astype(np.float32, copy=False).tofile(f)
-        return int(prev_rows)
+        if legacy_root is None:
+            legacy_root = self.gallery_dir
+        if not osp.isdir(legacy_root):
+            return 0
 
-    @staticmethod
-    def _iter_identities(gallery_root: str) -> List[Tuple[str, Tuple[str, str]]]:
-        """Enumerate identity folders and their aligned/raw subdirectories.
+        legacy_archive = osp.join(self.gallery_dir, "_legacy")
+        _ensure_dir(legacy_archive)
 
-        Parameters
-        ----------
-        gallery_root : str
-            Gallery root path.
-
-        Returns
-        -------
-        list[tuple[str, tuple[str, str]]]
-            Pairs of ``(label, (aligned_dir, raw_dir))`` for each identity folder.
-        """
-        out: List[Tuple[str, Tuple[str, str]]] = []
-        if not osp.isdir(gallery_root):
-            return out
-        for name in sorted(os.listdir(gallery_root)):
-            p = osp.join(gallery_root, name)
-            if not osp.isdir(p):
+        migrated = 0
+        for entry in os.listdir(legacy_root):
+            if entry in _RESERVED_DIRS or _is_uuid_dir(entry):
                 continue
-            aligned_dir = osp.join(p, "aligned")
-            raw_dir = osp.join(p, "raw")
-            out.append((name, (aligned_dir, raw_dir)))
-        return out
+            src = osp.join(legacy_root, entry)
+            if not osp.isdir(src):
+                continue
+            aligned_dir = osp.join(src, "aligned")
+            if not osp.isdir(aligned_dir):
+                log.info("migrate: skipping %s (no aligned/ dir)", entry)
+                continue
 
+            crops: List[np.ndarray] = []
+            for fn in sorted(os.listdir(aligned_dir)):
+                if not fn.lower().endswith((".jpg", ".jpeg", ".png")):
+                    continue
+                img = cv2.imread(osp.join(aligned_dir, fn))
+                if img is None or img.size == 0:
+                    continue
+                if img.shape[:2] != (self.aligned_size, self.aligned_size):
+                    img = cv2.resize(img, (self.aligned_size, self.aligned_size))
+                crops.append(img)
 
-def build_gallery_embeddings(
-    gallery_root: str, scrfd: TRTSCRFD, arc: TRTFaceRecognition, det_conf: float
-) -> Tuple[np.ndarray, List[str]]:
-    """
-    One-shot builder that returns per-identity means (old API).
-    It builds/refreshes an embed store under embeds/<model_sig>/ next to gallery/.
+            if not crops:
+                log.info("migrate: skipping %s (no usable crops)", entry)
+                continue
 
-    Parameters
-    ----------
-    gallery_root : str
-        Path to the gallery root.
-    scrfd : TRTSCRFD
-        SCRFD detector used for alignment.
-    arc : TRTFaceRecognition
-        AdaFace TensorRT wrapper used for embedding.
-    det_conf : float
-        Detection confidence threshold for alignment.
+            new_uuid = self.create(
+                name=entry,
+                source="migration",
+                migrated_from=entry,
+                migrated_at=_now_iso(),
+            )
+            # add_samples handles batched embedding + centroid in one pass
+            self.add_samples(new_uuid, crops, embeddings=None)
 
-    Returns
-    -------
-    tuple[np.ndarray, list[str]]
-        ``(means, labels)`` where ``means`` is ``(N_id, dim)`` float32 and L2-normalized.
-    """
-    embeds_root = osp.join(osp.dirname(osp.abspath(gallery_root)), "embeds")
-    gm = GalleryManager(
-        gallery_dir=gallery_root,
-        embeds_dir=embeds_root,
-        arc=arc,
-        scrfd=scrfd,
-        det_conf=det_conf,
-        arc_max_bs=4,  # safe default for your engine profile
-    )
-    gm.refresh(process_raw=True)
-    return gm.get_identity_means()
+            # Archive the original folder
+            dst = osp.join(legacy_archive, entry)
+            if osp.exists(dst):
+                dst = osp.join(legacy_archive, f"{entry}_{int(time.time())}")
+            shutil.move(src, dst)
+
+            migrated += 1
+            log.info("migrate: %s → %s (samples=%d)", entry, new_uuid, len(crops))
+
+        if migrated:
+            log.info("Migration complete: %d identities", migrated)
+        return migrated
+
+    def has_legacy_data(self) -> bool:
+        """Return True if ``gallery_dir`` contains old name-keyed folders."""
+        if not osp.isdir(self.gallery_dir):
+            return False
+        for entry in os.listdir(self.gallery_dir):
+            if entry in _RESERVED_DIRS or _is_uuid_dir(entry):
+                continue
+            p = osp.join(self.gallery_dir, entry)
+            if osp.isdir(p) and osp.isdir(osp.join(p, "aligned")):
+                return True
+        return False

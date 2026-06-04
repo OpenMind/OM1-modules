@@ -3,25 +3,37 @@
 Real-time face anonymization + recognition + RTSP + HTTP control.
 
 This program captures video from a V4L2 camera, detects faces (SCRFD, TensorRT),
-optionally recognizes them (ArcFace, TensorRT) using an on-disk gallery managed by
-`GalleryManager`, applies privacy pixelation (all / known / unknown), and publishes
-the processed video to RTSP (local and/or remote). A lightweight HTTP control plane
-lets you query presence (/who), tweak runtime config (/config), and update the gallery
-(/gallery/refresh, /gallery/add_aligned, /gallery/add_raw, /selfie), all while the
-main video loop keeps running.
+optionally recognizes them (AdaFace, TensorRT) against a UUID-keyed on-disk
+gallery (``UUIDGallery``), applies privacy pixelation (all / known / unknown),
+and publishes the processed video to RTSP (local and/or remote).
+
+A lightweight HTTP control plane (``HttpAPI``) lets you query presence
+(/who), tweak runtime config (/config), enroll identities (/selfie,
+/gallery/add_aligned, /gallery/add_raw), rename them (/set_name), and
+manage lifecycle (/gallery/forget_last, /gallery/restore, /gallery/delete,
+/gallery/empty_trash) while the main video loop keeps running.
+
+Background auto-enrollment (``AutoEnroller``) silently builds UUIDs for
+unknown faces that linger in view long enough — the LLM only needs to
+*name* identities via /set_name, not create them. This shifts the slow
+multi-frame collection work off the LLM-facing critical path.
 
 - Detection: SCRFD (TensorRT)
-- Recognition: ArcFace (TensorRT) via GalleryManager (incremental refresh)
+- Recognition: AdaFace (TensorRT), 3-tier (confident/tentative/uncertain)
+- Storage: UUIDGallery (per-identity self-contained folders; O(1) renames
+  and deletes; one-shot migration of the legacy name-keyed layout on
+  startup)
 - Privacy: pixelation (all / known / unknown)
 - Streaming: RTSP (local; remote relay handled by MediaMTX/FFmpeg)
-- HTTP: /who, /config (get/set), /gallery/refresh, /gallery/add_aligned,
-        /gallery/add_raw, /selfie, /ping, /ts
+- HTTP: /who, /config, /selfie, /set_name, /gallery/{refresh,identities,
+        add_aligned,add_raw,forget_last,restore,delete,empty_trash,
+        auto_enroll_status}, /ping, /ts
 
 Usage examples
 --------------
-# Minimal (local RTSP only)
+# Minimal (local RTSP only) — Unitree G1 onboard camera (640x480 @ 15fps)
 python -m om1_vlm.anonymizationSys.face_recog_stream.run \
-  --device /dev/video0 --width 1280 --height 720 --fps 30 \
+  --device /dev/video0 --width 640 --height 480 --fps 15 \
   --detection --recognition --blur --blur-mode all \
   --draw-boxes --draw-names --show-fps \
   --http-host 0.0.0.0 --http-port 6791
@@ -31,7 +43,7 @@ python -m om1_vlm.anonymizationSys.face_recog_stream.run \
   --scrfd-engine /home/openmind/Documents/OM1-modules/src/om1_vlm/anonymizationSys/engine/scrfd_10g.engine \
   --arc-engine /home/openmind/Documents/OM1-modules/src/om1_vlm/anonymizationSys/engine/adaface_ir101.engine \
   --size 640 --device /dev/video0 \
-  --width 1920 --height 1080 --fps 30 \
+  --width 1920 --height 1080 --fps 15 \
   --detection --recognition \
   --draw-boxes --draw-names --show-fps \
   --http-host 0.0.0.0 --http-port 6791 \
@@ -128,13 +140,15 @@ import numpy as np
 
 from om1_utils.http import Server  # lightweight HTTP server
 
+from . import config
 from .adaface import TRTFaceRecognition
+from .auto_enroller import AutoEnroller
 from .camera_reader import CameraReader
 from .draw import draw_overlays
 from .draw_pose import draw_fall_alert, draw_pose_overlays
 from .face_tracker import FaceTracker
 from .fall_detector import FallDetector
-from .gallery import GalleryManager
+from .gallery import UUIDGallery
 from .http_api import HttpAPI
 from .rtsp_video_writer import RTSPVideoStreamWriter
 from .scrfd import TRTSCRFD
@@ -154,12 +168,20 @@ class _GalState:
         Stacked, L2-normalized per-identity mean vectors (N_id × dim) used for
         cosine similarity at runtime. May be None if the gallery is empty.
     gal_labels : list[str]
-        Identity labels aligned with `gal_feats` rows.
+        Display names parallel to ``gal_feats`` rows. Multiple rows may share
+        the same name (e.g. one person enrolled via selfie and again via
+        auto-enroll). UUIDs are the stable identifier; names are mutable
+        metadata.
+    gal_uuids : list[str]
+        Stable identity UUIDs parallel to ``gal_feats`` / ``gal_labels``.
+        Always use UUIDs for cross-component identity references (HttpAPI's
+        ``/set_name``, ``/gallery/forget_last``, audit log entries, etc.).
     """
 
     def __init__(self):
         self.gal_feats: Optional[np.ndarray] = None
         self.gal_labels: List[str] = []
+        self.gal_uuids: List[str] = []
 
 
 class _FrameState:
@@ -213,7 +235,8 @@ def main() -> None:
     ----
     1) Parse CLI args and resolve default paths.
     2) Load TensorRT engines (SCRFD detector, optional ArcFace).
-    3) Build/refresh gallery via `GalleryManager` and cache identity means.
+    3) Build/refresh gallery via `UUIDGallery`, migrate legacy data if any,
+       initialize `AutoEnroller`, and cache identity centroids.
     4) Open camera (`CameraReader`) and start RTSP writer.
     5) Initialize shared states, locks, and an HTTP `HttpAPI` bound to a tiny
        `Server` that runs on its own thread.
@@ -238,7 +261,7 @@ def main() -> None:
     logger.info("Starting realtime_stream...")
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    models_dir = os.path.join(script_dir, "..", "engines")
+    models_dir = os.path.join(script_dir, "..", "engine")
 
     platform_prefix = get_platform_prefix()
     scrfd_name = f"{platform_prefix}_scrfd_10g.engine"
@@ -295,13 +318,9 @@ def main() -> None:
         "--gallery",
         dest="gallery_dir",
         default=default_gallery,
-        help="Gallery root (subfolders per identity). Required if --recognition.",
-    )
-    ap.add_argument(
-        "--embeds-dir",
-        dest="embeds_dir",
-        default=None,
-        help="Embeddings root. Default is sibling of gallery, e.g. /path/to/embeds for gallery /path/to/gallery.",
+        help="Gallery root directory. In UUID mode, contains one folder per "
+        "identity (UUID-named) plus _legacy/ (migration archive) and "
+        "_trash/ (soft-deleted UUIDs). Required if --recognition.",
     )
 
     # Features
@@ -382,28 +401,112 @@ def main() -> None:
         help="If detected faces exceed this, skip recognition (still blur/draw).",
     )
 
-    # Thresholds
+    # Thresholds — defaults come from config.py for single-source-of-truth
     ap.add_argument(
-        "--conf", type=float, default=0.5, help="Detection confidence threshold."
+        "--conf",
+        type=float,
+        default=config.DETECTION_CONFIDENCE,
+        help="Detection confidence threshold. See config.DETECTION_CONFIDENCE.",
     )
-    ap.add_argument("--nms", type=float, default=0.4, help="NMS IoU threshold.")
+    ap.add_argument(
+        "--nms",
+        type=float,
+        default=config.DETECTION_NMS,
+        help="NMS IoU threshold. See config.DETECTION_NMS.",
+    )
     ap.add_argument(
         "--sim-thr",
         type=float,
-        default=0.55,
-        help="Recognition cosine similarity threshold.",
+        default=config.SIM_THR,
+        help="Recognition cosine similarity threshold (top-1 floor). "
+        "See config.SIM_THR for calibration notes.",
     )
     ap.add_argument(
-        "--max-num", type=int, default=0, help="Max faces to keep (0 = no limit)."
+        "--strict-margin",
+        type=float,
+        default=config.STRICT_MARGIN,
+        help="top1-top2 margin for 'confident' tier. See config.STRICT_MARGIN.",
+    )
+    ap.add_argument(
+        "--loose-margin",
+        type=float,
+        default=config.LOOSE_MARGIN,
+        help="top1-top2 margin for 'tentative' tier. Must be < strict-margin. "
+        "See config.LOOSE_MARGIN.",
+    )
+
+    # Auto-enrollment — defaults from config.py
+    ap.add_argument(
+        "--auto-enroll-min-samples",
+        type=int,
+        default=config.AUTO_ENROLL_MIN_SAMPLES,
+        help="Samples needed before auto-enroll commits a new UUID. "
+        "See config.AUTO_ENROLL_MIN_SAMPLES.",
+    )
+    ap.add_argument(
+        "--auto-enroll-max-buffer",
+        type=int,
+        default=config.AUTO_ENROLL_MAX_BUFFER,
+        help="Max samples per track buffer. See config.AUTO_ENROLL_MAX_BUFFER.",
+    )
+    ap.add_argument(
+        "--auto-enroll-tightness",
+        type=float,
+        default=config.AUTO_ENROLL_TIGHTNESS,
+        help="Worst pairwise cosine sim across buffer. "
+        "See config.AUTO_ENROLL_TIGHTNESS.",
+    )
+    ap.add_argument(
+        "--auto-enroll-min-unknown-sec",
+        type=float,
+        default=config.AUTO_ENROLL_MIN_UNKNOWN_SEC,
+        help="Min seconds track-visible before enrolling. "
+        "See config.AUTO_ENROLL_MIN_UNKNOWN_SEC.",
+    )
+    ap.add_argument(
+        "--auto-enroll-min-face-px",
+        type=int,
+        default=config.AUTO_ENROLL_MIN_FACE_PX,
+        help="Min bbox short side for auto-enroll. "
+        "See config.AUTO_ENROLL_MIN_FACE_PX.",
+    )
+    ap.add_argument(
+        "--auto-enroll-merge-thr",
+        type=float,
+        default=config.AUTO_ENROLL_MERGE_THR,
+        help="Merge buffer into existing UUID if buffer mean sim ≥ this "
+        "(instead of creating new). Catches 'known person, bad lighting' "
+        "case. 0.0 disables. See config.AUTO_ENROLL_MERGE_THR.",
+    )
+    ap.add_argument(
+        "--max-num",
+        type=int,
+        default=config.DETECTION_MAX_NUM,
+        help="Max faces to keep (0 = no limit). See config.DETECTION_MAX_NUM.",
     )
 
     # Inputs
     ap.add_argument(
         "--device", default="/dev/video0", help="V4L2 device (e.g., /dev/video0)"
     )
-    ap.add_argument("--width", type=int, default=640, help="Capture width.")
-    ap.add_argument("--height", type=int, default=480, help="Capture height.")
-    ap.add_argument("--fps", type=int, default=30, help="Capture frame rate.")
+    ap.add_argument(
+        "--width",
+        type=int,
+        default=config.CAMERA_WIDTH,
+        help=f"Capture width. Default {config.CAMERA_WIDTH} (Unitree G1 onboard camera).",
+    )
+    ap.add_argument(
+        "--height",
+        type=int,
+        default=config.CAMERA_HEIGHT,
+        help=f"Capture height. Default {config.CAMERA_HEIGHT}.",
+    )
+    ap.add_argument(
+        "--fps",
+        type=int,
+        default=config.CAMERA_FPS,
+        help=f"Capture frame rate. Default {config.CAMERA_FPS} (Unitree G1 onboard camera).",
+    )
 
     # Outputs
     ap.add_argument(
@@ -448,20 +551,15 @@ def main() -> None:
 
     args = ap.parse_args()
 
-    # Resolve default embeds_dir if not provided
-    if args.embeds_dir is None:
-        parent = os.path.dirname(os.path.abspath(args.gallery_dir))
-        args.embeds_dir = os.path.join(parent, "embeds")
-
     # Sanity checks
     if not os.path.exists(args.scrfd_engine):
         raise SystemExit(f"SCRFD engine not found: {args.scrfd_engine}")
     if args.recognition:
         if not os.path.exists(args.arc_engine):
             raise SystemExit(f"ArcFace engine not found: {args.arc_engine}")
-        if not os.path.exists(args.gallery_dir):
-            raise SystemExit(f"Gallery directory not found: {args.gallery_dir}")
-        os.makedirs(args.embeds_dir, exist_ok=True)
+        # Auto-create gallery_dir on first run rather than failing — first-time
+        # users shouldn't need to mkdir before launching.
+        os.makedirs(args.gallery_dir, exist_ok=True)
     if args.pose and not os.path.exists(args.pose_engine):
         raise SystemExit(f"Pose engine not found: {args.pose_engine}")
 
@@ -486,17 +584,27 @@ def main() -> None:
     if args.recognition and arc is not None:
         face_tracker = FaceTracker(
             arc=arc,
-            recog_interval=0.2,  # run AdaFace every 0.2s per unidentified track
-            vote_frames=3,  # collect 3 votes before deciding
-            vote_threshold=0.5,  # majority vote (2/3)
-            max_recog_attempts=10,
+            recog_interval=config.RECOG_INTERVAL_SEC,
+            vote_frames=config.VOTE_FRAMES,
+            vote_threshold=config.VOTE_THRESHOLD,
+            max_recog_attempts=config.MAX_RECOG_ATTEMPTS,
             sim_thr=float(args.sim_thr),
-            track_buffer=60,
+            strict_margin=float(args.strict_margin),
+            loose_margin=float(args.loose_margin),
+            track_buffer=config.TRACK_BUFFER,
             arc_max_bs=arc_max_bs,
             det_conf=float(args.conf),
-            re_identify_interval=1.0,  # retry unknown tracks every 1s
+            re_identify_interval=config.RE_IDENTIFY_INTERVAL_SEC,
         )
-        logger.info("FaceTracker initialized (BoTSORT + low-freq AdaFace)")
+        logger.info(
+            "FaceTracker initialized (sim_thr=%.2f, strict_margin=%.2f, "
+            "loose_margin=%.2f, track_buffer=%d frames, re_identify=%.1fs)",
+            args.sim_thr,
+            args.strict_margin,
+            args.loose_margin,
+            config.TRACK_BUFFER,
+            config.RE_IDENTIFY_INTERVAL_SEC,
+        )
 
     # Load pose detection engine
     pose_detector: Optional[TRTYOLOPose] = None
@@ -525,31 +633,75 @@ def main() -> None:
     # Gallery state + lock
     gal_state = _GalState()
     gal_lock = threading.Lock()
-    gm: Optional[GalleryManager] = None
+    gallery: Optional[UUIDGallery] = None
+    auto_enroller: Optional[AutoEnroller] = None
 
     if args.recognition:
-        gm = GalleryManager(
-            gallery_dir=args.gallery_dir,
-            embeds_dir=args.embeds_dir,
-            arc=arc,  # type: ignore[arg-type]
-            scrfd=scrfd,
-            det_conf=args.conf,
-        )
-        t0b = time.time()
-        aligned_added, vec_added = gm.refresh(process_raw=True)
-        feats, id_labels = gm.get_identity_means()
+        gallery = UUIDGallery(args.gallery_dir, arc=arc)  # type: ignore[arg-type]
+
+        # One-shot migration: old name-keyed folders → UUID dirs. Idempotent
+        # (no-op when gallery already in UUID format). Originals are archived
+        # under gallery_dir/_legacy/ — not deleted — in case rollback is needed.
+        if gallery.has_legacy_data():
+            t_mig = time.time()
+            n_migrated = gallery.migrate_legacy()
+            logger.info(
+                "Migrated %d legacy identities to UUID format in %.1fs",
+                n_migrated,
+                time.time() - t_mig,
+            )
+
+        # Initial centroid snapshot for the main loop
+        feats, id_labels, id_uuids = gallery.get_centroids()
         with gal_lock:
-            gal_state.gal_feats, gal_state.gal_labels = feats, id_labels
+            gal_state.gal_feats = feats
+            gal_state.gal_labels = id_labels
+            gal_state.gal_uuids = id_uuids
         logger.info(
-            "Gallery ready: identities=%d (aligned+%d, vectors+%d) time=%.2fs",
-            len(id_labels),
-            aligned_added,
-            vec_added,
-            time.time() - t0b,
+            "Gallery ready: identities=%d (path=%s)",
+            len(id_uuids),
+            args.gallery_dir,
         )
+
+        # Helper called by AutoEnroller after a successful auto-commit, and
+        # implicitly used elsewhere too — keeps gal_state in lockstep with
+        # gallery's on-disk state. Cheap: just reads centroids from memory.
+        def _refresh_gal_state() -> None:
+            feats, labels, uuids = gallery.get_centroids()
+            with gal_lock:
+                gal_state.gal_feats = feats
+                gal_state.gal_labels = labels
+                gal_state.gal_uuids = uuids
+
+        # Auto-enroller fires the refresh callback on commit so face_tracker's
+        # gallery snapshot picks up the new identity within one frame.
+        auto_enroller = AutoEnroller(
+            gallery,
+            n_samples_required=int(args.auto_enroll_min_samples),
+            max_buffer=int(args.auto_enroll_max_buffer),
+            min_pairwise_sim=float(args.auto_enroll_tightness),
+            min_unknown_sec=float(args.auto_enroll_min_unknown_sec),
+            min_face_pixels=int(args.auto_enroll_min_face_px),
+            merge_thr=float(args.auto_enroll_merge_thr),
+            on_committed=lambda u, t, n: _refresh_gal_state(),
+        )
+        logger.info(
+            "AutoEnroller initialized (N=%d, tightness=%.2f, min_unknown=%.1fs, merge_thr=%.2f)",
+            args.auto_enroll_min_samples,
+            args.auto_enroll_tightness,
+            args.auto_enroll_min_unknown_sec,
+            args.auto_enroll_merge_thr,
+        )
+
         if face_tracker is not None:
-            face_tracker.set_gallery(feats, id_labels)
-            logger.info("FaceTracker gallery synced: %d identities", len(id_labels))
+            face_tracker.set_gallery(feats, id_labels, id_uuids)
+            # Wire face_tracker's per-track recognition stream into the
+            # auto-enroller. Fires once per track per recognition pass.
+            face_tracker.on_unknown_sample = auto_enroller.observe
+            logger.info(
+                "FaceTracker gallery synced: %d identities; auto-enroll hook wired",
+                len(id_uuids),
+            )
 
     # Capture
     cap = CameraReader(args.device, args.width, args.height, args.fps)
@@ -583,55 +735,34 @@ def main() -> None:
     # Who tracking
     who = WhoTracker(lookback_sec=args.http_lookback_sec)
 
-    # Runtime config (HTTP-settable)
+    # Runtime config (HTTP-settable). Seeded from config.DEFAULTS, with CLI
+    # flags overriding any keys they shadow. See config.py for canonical
+    # parameter definitions, docs, and hot-tunability notes.
     cfg_lock = threading.Lock()
-    cfg: Dict[str, Any] = {
-        "blur": bool(args.blur),
-        "blur_mode": str(args.blur_mode),
-        "sim_thr": float(args.sim_thr),
-        "crowd_thr": int(args.crowd_thr),
-        "show_fps": bool(args.show_fps),
-        "conf": float(args.conf),
-        "nms": float(args.nms),
-        "max_num": int(args.max_num),
-        "pixel_blocks": int(args.pixel_blocks),
-        "pixel_margin": float(args.pixel_margin),
-        "pixel_noise": float(args.pixel_noise),
-        "pose": bool(args.pose),
-        "pose_conf": 0.5,
-        "pose_max_num": 10,
-        "fall_detection": bool(args.fall_detection),
-        "draw_skeleton": bool(args.draw_skeleton),
-        "draw_pose_boxes": bool(args.draw_pose_boxes),
-        "draw_fall_status": bool(args.draw_fall_status),
-        # ---- Selfie pipeline (all hot-tunable via /config) ----
-        # Collection window
-        "selfie_window_sec": 0.8,
-        "selfie_tap_interval_sec": 0.10,
-        # Adaptive sample count: min=1 lets static users still enroll
-        # with just the first valid frame; max=4 caps active users to keep
-        # storage and embedding work bounded.
-        "selfie_min_samples": 1,
-        "selfie_max_samples": 4,
-        # Selection: score = (bbox_area / frame_area) * frontality, in [0,1].
-        # Floor 0.005 = "face covers ~0.5% of frame AND is reasonably frontal".
-        # CALIBRATE on GTC footage; see notes in selfie_logic.score_face docstring.
-        "selfie_min_engagement": 0.005,
-        "selfie_ambiguity_ratio": 0.80,  # top2/top1 > this → ambiguous
-        # Quality gate on the chosen face crop
-        "selfie_min_face_px": 70,
-        "selfie_min_conf": 0.4,
-        "selfie_min_frontality": 0.4,
-        "selfie_sharp_thr": 5.0,
-        "selfie_brightness_min": 30,
-        "selfie_brightness_max": 230,
-        # Multi-frame
-        "selfie_novelty_thr": 0.93,  # cosine > → duplicate, skip
-        "selfie_consistency_thr": 0.50,  # cosine < → wrong person, skip
-        # Dedup
-        "selfie_merge_thr": 0.5,  # same-name family → merge
-        "selfie_cross_name_thr": 0.60,  # cross-name → reject (unless force)
-    }
+    cfg: Dict[str, Any] = dict(config.DEFAULTS)
+    # CLI overrides — let --flag values override config defaults at startup.
+    cfg.update(
+        {
+            "blur": bool(args.blur),
+            "blur_mode": str(args.blur_mode),
+            "sim_thr": float(args.sim_thr),
+            "strict_margin": float(args.strict_margin),
+            "loose_margin": float(args.loose_margin),
+            "crowd_thr": int(args.crowd_thr),
+            "show_fps": bool(args.show_fps),
+            "conf": float(args.conf),
+            "nms": float(args.nms),
+            "max_num": int(args.max_num),
+            "pixel_blocks": int(args.pixel_blocks),
+            "pixel_margin": float(args.pixel_margin),
+            "pixel_noise": float(args.pixel_noise),
+            "pose": bool(args.pose),
+            "fall_detection": bool(args.fall_detection),
+            "draw_skeleton": bool(args.draw_skeleton),
+            "draw_pose_boxes": bool(args.draw_pose_boxes),
+            "draw_fall_status": bool(args.draw_fall_status),
+        }
+    )
 
     # Last clean frame & detections for /selfie
     frame_state = _FrameState()
@@ -707,7 +838,8 @@ def main() -> None:
     http_api = HttpAPI(
         who=who,
         scrfd=scrfd,
-        gm=gm,
+        gallery=gallery,
+        auto_enroller=auto_enroller,
         gallery_dir=args.gallery_dir,
         gal_state=gal_state,
         gal_lock=gal_lock,
@@ -769,6 +901,8 @@ def main() -> None:
                 do_blur = bool(cfg["blur"])
                 blur_mode = str(cfg["blur_mode"])
                 sim_thr = float(cfg["sim_thr"])
+                strict_margin = float(cfg["strict_margin"])
+                loose_margin = float(cfg["loose_margin"])
                 show_fps = bool(cfg["show_fps"])
                 det_conf = float(cfg["conf"])
                 max_num = int(cfg["max_num"])
@@ -810,9 +944,15 @@ def main() -> None:
                 with gal_lock:
                     if gal_state.gal_feats is not None:
                         face_tracker.set_gallery(
-                            gal_state.gal_feats, gal_state.gal_labels
+                            gal_state.gal_feats,
+                            gal_state.gal_labels,
+                            gal_state.gal_uuids,
                         )
-                face_tracker.set_sim_thr(sim_thr)
+                face_tracker.set_thresholds(
+                    sim_thr=sim_thr,
+                    strict_margin=strict_margin,
+                    loose_margin=loose_margin,
+                )
 
                 # Always call update so BoTSORT ages out lost tracks on empty frames
                 track_results = face_tracker.update(frame, dets, kpss)
@@ -823,9 +963,16 @@ def main() -> None:
                     frame_state.current_unknowns = face_tracker.get_unknowns()
 
                 if dets is not None and dets.shape[0] > 0:
-                    # Map track results back to detection indices (exclusive matching)
+                    # Map track results back to detection indices.
+                    # We keep three parallel arrays aligned with dets:
+                    #   names         — formatted display string (for drawing)
+                    #   raw_names     — plain identity label (for tracking layers)
+                    #   tiers         — confidence tier (for tracking layers)
+                    #   known_mask    — True iff tier == "confident" (for blur policy)
                     n_det = dets.shape[0]
                     names = ["unknown"] * n_det
+                    raw_names: List[Optional[str]] = [None] * n_det
+                    tiers: List[Optional[str]] = [None] * n_det
                     known_mask = [False] * n_det
                     used_dets = set()  # prevent double assignment
 
@@ -855,32 +1002,31 @@ def main() -> None:
                         if best_d >= 0 and best_iou > 0.3:
                             used_dets.add(best_d)
                             names[best_d] = tr.name
+                            raw_names[best_d] = tr.raw_name
+                            tiers[best_d] = tr.tier
                             known_mask[best_d] = tr.is_known
                 else:
                     n = 0 if dets is None else int(dets.shape[0])
                     names = ["unknown"] * n
+                    raw_names = [None] * n
+                    tiers = [None] * n
                     known_mask = [False] * n
             else:
                 n = 0 if dets is None else int(dets.shape[0])
                 names = ["unknown"] * n
+                raw_names = [None] * n
+                tiers = [None] * n
                 known_mask = [False] * n
 
-            # Who-tracker (strip score suffix)
-            # Strip score suffix helper
-            def strip_score(nm: Optional[str]) -> Optional[str]:
-                if nm is None:
-                    return None
-                if nm == "unknown":
-                    return "unknown"
-                # Handle "wendy? (0.62)" and "wendy (0.65)"
-                p = nm.find("? (")
-                if p > 0:
-                    return nm[:p]  # strip "? (score)"
-                p = nm.find(" (")
-                return nm[:p] if p > 0 else nm
-
-            # Strip scores from names for tracking
-            names_stripped = [strip_score(nm) for nm in names]
+            # raw_names already contains plain identity labels (no score suffix)
+            # straight from TrackResult.raw_name. Convert None → "unknown" for
+            # consumers that expect string entries (fall match, who tracker).
+            names_for_tracking: List[str] = [
+                (n if n is not None else "unknown") for n in raw_names
+            ]
+            # tiers parallel-aligned with names_for_tracking. None entries mean
+            # "no tier info" — WhoTracker treats as uncertain for confident/
+            # tentative aggregation.
 
             # Pose detection + fall detection (BEFORE who.update_now)
             pose_dets: Optional[np.ndarray] = None
@@ -907,15 +1053,28 @@ def main() -> None:
                             fall_statuses=fall_statuses,
                             pose_keypoints=pose_kps,
                             face_bboxes=dets,
-                            face_names=names_stripped,
+                            face_names=names_for_tracking,
                         )
 
                 except Exception as e:
                     logger.warning("[warn] pose detection failed: %s", e)
                     pose_dets, pose_kps = None, None
 
-            # Update who tracker WITH fall info (AFTER fall detection)
-            who.update_now(names_stripped, fall_infos=fall_infos)
+            # Update who tracker WITH tier + fall info
+            who.update_now(names_for_tracking, tiers=tiers, fall_infos=fall_infos)
+
+            # AutoEnroller maintenance, every ~1 second (15 frames @ 15fps):
+            #   1. try_commit_pending — proactively commits buffers whose
+            #      gates have all passed since the last observe() call.
+            #      Without this, a track that went status="unknown" with a
+            #      ripe buffer would have to wait for re-identify (~1s)
+            #      before its UUID is created.
+            #   2. gc_stale — drops buffers for tracks BoTSORT stopped
+            #      reporting.
+            # Both ops are cheap (small dict scans).
+            if auto_enroller is not None and total % 15 == 0:
+                auto_enroller.try_commit_pending()
+                auto_enroller.gc_stale()
 
             # Draw Pose (BEFORE blur)
             if pose_dets is not None and len(pose_dets) > 0:

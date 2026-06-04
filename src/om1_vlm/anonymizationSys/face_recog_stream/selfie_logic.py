@@ -25,21 +25,44 @@ EYE_B_IDX = 1
 NOSE_IDX = 2
 
 _VALID_ID = re.compile(r"^[a-z0-9_-]+$")
-# Reject names ending in _<digits> to avoid colliding with the suffix system.
-# E.g. user-supplied "wendy_1" would confuse next_suffix logic.
-_HAS_SUFFIX = re.compile(r"_\d+$")
 
 
 # Decision objects
 @dataclass
 class DedupDecision:
-    """Outcome of resolve_target_id()."""
+    """Outcome of resolve_target_id().
 
-    id: Optional[str] = None  # Target folder name on success
-    merged: bool = False  # True if saving into existing folder
-    reject: bool = False  # True if cross-name conflict (no force)
-    match_label: Optional[str] = None  # Closest existing label (for telemetry)
-    match_sim: float = 0.0  # Cosine to closest match
+    Fields
+    ------
+    uuid : str | None
+        UUID to add samples to. ``None`` means "create a new UUID with
+        ``name``" — caller invokes ``gallery.create(name).
+    name : str
+        Display name to use. For merges, this is the existing UUID's name
+        (may differ in casing from the requested name; we use what's on disk).
+        For new identities, this is the requested name verbatim.
+    merged : bool
+        True iff ``uuid`` is set (we're merging into an existing identity).
+    reject : bool
+        True iff this selfie should be rejected because the face strongly
+        matches a *different* named identity (``match_name``), and
+        ``force=False``. Indicates likely confusion ("are you Bob, not Wendy?").
+    match_name : str | None
+        Best-matching existing display name, for telemetry / user-facing
+        error messages.
+    match_uuid : str | None
+        UUID of the best match (regardless of whether we merged with it).
+    match_sim : float
+        Cosine similarity to the best match.
+    """
+
+    uuid: Optional[str] = None
+    name: str = ""
+    merged: bool = False
+    reject: bool = False
+    match_name: Optional[str] = None
+    match_uuid: Optional[str] = None
+    match_sim: float = 0.0
 
 
 # Geometry: frontality from 5-point landmarks
@@ -135,6 +158,138 @@ def check_ambiguity(
     return ratio > ratio_thr, ratio
 
 
+# ---------------------------------------------------------------------------
+# Recognition: 1:N identification with confidence tiering
+# ---------------------------------------------------------------------------
+
+# Recognition tier names. Exposed so callers don't have to spell strings.
+TIER_CONFIDENT = "confident"
+TIER_TENTATIVE = "tentative"
+TIER_UNCERTAIN = "uncertain"
+
+
+def recognize_from_sims(
+    sims: np.ndarray,
+    gal_labels: List[str],
+    *,
+    min_sim: float,
+    strict_margin: float,
+    loose_margin: float,
+) -> Tuple[str, str, float, float]:
+    """
+    Decide identity from precomputed cosine similarities, with a 3-tier
+    confidence output.
+
+    Use this when you already have ``sims = gal_feats @ query`` (e.g. inside a
+    batched recognition pass). Use ``recognize()`` for one-off queries.
+
+    Decision tree (in order):
+      1. Empty gallery                          → ("unknown", "uncertain")
+      2. top1 sim < min_sim                     → ("unknown", "uncertain")
+      3. top1 - top2 >= strict_margin           → (name, "confident")
+      4. top1 - top2 >= loose_margin            → (name, "tentative")
+      5. otherwise (ambiguous between names)    → ("unknown", "uncertain")
+
+    Why tiered output:
+    - At small gallery (N<50), top1 alone is reliable.
+    - At larger gallery, many near-collisions exist; top1 alone gives false
+      matches. The margin between top1 and top2 is a much better confidence
+      signal than top1 itself.
+    - But a strict margin gate over-filters: a person we *can* recognize will
+      sometimes have margin=0.05 (clearly above zero but below strict). We
+      want to surface that as "tentative" so the caller can ask for
+      verification instead of giving up.
+
+    Parameters
+    ----------
+    sims : ndarray (N_id,)
+        Cosine similarities between the query and each gallery centroid.
+        Assumed both are L2-normalized so this is just a dot product.
+    gal_labels : list[str]
+        Label per row of sims; ``len(gal_labels) == len(sims)``.
+    min_sim : float
+        Minimum top-1 cosine for any match (typical 0.40 - 0.50).
+    strict_margin : float
+        Required ``top1 - top2`` to call it "confident" (typical 0.08 - 0.12).
+    loose_margin : float
+        Required ``top1 - top2`` to call it "tentative" (typical 0.03 - 0.05).
+        Must be strictly less than ``strict_margin``.
+
+    Returns
+    -------
+    (name, tier, top1_sim, top2_sim) : (str, str, float, float)
+        - name: gallery label or ``"unknown"``
+        - tier: one of ``"confident"``, ``"tentative"``, ``"uncertain"``
+        - top1_sim, top2_sim: raw scores for logging / debugging
+          (top2_sim is 0.0 when gallery has only one entry)
+    """
+    if sims is None or len(sims) == 0:
+        return ("unknown", TIER_UNCERTAIN, 0.0, 0.0)
+
+    # Single-entry gallery: no margin to compute, fall back to threshold only.
+    if len(sims) == 1:
+        s1 = float(sims[0])
+        if s1 < min_sim:
+            return ("unknown", TIER_UNCERTAIN, s1, 0.0)
+        return (gal_labels[0], TIER_CONFIDENT, s1, 0.0)
+
+    # General case: find top-1 and top-2.
+    # argpartition is O(N), faster than full sort when we only need top-K.
+    # NOTE: k argument is the index position we want partitioned, not the
+    # number of items. To pick top-2, k=1 is correct (positions 0 and 1 hold
+    # the two smallest of -sims, which are the two largest of sims).
+    # k=2 would crash with "kth out of bounds" when len(sims) == 2.
+    top2_idx = np.argpartition(-sims, 1)[:2]
+    if sims[top2_idx[0]] < sims[top2_idx[1]]:
+        top2_idx = top2_idx[::-1]
+    s1 = float(sims[top2_idx[0]])
+    s2 = float(sims[top2_idx[1]])
+    name = gal_labels[int(top2_idx[0])]
+
+    if s1 < min_sim:
+        return ("unknown", TIER_UNCERTAIN, s1, s2)
+
+    margin = s1 - s2
+    if margin >= strict_margin:
+        return (name, TIER_CONFIDENT, s1, s2)
+    if margin >= loose_margin:
+        return (name, TIER_TENTATIVE, s1, s2)
+    # Ambiguous: two identities tied within `loose_margin`. Better to refuse
+    # than to commit to either. The temporal voting layer will see this as
+    # "uncertain" and not count it toward any name.
+    return ("unknown", TIER_UNCERTAIN, s1, s2)
+
+
+def recognize(
+    embedding: np.ndarray,
+    gal_feats: Optional[np.ndarray],
+    gal_labels: List[str],
+    *,
+    min_sim: float,
+    strict_margin: float,
+    loose_margin: float,
+) -> Tuple[str, str]:
+    """
+    Convenience wrapper around :func:`recognize_from_sims` for callers that
+    only need (name, tier).
+
+    Computes ``sims = gal_feats @ embedding`` internally, then dispatches to
+    ``recognize_from_sims``. Returns ``("unknown", "uncertain")`` for an
+    empty gallery without touching ``gal_feats``.
+    """
+    if gal_feats is None or len(gal_feats) == 0 or len(gal_labels) == 0:
+        return ("unknown", TIER_UNCERTAIN)
+    sims = gal_feats @ embedding
+    name, tier, _, _ = recognize_from_sims(
+        sims,
+        gal_labels,
+        min_sim=min_sim,
+        strict_margin=strict_margin,
+        loose_margin=loose_margin,
+    )
+    return (name, tier)
+
+
 def quality_check(
     crop_112: np.ndarray,
     det: np.ndarray,
@@ -182,7 +337,9 @@ def validate_identity_name(name: str) -> Tuple[bool, str]:
     Rules:
     - non-empty, ≤32 chars
     - lowercase alphanumeric, underscore, dash only
-    - must NOT end in `_<digits>` (reserved for suffix system)
+
+    Note: in the UUID-based gallery there's no suffix collision concern, so
+    names like ``"wendy_2"`` are allowed.
     """
     if not name:
         return False, "empty"
@@ -190,37 +347,7 @@ def validate_identity_name(name: str) -> Tuple[bool, str]:
         return False, "too_long"
     if not _VALID_ID.match(name):
         return False, "invalid_chars"
-    if _HAS_SUFFIX.search(name):
-        return False, "ends_with_suffix"
     return True, ""
-
-
-def is_same_root(label: str, root: str) -> bool:
-    """True iff `label` is exactly `root` or `root_<digits>`."""
-    if label == root:
-        return True
-    return bool(re.fullmatch(rf"{re.escape(root)}_\d+", label))
-
-
-def next_suffix(name: str, existing_labels: List[str]) -> str:
-    """
-    Next available label in the {name, name_1, name_2, ...} family.
-
-    - If `name` itself is free → return `name`.
-    - Else return `name_<max_n + 1>` where max_n scans existing `name_<n>` labels.
-    """
-    existing = set(existing_labels)
-    if name not in existing:
-        return name
-
-    pat = re.compile(rf"^{re.escape(name)}_(\d+)$")
-    max_n = 0
-    for label in existing:
-        m = pat.match(label)
-        if m:
-            max_n = max(max_n, int(m.group(1)))
-
-    return f"{name}_{max_n + 1}"
 
 
 # Dedup
@@ -229,75 +356,124 @@ def resolve_target_id(
     requested_name: str,
     gal_feats: Optional[np.ndarray],
     gal_labels: List[str],
+    gal_uuids: List[str],
     cfg: dict,
     force: bool = False,
 ) -> DedupDecision:
-    """
-    Decide which gallery folder a new face should go into.
+    """Decide whether a new selfie should merge with an existing UUID.
 
-    One full-table cosine search, then 2×2 decision matrix on
-    (similarity tier, label-matches-requested-name).
+    Runs one cosine search against the in-memory centroids, then applies a
+    two-tier decision:
 
-    Thresholds (from cfg):
-    - cross_thr (~0.60): strong cross-name match → reject (unless force)
-    - merge_thr (~0.45): same-name family match → merge into existing folder
+    Thresholds (from ``cfg``)
+    -------------------------
+    ``selfie_cross_name_thr`` (~0.60)
+        Above this, the face is "strongly recognized as someone". If that
+        someone has a different name from the requested one → reject the
+        selfie (suggests user confusion or impersonation). Override with
+        ``force=True``.
+    ``selfie_merge_thr`` (~0.45)
+        Above this AND the matched identity already has the same name →
+        merge (append samples to existing UUID). Below this → create a new
+        UUID even if a similarly-named identity exists.
 
-    Behavior:
-    - Empty gallery                                    → use requested_name
-    - sim >= cross_thr, same-root label                → merge
-    - sim >= cross_thr, different name, force=False    → REJECT
-    - sim >= cross_thr, different name, force=True     → new with suffix
-    - merge_thr <= sim < cross_thr, same-root          → merge
-    - otherwise                                        → new with suffix
+    Behavior matrix
+    ---------------
+    Empty gallery                                       → CREATE NEW UUID
+    sim ≥ cross_thr, same-name match                    → MERGE
+    sim ≥ cross_thr, different name, force=False        → REJECT
+    sim ≥ cross_thr, different name, force=True         → CREATE NEW UUID
+    merge_thr ≤ sim < cross_thr, same-name match        → MERGE
+    otherwise                                           → CREATE NEW UUID
+
+    Multiple UUIDs per name are explicitly allowed (two different selfie
+    sessions for the same person produce two UUIDs; both will match her
+    face). The merge path picks the single best-scoring UUID; future
+    selfies will fold into whichever has the closest centroid.
     """
     cross_thr = float(cfg["selfie_cross_name_thr"])
     merge_thr = float(cfg["selfie_merge_thr"])
+    requested_lower = requested_name.strip().lower()
 
-    if gal_feats is None or len(gal_labels) == 0:
-        return DedupDecision(id=requested_name)
+    if gal_feats is None or len(gal_uuids) == 0:
+        # Brand-new gallery — caller creates a fresh UUID with this name.
+        return DedupDecision(uuid=None, name=requested_name)
 
     # gal_feats rows and embedding are both unit-norm
     sims = gal_feats @ embedding
     j = int(np.argmax(sims))
     best_sim = float(sims[j])
-    best_label = gal_labels[j]
+    best_name = gal_labels[j]
+    best_uuid = gal_uuids[j]
 
-    same_root = is_same_root(best_label, requested_name)
+    # Anonymous UUIDs (name="") are treated as "claimable" — the empty name
+    # matches any requested name. This is the "selfie claims an anon" path:
+    # when face_tracker auto-enrolled this face into UUID X with no name,
+    # a follow-up selfie that matches X should fold into X and name it,
+    # not reject (the old cross-name protection had a false-positive here:
+    # "" ≠ "sean" was treated as a name conflict, blocking the natural
+    # workflow of giving the anon a name).
+    is_anon_match = (not best_name) or (not best_name.strip())
+    same_name = is_anon_match or (best_name.strip().lower() == requested_lower)
 
-    # Strong match
+    # Strong match — face is being recognized as a known identity
     if best_sim >= cross_thr:
-        if same_root:
+        if same_name:
+            # Merging into the matched UUID.
+            # If the match is anon (no name yet), use the REQUESTED name —
+            # the selfie is claiming this anon UUID. The caller will fold
+            # selfie samples in AND rename the UUID. If the match already
+            # has the requested name, keep the existing name (no-op rename).
+            effective_name = requested_name if is_anon_match else best_name
             return DedupDecision(
-                id=best_label,
+                uuid=best_uuid,
+                name=effective_name,
                 merged=True,
-                match_label=best_label,
+                match_name=best_name,
+                match_uuid=best_uuid,
                 match_sim=best_sim,
             )
         if force:
+            # User insists this is a different person despite the strong
+            # match (twin / lookalike). Create a brand-new UUID.
             return DedupDecision(
-                id=next_suffix(requested_name, gal_labels),
-                match_label=best_label,
+                uuid=None,
+                name=requested_name,
+                match_name=best_name,
+                match_uuid=best_uuid,
                 match_sim=best_sim,
             )
+        # Different name without force — reject and surface who we think
+        # this actually is.
         return DedupDecision(
             reject=True,
-            match_label=best_label,
+            match_name=best_name,
+            match_uuid=best_uuid,
             match_sim=best_sim,
         )
 
-    # Soft match to same-root → merge
-    if best_sim >= merge_thr and same_root:
+    # Soft match to same name → merge
+    if best_sim >= merge_thr and same_name:
+        # Same logic as the strong-match same_name branch: use requested
+        # name when claiming an anon UUID, else preserve existing name.
+        effective_name = requested_name if is_anon_match else best_name
         return DedupDecision(
-            id=best_label,
+            uuid=best_uuid,
+            name=effective_name,
             merged=True,
-            match_label=best_label,
+            match_name=best_name,
+            match_uuid=best_uuid,
             match_sim=best_sim,
         )
 
-    # No qualifying match → new identity (possibly with suffix)
+    # No qualifying match → create new UUID. Note: requested_name might
+    # already exist as a different UUID's name; that's fine, names are
+    # not unique in the UUID gallery.
     return DedupDecision(
-        id=next_suffix(requested_name, gal_labels),
-        match_label=best_label,
+        uuid=None,
+        name=requested_name,
+        match_name=best_name,
+        match_uuid=best_uuid,
         match_sim=best_sim,
     )
 
