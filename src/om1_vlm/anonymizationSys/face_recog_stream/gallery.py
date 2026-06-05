@@ -214,11 +214,35 @@ class UUIDGallery:
         *,
         arc: TRTFaceRecognition,
         aligned_size: int = 112,
+        max_samples_per_uuid: int = 50,
+        last_seen_persist_interval_sec: float = 60.0,
     ) -> None:
         self.gallery_dir = osp.abspath(gallery_dir)
         self.arc = arc
         self.aligned_size = int(aligned_size)
         self._dim = int(getattr(arc, "embedding_dim", 512))
+        # FIFO cap per UUID. When add_sample would push past this, the
+        # oldest sample (lexicographically first JPG, row 0 of embeddings.npy)
+        # is evicted: file removed, embedding subtracted from centroid_sum,
+        # row 0 of embeddings.npy dropped. Keeps disk bounded as the system
+        # accumulates samples over long-running deployments and from the
+        # continuous-refresh path.
+        self.max_samples_per_uuid = int(max_samples_per_uuid)
+
+        # touch_last_seen is called every confident-recognition frame
+        # (~15 Hz × N visible faces). Writing metadata.json that often
+        # would dominate disk I/O. Instead, we maintain a two-layer
+        # cache: rec.metadata["last_seen_at"] is updated in memory on
+        # every call (cheap), and metadata.json is flushed to disk at
+        # most once per this many seconds per UUID. The disk lag is
+        # bounded; if the process crashes, we lose at most this many
+        # seconds of last_seen accuracy — fine for the /gallery/sweep_stale
+        # use case (cleanup thresholds are typically days/months).
+        self.last_seen_persist_interval_sec = float(last_seen_persist_interval_sec)
+        # Per-UUID monotonic timestamp of the most recent metadata.json
+        # write triggered by touch_last_seen. Used to enforce the
+        # rate-limit above.
+        self._last_seen_disk_ts: Dict[str, float] = {}
 
         _ensure_dir(self.gallery_dir)
         _ensure_dir(osp.join(self.gallery_dir, "_trash"))
@@ -239,6 +263,8 @@ class UUIDGallery:
         modifications to ``gallery_dir`` (e.g. file-level rsync).
         """
         self._records.clear()
+        self._last_seen_disk_ts.clear()
+        now_mono = time.monotonic()
         if not osp.isdir(self.gallery_dir):
             return 0
         for entry in os.listdir(self.gallery_dir):
@@ -258,6 +284,12 @@ class UUIDGallery:
                 rec = self._load(entry)
                 if rec is not None:
                     self._records[entry] = rec
+                    # Seed the rate-limit tracker: the file on disk is
+                    # current at load time, so touch_last_seen shouldn't
+                    # immediately re-write it. The first disk write for
+                    # this UUID won't happen until persist_interval seconds
+                    # have passed.
+                    self._last_seen_disk_ts[entry] = now_mono
             except Exception as e:
                 log.warning("Failed to load UUID %s: %s", entry, e)
         log.info("Gallery loaded: %d UUIDs", len(self._records))
@@ -446,8 +478,139 @@ class UUIDGallery:
             centroid_sum=None,
             metadata=meta,
         )
+        # We just wrote metadata.json — seed the touch_last_seen rate-
+        # limit tracker so the first touch within persist_interval seconds
+        # doesn't immediately re-write.
+        self._last_seen_disk_ts[u] = time.monotonic()
         log.info("Created UUID %s (name=%r, source=%s)", u, name, source)
         return u
+
+    def _evict_oldest_sample(self, uuid: str) -> bool:
+        """Drop the oldest sample (lexicographically first JPG) and the
+        matching row in embeddings.npy; subtract from centroid_sum.
+
+        Used internally by add_sample when max_samples_per_uuid would be
+        exceeded. Returns True if a sample was evicted, False if nothing
+        to evict (empty aligned/ or missing embeddings.npy).
+
+        Invariant: sorted file list 1:1 with embeddings.npy row order
+        (oldest first). add_sample maintains this by always appending.
+        Pre-named samples or odd numbering can break the invariant; in
+        that case eviction is best-effort and may slightly drift the
+        centroid — acceptable for a FIFO eviction strategy.
+        """
+        rec = self._records.get(uuid)
+        if rec is None:
+            return False
+        uuid_dir = osp.join(self.gallery_dir, uuid)
+        aligned_dir = osp.join(uuid_dir, "aligned")
+        if not osp.isdir(aligned_dir):
+            return False
+        files = sorted(f for f in os.listdir(aligned_dir) if f.endswith(".jpg"))
+        if not files:
+            return False
+
+        embeddings_path = osp.join(uuid_dir, "embeddings.npy")
+        if not osp.exists(embeddings_path):
+            # No embeddings file — can only delete the JPG.
+            try:
+                os.remove(osp.join(aligned_dir, files[0]))
+            except OSError as e:
+                log.warning("evict: failed to remove %s: %s", files[0], e)
+                return False
+            rec.sample_count = max(0, rec.sample_count - 1)
+            return True
+
+        try:
+            embeddings = np.load(embeddings_path).astype(np.float32)
+        except Exception as e:
+            log.warning("evict: embeddings.npy unreadable for %s: %s", uuid, e)
+            return False
+        if embeddings.shape[0] == 0:
+            return False
+
+        oldest_emb = embeddings[0]
+        # Subtract from centroid_sum (keep it consistent with remaining rows)
+        if rec.centroid_sum is not None:
+            rec.centroid_sum = (rec.centroid_sum - oldest_emb).astype(np.float32)
+
+        # Trim row 0
+        new_arr = embeddings[1:].astype(np.float32)
+        _atomic_write_npy(embeddings_path, new_arr)
+        if rec.centroid_sum is not None:
+            _atomic_write_npy(osp.join(uuid_dir, "centroid.npy"), rec.centroid_sum)
+
+        # Delete the file
+        try:
+            os.remove(osp.join(aligned_dir, files[0]))
+        except OSError as e:
+            log.warning("evict: failed to remove %s: %s", files[0], e)
+
+        rec.sample_count = max(0, rec.sample_count - 1)
+        log.debug(
+            "evict: uuid=%s dropped %s (count→%d)", uuid, files[0], rec.sample_count
+        )
+        return True
+
+    def touch_last_seen(self, uuid: str, ts_iso: Optional[str] = None) -> bool:
+        """Update ``metadata.last_seen_at`` without adding a sample. O(1)
+        in the hot path; disk I/O is rate-limited.
+
+        Two-layer cache (see ``last_seen_persist_interval_sec`` on
+        ``__init__``):
+          - In-memory ``rec.metadata["last_seen_at"]`` is updated on
+            every call (cheap, no I/O).
+          - ``metadata.json`` on disk is written at most once per
+            ``last_seen_persist_interval_sec`` per UUID.
+
+        Called every confident-recognition frame, so without rate-
+        limiting this would write ~15×N times per second (where N is
+        the number of confidently-tracked faces). The rate limit
+        bounds disk churn while keeping the in-memory value fresh for
+        snapshots (e.g. session_last_seen_iso) and queries (e.g.
+        list_stale).
+
+        On process crash, the on-disk last_seen_at may lag the true
+        last sighting by up to ``last_seen_persist_interval_sec``.
+        That's acceptable for the long-term cleanup use case (sweep
+        thresholds are days/months).
+
+        Forced flush: pass an explicit ``ts_iso`` to bypass the rate
+        limit (e.g. test setup, graceful shutdown).
+
+        Returns True if updated (in memory at least), False if UUID
+        unknown.
+        """
+        rec = self._records.get(uuid)
+        if rec is None:
+            return False
+        forced = ts_iso is not None
+        if ts_iso is None:
+            ts_iso = _now_iso()
+
+        # MEMORY: always update. Snapshot consumers (session_last_seen_iso,
+        # list_stale) read this directly.
+        rec.metadata["last_seen_at"] = ts_iso
+
+        # DISK: rate-limit. Skip the write if we wrote recently for this
+        # UUID, unless the caller forced an explicit timestamp.
+        now_mono = time.monotonic()
+        last_persist = self._last_seen_disk_ts.get(uuid, 0.0)
+        if (
+            not forced
+            and (now_mono - last_persist) < self.last_seen_persist_interval_sec
+        ):
+            return True  # in-memory updated; disk skipped
+
+        # Write through
+        uuid_dir = osp.join(self.gallery_dir, uuid)
+        try:
+            _atomic_write_json(osp.join(uuid_dir, "metadata.json"), rec.metadata)
+            self._last_seen_disk_ts[uuid] = now_mono
+        except OSError as e:
+            log.warning("touch_last_seen: write failed for %s: %s", uuid, e)
+            return False
+        return True
 
     def add_sample(
         self,
@@ -461,19 +624,25 @@ class UUIDGallery:
 
         Steps
         -----
-        1. Compute embedding if not provided (GPU work).
-        2. Write JPG to ``aligned/``.
-        3. Append the embedding to ``embeddings.npy`` (full rewrite, since
-           numpy lacks streaming append for ``.npy`` format — but it's still
-           cheap, embeddings are ~2KB per row).
-        4. Update centroid incrementally: ``new = norm((old*N + emb))``.
-        5. Update metadata.sample_count and updated_at.
+        1. If at ``max_samples_per_uuid`` cap, evict the oldest sample
+           (FIFO: oldest JPG removed, row 0 of embeddings.npy dropped,
+           subtract its contribution from centroid_sum).
+        2. Compute embedding if not provided (GPU work).
+        3. Write JPG to ``aligned/``.
+        4. Append the embedding to ``embeddings.npy``.
+        5. Update centroid incrementally: ``new = old_sum + embedding``.
+        6. Update metadata.sample_count, updated_at, and last_seen_at.
 
         Returns the filename of the saved sample (e.g. ``"sample_004.jpg"``).
         """
         rec = self._records.get(uuid)
         if rec is None:
             raise KeyError(f"UUID not found: {uuid}")
+
+        # 1. Enforce cap. If at limit, evict oldest before adding new so
+        # sample_count never exceeds max_samples_per_uuid.
+        if rec.sample_count >= self.max_samples_per_uuid:
+            self._evict_oldest_sample(uuid)
 
         # Normalize/validate the crop
         if aligned_112_bgr is None or aligned_112_bgr.size == 0:
@@ -504,6 +673,9 @@ class UUIDGallery:
         _ensure_dir(aligned_dir)
 
         # Pick a filename: ``sample_NNN.jpg`` keeps things sortable.
+        # NOTE: with eviction, sample_count can be less than the highest
+        # numeric suffix on disk. We base the new filename on the current
+        # count + 1, with collision suffixing to avoid clobbering.
         if fname_hint:
             fname = fname_hint if fname_hint.endswith(".jpg") else f"{fname_hint}.jpg"
         else:
@@ -555,8 +727,14 @@ class UUIDGallery:
 
         # Update metadata
         rec.metadata["sample_count"] = N_prev + 1
-        rec.metadata["updated_at"] = _now_iso()
+        now_iso = _now_iso()
+        rec.metadata["updated_at"] = now_iso
+        rec.metadata["last_seen_at"] = now_iso
         _atomic_write_json(osp.join(uuid_dir, "metadata.json"), rec.metadata)
+        # We just persisted last_seen_at as a side effect of the
+        # sample add. Reset touch_last_seen's rate-limit tracker so
+        # subsequent touches don't re-write for another full interval.
+        self._last_seen_disk_ts[uuid] = time.monotonic()
 
         # Update in-memory record
         rec.sample_count = N_prev + 1
@@ -654,13 +832,35 @@ class UUIDGallery:
         # Metadata
         N = prev.shape[0] + len(clean_embs)
         rec.metadata["sample_count"] = N
-        rec.metadata["updated_at"] = _now_iso()
+        now_iso = _now_iso()
+        rec.metadata["updated_at"] = now_iso
+        rec.metadata["last_seen_at"] = now_iso
         _atomic_write_json(osp.join(uuid_dir, "metadata.json"), rec.metadata)
+        # Reset rate-limit tracker (see add_sample for rationale)
+        self._last_seen_disk_ts[uuid] = time.monotonic()
 
         rec.sample_count = N
         rec.centroid_sum = new_sum
 
-        log.info("add_samples: uuid=%s +%d (total=%d)", uuid, len(saved), N)
+        # Enforce max cap (may have exceeded during batch / merge)
+        evicted_total = 0
+        while rec.sample_count > self.max_samples_per_uuid:
+            if not self._evict_oldest_sample(uuid):
+                break
+            evicted_total += 1
+        if evicted_total > 0:
+            # Persist final count after eviction
+            rec.metadata["sample_count"] = rec.sample_count
+            _atomic_write_json(osp.join(uuid_dir, "metadata.json"), rec.metadata)
+            log.info(
+                "add_samples: evicted %d oldest to enforce cap=%d",
+                evicted_total,
+                self.max_samples_per_uuid,
+            )
+
+        log.info(
+            "add_samples: uuid=%s +%d (total=%d)", uuid, len(saved), rec.sample_count
+        )
         return saved
 
     def set_name(self, uuid: str, name: str) -> None:
@@ -756,6 +956,112 @@ class UUIDGallery:
             target_uuid,
         )
         return len(saved)
+
+    def refresh_sample(
+        self,
+        uuid: str,
+        aligned_112_bgr: np.ndarray,
+        embedding: np.ndarray,
+        *,
+        min_diversity_sim: float = 0.65,
+        max_diversity_sim: float = 0.92,
+    ) -> bool:
+        """Continuously enrich a known UUID with a fresh sample, if it adds
+        new feature diversity to the existing centroid.
+
+        Guards (Guard C in the design):
+          - new sample's sim to centroid must be in
+            ``[min_diversity_sim, max_diversity_sim]``:
+            too high → near-duplicate, no info gain.
+            too low  → probably misidentified, would pollute centroid.
+          - upstream Guards A (sim_thr+0.1) and B (per-UUID rate limit) are
+            the caller's responsibility; they need context this method
+            doesn't have (per-track sim, last-refresh timestamps).
+
+        On a passing refresh:
+          - Sample is added via :meth:`add_sample` (which enforces the
+            ``max_samples_per_uuid`` cap and updates ``last_seen_at``).
+          - Returns True.
+
+        On a failed guard:
+          - Returns False. Caller may still want to ``touch_last_seen`` to
+            mark this UUID active (this method does NOT touch on failure
+            because the call wasn't a fresh observation, just a check).
+        """
+        rec = self._records.get(uuid)
+        if rec is None:
+            return False
+        if rec.centroid_normalized is None:
+            # No centroid yet — fall through to plain add_sample
+            self.add_sample(uuid, aligned_112_bgr, embedding=embedding)
+            return True
+
+        # Compute sim to current centroid
+        emb = np.asarray(embedding, dtype=np.float32).reshape(-1)
+        if emb.shape[0] != self._dim:
+            return False
+        emb = _l2_normalize(emb)
+        sim = float(emb @ rec.centroid_normalized)
+
+        if sim < min_diversity_sim:
+            log.debug(
+                "refresh_sample: uuid=%s SKIP sim=%.3f < min_diversity=%.3f "
+                "(likely misidentification)",
+                uuid,
+                sim,
+                min_diversity_sim,
+            )
+            return False
+        if sim > max_diversity_sim:
+            log.debug(
+                "refresh_sample: uuid=%s SKIP sim=%.3f > max_diversity=%.3f "
+                "(near-duplicate, no info gain)",
+                uuid,
+                sim,
+                max_diversity_sim,
+            )
+            return False
+
+        # Passed guards — add. add_sample handles cap enforcement and
+        # last_seen_at update.
+        self.add_sample(uuid, aligned_112_bgr, embedding=emb)
+        log.info(
+            "refresh_sample: uuid=%s ADDED sim=%.3f (count→%d)",
+            uuid,
+            sim,
+            rec.sample_count,
+        )
+        return True
+
+    def list_stale(self, max_age_sec: float) -> List[str]:
+        """Return UUIDs whose ``last_seen_at`` is older than ``max_age_sec``.
+
+        Used by long-term cleanup sweeps to identify identities that
+        haven't been observed recently and might be candidates for
+        soft-deletion. Caller decides whether to actually forget them.
+
+        UUIDs with no ``last_seen_at`` field (e.g. legacy or not yet
+        observed) are treated as stale.
+        """
+        if max_age_sec <= 0:
+            return []
+        cutoff = time.time() - max_age_sec
+        stale: List[str] = []
+        for uuid, rec in self._records.items():
+            ts_iso = rec.metadata.get("last_seen_at") or rec.metadata.get("created_at")
+            if not ts_iso:
+                stale.append(uuid)
+                continue
+            try:
+                # ISO format with optional 'Z' or offset
+                ts = time.mktime(time.strptime(ts_iso[:19], "%Y-%m-%dT%H:%M:%S"))
+            except (ValueError, TypeError):
+                # Unparsable → treat as stale (defensive)
+                stale.append(uuid)
+                continue
+            if ts < cutoff:
+                stale.append(uuid)
+        return stale
 
     def forget(self, uuid: str) -> bool:
         """Soft-delete: move UUID folder to ``_trash/``. O(1) filesystem op.

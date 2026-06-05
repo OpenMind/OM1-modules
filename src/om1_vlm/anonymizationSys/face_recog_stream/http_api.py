@@ -37,7 +37,7 @@ import logging
 import os.path as osp
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -238,6 +238,12 @@ class HttpAPI:
                 return self._handle_gallery_merge(payload)
             if path == "/gallery/find_similar":
                 return self._handle_gallery_find_similar(payload)
+            if path == "/gallery/find_similar_current":
+                return self._handle_gallery_find_similar_current(payload)
+            if path == "/gallery/merge_current":
+                return self._handle_gallery_merge_current(payload)
+            if path == "/gallery/sweep_stale":
+                return self._handle_gallery_sweep_stale(payload)
 
             return {"error": f"unknown path {path}"}
         except Exception as e:
@@ -268,7 +274,65 @@ class HttpAPI:
             unknowns = self.frame_state.current_unknowns
 
         if self.face_tracker is not None:
-            result["faces"] = faces
+            # Decorate faces with metadata the LLM uses to choose its
+            # greeting style:
+            #
+            #   created_ago_sec    — how long ago was this UUID first
+            #                        added to the gallery. ("we've ever
+            #                        met")
+            #   last_seen_ago_sec  — gap (in seconds) between the
+            #                        PREVIOUS sighting of this UUID and
+            #                        the current track session start.
+            #                        Sticky: stays constant for the
+            #                        whole track session so the LLM's
+            #                        "newcomer / met before" judgment
+            #                        doesn't flip mid-conversation.
+            #   last_seen_iso      — the previous-sighting ISO timestamp
+            #                        itself (string), so the LLM can
+            #                        say "I last saw you on 2026-03-05".
+            #
+            # Unknown / no-UUID faces get None for all three.
+            now = time.time()
+            decorated_faces = []
+            for f in faces:
+                fc = dict(f)  # shallow copy so we don't mutate frame_state
+                uuid = fc.get("uuid")
+                created_ago_sec: Optional[float] = None
+                last_seen_ago_sec: Optional[float] = None
+                last_seen_iso: Optional[str] = fc.get("session_last_seen_iso")
+
+                if uuid and self.gallery is not None:
+                    rec = self.gallery.get_record(uuid)
+                    if rec is not None:
+                        ts_iso = rec.metadata.get("created_at")
+                        if ts_iso:
+                            try:
+                                ts = time.mktime(
+                                    time.strptime(ts_iso[:19], "%Y-%m-%dT%H:%M:%S")
+                                )
+                                created_ago_sec = max(0.0, now - ts)
+                            except (ValueError, TypeError):
+                                pass
+
+                # Compute last_seen_ago_sec from the sticky session value
+                # (NOT from gallery's current last_seen_at, which would
+                # always be ~0 for the visible face).
+                if last_seen_iso:
+                    try:
+                        ts = time.mktime(
+                            time.strptime(last_seen_iso[:19], "%Y-%m-%dT%H:%M:%S")
+                        )
+                        last_seen_ago_sec = max(0.0, now - ts)
+                    except (ValueError, TypeError):
+                        pass
+
+                fc["created_ago_sec"] = created_ago_sec
+                fc["last_seen_ago_sec"] = last_seen_ago_sec
+                fc["last_seen_iso"] = last_seen_iso
+                # Drop the internal field name — clients use last_seen_iso
+                fc.pop("session_last_seen_iso", None)
+                decorated_faces.append(fc)
+            result["faces"] = decorated_faces
             if unknowns:
                 result["unknown_captures"] = unknowns
 
@@ -1408,6 +1472,313 @@ class HttpAPI:
             "ok": True,
             "uuid": uuid,
             "matches": candidates,
+        }
+
+    # ==================================================================
+    # /gallery/find_similar_current — no-UUID variant for LLM ergonomics
+    # ==================================================================
+
+    def _get_current_largest_face_uuid(self) -> Optional[Dict[str, Any]]:
+        """Return ``{uuid, name, tier, area, track_id}`` for the most prominent
+        currently-visible face that has a UUID, or None.
+
+        "Most prominent" = largest bbox area (closest to camera). Faces
+        without a UUID (e.g. transient "unknown" still being recognized)
+        are skipped — they have no identity for the LLM to act on.
+
+        Acquires self.frame_lock for a consistent snapshot.
+        """
+        with self.frame_lock:
+            faces = list(self.frame_state.current_faces)
+
+        # current_faces is already sorted by area desc, but defensive
+        faces.sort(key=lambda f: f.get("area", 0), reverse=True)
+        for f in faces:
+            uuid = f.get("uuid")
+            if uuid:
+                return f
+        return None
+
+    def _handle_gallery_find_similar_current(
+        self, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Find similar UUIDs to the currently-largest visible face.
+
+        Wraps :meth:`_handle_gallery_find_similar` but resolves the query
+        UUID server-side from the visible scene rather than requiring
+        the LLM to pass one. This is the recommended entry point for
+        LLM-driven "do you remember me?" interactions.
+
+        Payload
+        -------
+        top_k    : int (optional, default 3)
+        min_sim  : float (optional, default 0.0)
+
+        Returns
+        -------
+        Either the find_similar response (with ``query_face`` describing
+        which face was used) or ``{"error": "no_visible_face"}``.
+        """
+        face = self._get_current_largest_face_uuid()
+        if face is None:
+            return {"error": "no_visible_face"}
+
+        # Delegate to the UUID-based handler. Echo back the query face
+        # info so the LLM (and Go connector) can log/display it.
+        sub_payload = dict(payload or {})
+        sub_payload["uuid"] = face["uuid"]
+        result = self._handle_gallery_find_similar(sub_payload)
+        if "ok" in result and result["ok"]:
+            result["query_face"] = {
+                "uuid": face.get("uuid"),
+                "name": face.get("name"),
+                "track_id": face.get("track_id"),
+                "tier": face.get("tier"),
+            }
+        return result
+
+    # ==================================================================
+    # /gallery/merge_current — no-UUID variant for LLM ergonomics
+    # ==================================================================
+
+    def _handle_gallery_merge_current(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge current visible face into the same-name UUID best matching it.
+
+        Server-side disambiguation: the LLM gives a target NAME (e.g.
+        "sean") and the server picks the source (current largest visible
+        face) and target (UUID with that name closest to the source by
+        centroid sim).
+
+        Workflow this enables (the LLM doesn't see any UUIDs)::
+
+            User: "Are you Sean?" → "Yes"
+            LLM: gallery_merge_current(target_name="sean", confirmed_by="user_voice")
+            Server picks source = current anon UUID + target = best "sean".
+
+        Payload
+        -------
+        target_name  : str (required)  — display name the visitor confirmed
+        confirmed_by : str (optional)  — audit string (e.g. "user_voice")
+        min_sim      : float (optional, default 0.0) — if multiple "sean"
+                       UUIDs exist, require best one's sim ≥ this to
+                       avoid merging into the wrong same-name UUID
+
+        Returns
+        -------
+        Same shape as /gallery/merge on success. New error codes:
+        - no_visible_face          — nothing on screen with a UUID
+        - source_is_named          — current face already has a name; the
+                                     LLM probably called this by mistake
+        - target_name_not_found    — no gallery UUID has that name
+        - ambiguous_target         — same-name UUIDs exist but best sim
+                                     is below min_sim (and N > 1)
+        """
+        if self.gallery is None:
+            return {"error": "recognition_disabled"}
+
+        payload = payload or {}
+        target_name = str(payload.get("target_name", "")).strip().lower()
+        confirmed_by = str(payload.get("confirmed_by", "")).strip()
+        try:
+            min_sim = float(payload.get("min_sim", 0.0))
+        except (TypeError, ValueError):
+            return {"error": "bad_min_sim"}
+
+        if not target_name:
+            return {"error": "missing_target_name"}
+
+        # 1. Resolve source = current largest visible face with UUID
+        face = self._get_current_largest_face_uuid()
+        if face is None:
+            return {"error": "no_visible_face"}
+        source_uuid = face["uuid"]
+        source_name = face.get("name") or ""
+
+        # Defensive: if the visible face is already named, the LLM is
+        # probably confused (you don't merge a named face). Allow it
+        # only if the source name happens to equal target_name (no-op
+        # against the same-name UUID — fall through to no-op below).
+        if source_name and not source_name.startswith("anon_"):
+            if source_name.lower() != target_name:
+                return {
+                    "error": "source_is_named",
+                    "source_name": source_name,
+                    "detail": "current visible face is already named differently",
+                }
+
+        # 2. Resolve target: UUIDs with name == target_name, pick best sim
+        src_rec = self.gallery.get_record(source_uuid)
+        if src_rec is None:
+            return {"error": "uuid_not_found", "uuid": source_uuid, "role": "source"}
+        src_centroid = src_rec.centroid_normalized
+        if src_centroid is None:
+            return {"error": "no_centroid", "uuid": source_uuid, "role": "source"}
+
+        # Iterate active gallery for same-name candidates
+        same_name_uuids: List[Tuple[str, float, int]] = []
+        for rec_dict in self.gallery.list_identities(include_unnamed=False):
+            cand_uuid = rec_dict["uuid"]
+            if cand_uuid == source_uuid:
+                continue
+            if (rec_dict.get("name") or "").lower() != target_name:
+                continue
+            cand_rec = self.gallery.get_record(cand_uuid)
+            if cand_rec is None or cand_rec.centroid_normalized is None:
+                continue
+            sim = float(src_centroid @ cand_rec.centroid_normalized)
+            same_name_uuids.append((cand_uuid, sim, cand_rec.sample_count))
+
+        if not same_name_uuids:
+            return {"error": "target_name_not_found", "target_name": target_name}
+
+        # Sort by sim desc; best candidate first
+        same_name_uuids.sort(key=lambda t: t[1], reverse=True)
+        best_uuid, best_sim, _ = same_name_uuids[0]
+
+        # If there's more than one same-name UUID and the top sim is low,
+        # don't guess — surface ambiguity to caller.
+        if len(same_name_uuids) > 1 and best_sim < min_sim:
+            return {
+                "error": "ambiguous_target",
+                "target_name": target_name,
+                "candidates": [
+                    {"uuid": u, "sim": round(s, 3), "samples": c}
+                    for u, s, c in same_name_uuids[:5]
+                ],
+                "detail": (
+                    f"{len(same_name_uuids)} candidates for name {target_name!r}; "
+                    f"best sim {best_sim:.3f} < min_sim {min_sim:.3f}"
+                ),
+            }
+
+        # 3. Delegate to the standard merge handler with resolved UUIDs.
+        # Compose a richer audit string so the log shows what was picked.
+        audit = (
+            f"{confirmed_by or '<unspecified>'}; "
+            f"resolved via merge_current target_name={target_name} "
+            f"best_sim={best_sim:.3f}"
+        )
+        sub_payload = {
+            "source_uuid": source_uuid,
+            "target_uuid": best_uuid,
+            "confirmed_by": audit,
+        }
+        result = self._handle_gallery_merge(sub_payload)
+        # Annotate result with the resolution info the LLM/Go side
+        # might want to surface to the user.
+        if isinstance(result, dict) and result.get("ok"):
+            result["target_name"] = target_name
+            result["resolved_by"] = "merge_current"
+        return result
+
+    # ==================================================================
+    # /gallery/sweep_stale — long-term cleanup
+    # ==================================================================
+
+    def _handle_gallery_sweep_stale(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Identify (and optionally soft-delete) UUIDs not seen recently.
+
+        For long-running deployments where the gallery accumulates many
+        identities — especially anon UUIDs from passers-by who never
+        introduced themselves. Disk math: 50 samples × ~50KB = 2.5MB
+        per UUID, so 1000 unused UUIDs = 2.5GB. This endpoint lets the
+        operator (or a cron job) reclaim space.
+
+        Payload
+        -------
+        max_age_sec   : float (required) — UUIDs with last_seen_at older
+                                           than this many seconds become
+                                           candidates. E.g. 30 days =
+                                           2_592_000.
+        dry_run       : bool (default True) — if True, list candidates
+                                              without deleting. Set
+                                              False to actually move
+                                              them to _trash.
+        protect_named : bool (default True) — if True, skip UUIDs that
+                                              have been named (only sweep
+                                              anon_xxx). Strong default;
+                                              cleaning up a named
+                                              identity by accident is
+                                              hard to recover from.
+
+        Returns
+        -------
+        ok           : bool
+        dry_run      : bool
+        candidates   : list of {uuid, name, last_seen_at, sample_count,
+                                action: "deleted"|"would_delete"|"skipped_named"}
+        deleted      : int — number actually soft-deleted (0 if dry_run)
+        identities   : int — total active gallery size after sweep
+        """
+        if self.gallery is None:
+            return {"error": "recognition_disabled"}
+
+        payload = payload or {}
+        try:
+            max_age_sec = float(payload.get("max_age_sec", 0))
+        except (TypeError, ValueError):
+            return {"error": "bad_max_age_sec"}
+        if max_age_sec <= 0:
+            return {
+                "error": "bad_max_age_sec",
+                "detail": "max_age_sec must be > 0",
+            }
+        dry_run = bool(payload.get("dry_run", True))
+        protect_named = bool(payload.get("protect_named", True))
+
+        stale_uuids = self.gallery.list_stale(max_age_sec)
+        candidates: List[Dict[str, Any]] = []
+        deleted = 0
+
+        for uuid in stale_uuids:
+            rec = self.gallery.get_record(uuid)
+            if rec is None:
+                continue
+            entry = {
+                "uuid": uuid,
+                "name": rec.name,
+                "last_seen_at": rec.metadata.get("last_seen_at"),
+                "sample_count": rec.sample_count,
+            }
+            # Skip named identities if protect_named is set
+            if protect_named and rec.name and not rec.name.startswith("anon_"):
+                entry["action"] = "skipped_named"
+                candidates.append(entry)
+                continue
+            if dry_run:
+                entry["action"] = "would_delete"
+            else:
+                # Actual soft-delete via gallery.forget (moves to _trash)
+                ok = self.gallery.forget(uuid)
+                if ok:
+                    deleted += 1
+                    entry["action"] = "deleted"
+                else:
+                    entry["action"] = "delete_failed"
+            candidates.append(entry)
+
+        # Refresh in-memory gallery snapshot used by recognition
+        if not dry_run and deleted > 0:
+            feats, labels, uuids = self.gallery.get_centroids()
+            with self.gal_lock:
+                self.gal_state.gal_feats = feats
+                self.gal_state.gal_labels = labels
+                self.gal_state.gal_uuids = uuids
+
+        self._audit_log(
+            f"gallery_sweep_stale max_age={max_age_sec:.0f}s "
+            f"dry_run={dry_run} protect_named={protect_named} "
+            f"candidates={len(candidates)} deleted={deleted}"
+        )
+
+        return {
+            "ok": True,
+            "dry_run": dry_run,
+            "protect_named": protect_named,
+            "max_age_sec": max_age_sec,
+            "candidates": candidates,
+            "deleted": deleted,
+            "identities": len(self.gallery.list_identities(include_unnamed=True)),
         }
 
     # ==================================================================

@@ -151,6 +151,7 @@ from .fall_detector import FallDetector
 from .gallery import UUIDGallery
 from .http_api import HttpAPI
 from .rtsp_video_writer import RTSPVideoStreamWriter
+from .sample_refresh import SampleRefreshManager
 from .scrfd import TRTSCRFD
 from .who_tracker import WhoTracker, match_falls_to_faces
 from .yolo_pose import TRTYOLOPose
@@ -637,7 +638,12 @@ def main() -> None:
     auto_enroller: Optional[AutoEnroller] = None
 
     if args.recognition:
-        gallery = UUIDGallery(args.gallery_dir, arc=arc)  # type: ignore[arg-type]
+        gallery = UUIDGallery(  # type: ignore[arg-type]
+            args.gallery_dir,
+            arc=arc,
+            max_samples_per_uuid=config.MAX_SAMPLES_PER_UUID,
+            last_seen_persist_interval_sec=config.LAST_SEEN_DISK_PERSIST_INTERVAL_SEC,
+        )
 
         # One-shot migration: old name-keyed folders → UUID dirs. Idempotent
         # (no-op when gallery already in UUID format). Originals are archived
@@ -698,8 +704,67 @@ def main() -> None:
             # Wire face_tracker's per-track recognition stream into the
             # auto-enroller. Fires once per track per recognition pass.
             face_tracker.on_unknown_sample = auto_enroller.observe
+
+            # Continuous sample refresh: on every confident per-frame
+            # match, the refresh manager decides (via 3 guards) whether
+            # to fold the embedding into the matched UUID. This keeps
+            # the gallery's centroids enriched with new angles/lighting
+            # over long-running sessions, without polluting named
+            # identities (sample misattributions are filtered out by
+            # the diversity guard).
+            refresh_mgr = SampleRefreshManager(
+                gallery,
+                sim_thr=float(args.sim_thr),
+                min_extra_confidence=config.REFRESH_MIN_EXTRA_CONFIDENCE,
+                min_refresh_interval_sec=config.REFRESH_MIN_INTERVAL_SEC,
+                min_diversity_sim=config.REFRESH_MIN_DIVERSITY_SIM,
+                max_diversity_sim=config.REFRESH_MAX_DIVERSITY_SIM,
+            )
+
+            def _on_confident(track_id, uuid, crop, embedding, sim):
+                """face_tracker → refresh_mgr bridge.
+
+                Two side-effects per confident match:
+
+                1. If this is the FIRST confident match for this track,
+                   snapshot the gallery's current ``last_seen_at`` into
+                   ``ident.session_last_seen_iso`` — captures the
+                   PREVIOUS session's last sighting before we overwrite
+                   it. This becomes the "we've met before" signal for
+                   the LLM downstream.
+
+                2. ``gallery.touch_last_seen(uuid)`` updates the
+                   gallery's metadata to "now" so long-term cleanup
+                   sweeps know this UUID is active.
+
+                3. Conditional refresh_mgr.observe applies the 3 guards
+                   to decide whether to fold this embedding into the
+                   centroid.
+                """
+                now_mono = time.monotonic()
+
+                # 1. Snapshot previous last_seen on FIRST confident hit
+                #    (no-op on subsequent frames in same session).
+                if face_tracker.get_session_last_seen(track_id) is None:
+                    rec = gallery.get_record(uuid)
+                    if rec is not None:
+                        prev_iso = rec.metadata.get("last_seen_at") or rec.metadata.get(
+                            "created_at"
+                        )
+                        face_tracker.maybe_set_session_last_seen(track_id, prev_iso)
+
+                # 2. Touch — gallery's last_seen_at = now
+                gallery.touch_last_seen(uuid)
+
+                # 3. Refresh if guards allow
+                if refresh_mgr.should_refresh(uuid, sim, now_mono):
+                    refresh_mgr.observe(uuid, crop, embedding, now_mono, sim=sim)
+
+            face_tracker.on_confident_sample = _on_confident
+
             logger.info(
-                "FaceTracker gallery synced: %d identities; auto-enroll hook wired",
+                "FaceTracker gallery synced: %d identities; "
+                "auto-enroll + refresh hooks wired",
                 len(id_uuids),
             )
 

@@ -138,6 +138,16 @@ class _TrackIdentity:
     # Used by the auto-enroll system to time how long a face has been
     # unknown.
     unknown_since: float = 0.0
+    # ISO timestamp of the gallery's ``last_seen_at`` at the moment this
+    # track first identified to a known UUID. Captured BEFORE any
+    # touch_last_seen call from this session, so it reflects the
+    # PREVIOUS sighting of this UUID — not "right now".
+    # Stays sticky for the lifetime of the track session: even as the
+    # gallery's last_seen_at is updated every frame, this field doesn't
+    # change. That gives the LLM consistent "we've met before" / "newcomer"
+    # signal throughout a single conversation.
+    # None until the first confident identification.
+    session_last_seen_iso: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +219,9 @@ class FaceTracker:
         on_unknown_sample: Optional[
             "Callable[[int, np.ndarray, np.ndarray, Tuple[int,int,int,int], str], None]"
         ] = None,
+        on_confident_sample: Optional[
+            "Callable[[int, str, np.ndarray, np.ndarray, float], None]"
+        ] = None,
     ):
         self.arc = arc
         self.recog_interval = float(recog_interval)
@@ -225,6 +238,11 @@ class FaceTracker:
         # Used by AutoEnroller to buffer unknown faces and drop committed
         # ones — keeping face_tracker unaware of storage concerns.
         self.on_unknown_sample = on_unknown_sample
+        # Callback fired only on confident per-frame identifications.
+        # Signature: (track_id, uuid, aligned_crop, embedding, sim).
+        # Used by SampleRefreshManager for continuous-learning sample
+        # enrichment. Guard A (sim threshold) is the caller's responsibility.
+        self.on_confident_sample = on_confident_sample
 
         # Gallery (set via set_gallery). All three arrays are parallel —
         # row i of _gal_feats has name _gal_labels[i] and UUID _gal_uuids[i].
@@ -727,6 +745,11 @@ class FaceTracker:
         for r in results:
             x1, y1, x2, y2 = r.bbox
             area = (x2 - x1) * (y2 - y1)
+            # Look up the snapshotted session-start last_seen for this
+            # track. Falls back to None for tracks not yet confidently
+            # identified (e.g. "unknown" status, or first few frames).
+            ident = self._identities.get(r.track_id)
+            session_last_seen = ident.session_last_seen_iso if ident else None
             faces.append(
                 {
                     "name": r.raw_name if r.raw_name else "unknown",
@@ -735,6 +758,7 @@ class FaceTracker:
                     "bbox": r.bbox,
                     "area": area,
                     "track_id": r.track_id,
+                    "session_last_seen_iso": session_last_seen,
                 }
             )
         return sorted(faces, key=lambda f: f["area"], reverse=True)
@@ -938,6 +962,29 @@ class FaceTracker:
                 tier,
             )
 
+            # Notify refresh manager on confident identifications. Refresh
+            # manager applies its own guards (rate-limit, diversity) before
+            # actually folding the sample into the gallery. We pass the
+            # specific UUID this frame matched (vote_uuid) — could differ
+            # from the track's finalized UUID if the track's voting hasn't
+            # converged yet, but for confident per-frame matches the
+            # difference is rarely material.
+            if (
+                tier == sl.TIER_CONFIDENT
+                and vote_uuid
+                and self.on_confident_sample is not None
+            ):
+                try:
+                    self.on_confident_sample(
+                        track_id,
+                        vote_uuid,
+                        crops[idx],
+                        feats[idx],
+                        s1,
+                    )
+                except Exception as e:
+                    log.warning("on_confident_sample callback raised: %s", e)
+
             # Decide as soon as we have enough votes or hit the cap
             if (
                 len(ident.vote_names) >= self.vote_frames
@@ -1115,10 +1162,37 @@ class FaceTracker:
                 "frames_seen": ident.frames_seen,
                 "recog_attempts": ident.recog_attempts,
                 "votes": len(ident.vote_names),
+                "session_last_seen_iso": ident.session_last_seen_iso,
             }
             for tid, ident in self._identities.items()
             if tid in self._active_ids
         }
+
+    def maybe_set_session_last_seen(self, track_id: int, iso: Optional[str]) -> bool:
+        """If this track has no ``session_last_seen_iso`` yet, set it.
+
+        Called by the on_confident_sample wiring in run.py the first time
+        a track is confidently identified, BEFORE touching the gallery's
+        last_seen_at. After that, subsequent confident matches in the same
+        track session preserve the snapshotted value (sticky).
+
+        Returns True if set this call, False if already set (or unknown
+        track).
+        """
+        ident = self._identities.get(track_id)
+        if ident is None:
+            return False
+        if ident.session_last_seen_iso is not None:
+            return False
+        ident.session_last_seen_iso = iso
+        return True
+
+    def get_session_last_seen(self, track_id: int) -> Optional[str]:
+        """Read the sticky session-start last_seen for a track, or None."""
+        ident = self._identities.get(track_id)
+        if ident is None:
+            return None
+        return ident.session_last_seen_iso
 
     def get_faces(self) -> list:
         """All faces in the current frame, sorted by bbox area descending.

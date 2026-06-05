@@ -214,7 +214,7 @@ class AutoEnroller:
 
         # Stats (for /who debug)
         self.enrolled_count = 0
-        self.merged_count = 0    # NEW: tracks merge-on-commit decisions
+        self.merged_count = 0  # NEW: tracks merge-on-commit decisions
         self.rejected_count = 0
 
     # ------------------------------------------------------------------
@@ -274,7 +274,9 @@ class AutoEnroller:
         buf = self._buffers.get(track_id)
         if buf is None:
             buf = _TrackBuffer(
-                track_id=track_id, first_seen=now, last_seen=now,
+                track_id=track_id,
+                first_seen=now,
+                last_seen=now,
             )
             self._buffers[track_id] = buf
 
@@ -310,7 +312,9 @@ class AutoEnroller:
         if worst < self.min_pairwise_sim:
             log.debug(
                 "auto-enroll track=%d skipped: pairwise=%.3f < %.3f",
-                track_id, worst, self.min_pairwise_sim,
+                track_id,
+                worst,
+                self.min_pairwise_sim,
             )
             self.rejected_count += 1
             # Don't drop the buffer — maybe later samples improve cohesion.
@@ -343,7 +347,8 @@ class AutoEnroller:
 
     def drop_track(self, track_id: int) -> None:
         """Explicitly drop a track's buffer (e.g. when track was identified
-        as a known person by a different path)."""
+        as a known person by a different path).
+        """
         self._buffers.pop(track_id, None)
 
     def gc_stale(self) -> int:
@@ -418,7 +423,8 @@ class AutoEnroller:
                 committed.append(uuid)
         if committed:
             log.info(
-                "try_commit_pending: committed %d pending buffer(s)", len(committed),
+                "try_commit_pending: committed %d pending buffer(s)",
+                len(committed),
             )
         return committed
 
@@ -508,13 +514,21 @@ class AutoEnroller:
             self.enrolled_count += 1
             log.info(
                 "auto-enroll track=%d → NEW uuid=%s (samples=%d, forced=%s, name=%r)",
-                buf.track_id, uuid, len(saved), forced, name,
+                buf.track_id,
+                uuid,
+                len(saved),
+                forced,
+                name,
             )
         else:
             self.merged_count += 1
             log.info(
                 "auto-enroll track=%d → MERGED into uuid=%s name=%r (samples=%d, sim=%.3f)",
-                buf.track_id, uuid, merged_into_name, len(saved), merged_sim,
+                buf.track_id,
+                uuid,
+                merged_into_name,
+                len(saved),
+                merged_sim,
             )
 
         if self.on_committed is not None:
@@ -525,7 +539,8 @@ class AutoEnroller:
         return uuid
 
     def _find_merge_target(
-        self, buf: _TrackBuffer,
+        self,
+        buf: _TrackBuffer,
     ) -> Tuple[Optional[str], str, float]:
         """Check if buf.embeddings' mean matches an existing ANON UUID strongly
         enough to fold the new samples in. Returns ``(uuid, name, sim)`` of the
@@ -601,13 +616,17 @@ class AutoEnroller:
                 log.debug(
                     "auto-enroll merge_target SKIP named uuid=%s name=%r sim=%.3f "
                     "(named UUIDs never auto-merged into; will create new anon)",
-                    cand_uuid, cand_name, cand_sim,
+                    cand_uuid,
+                    cand_name,
+                    cand_sim,
                 )
                 continue
             # Anonymous match — valid merge target
             log.info(
                 "auto-enroll merge_target FOUND anon uuid=%s sim=%.3f "
-                "(sample fold-in)", cand_uuid, cand_sim,
+                "(sample fold-in)",
+                cand_uuid,
+                cand_sim,
             )
             return cand_uuid, cand_name, cand_sim
 
