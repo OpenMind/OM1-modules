@@ -226,6 +226,8 @@ class HttpAPI:
             # Gallery: identity lifecycle
             if path == "/set_name":
                 return self._handle_set_name(payload)
+            if path == "/set_name_current":
+                return self._handle_set_name_current(payload)
             if path == "/gallery/forget_last":
                 return self._handle_gallery_forget_last(payload)
             if path == "/gallery/restore":
@@ -1031,6 +1033,81 @@ class HttpAPI:
             "name": rec.name,
             "created": created_via_force,
             "sample_count": rec.sample_count,
+        }
+
+    # ==================================================================
+    # /set_name_current — rename whoever is currently in front of camera
+    # ==================================================================
+    def _handle_set_name_current(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Rename the largest currently-visible face.
+
+        Resolves the on-screen face to its UUID server-side (same
+        ``_get_current_largest_face_uuid`` used by merge_current /
+        find_similar_current), then renames THAT UUID. Targeting by face
+        instead of by name means it works even when several identities
+        share a display name ("two Wendys") -- the LLM never has to
+        disambiguate and never passes a UUID.
+
+        Unlike merge_current, this DELIBERATELY allows renaming a face
+        that is already named (wendy -> yucheng is the whole point).
+
+        It is a pure metadata rename (gallery.set_name + label refresh),
+        so it does NOT run the selfie enroll pipeline and never returns
+        ``face_belongs_to``.
+
+        Payload
+        -------
+        name         : str (required) -- new display name
+        confirmed_by : str (optional) -- audit string (e.g. "user_voice")
+
+        Returns
+        -------
+        {ok, uuid, name, prev_name, sample_count, resolved_by} on success.
+        Errors: recognition_disabled | bad_name | no_visible_face |
+                uuid_not_found
+        """
+        if self.gallery is None:
+            return {"error": "recognition_disabled"}
+
+        payload = payload or {}
+        new_name = str(payload.get("name", "")).strip().lower()
+        ok, reason = sl.validate_identity_name(new_name)
+        if not ok:
+            return {"error": "bad_name", "detail": reason}
+
+        # Resolve the target by FACE, not by name.
+        face = self._get_current_largest_face_uuid()
+        if face is None:
+            return {"error": "no_visible_face"}
+        target_uuid = face["uuid"]
+        prev_name = face.get("name") or ""
+
+        if self.gallery.get_record(target_uuid) is None:
+            # In-memory frame had a UUID whose record is gone (e.g. deleted
+            # underneath a running server). Surface it instead of crashing.
+            return {"error": "uuid_not_found", "uuid": target_uuid}
+
+        def _do():
+            # Pure rename: update rec.name + metadata.json on disk...
+            self.gallery.set_name(target_uuid, new_name)
+            # ...then refresh the in-memory recognition labels so the very
+            # next /who poll renders the new name. Same idiom as
+            # _handle_set_name.
+            feats, labels, uuids = self.gallery.get_centroids()
+            with self.gal_lock:
+                self.gal_state.gal_feats = feats
+                self.gal_state.gal_labels = labels
+                self.gal_state.gal_uuids = uuids
+            return self.gallery.get_record(target_uuid)
+
+        rec = self.run_job_sync(_do)
+        return {
+            "ok": True,
+            "uuid": target_uuid,
+            "name": rec.name if rec is not None else new_name,
+            "prev_name": prev_name,
+            "sample_count": rec.sample_count if rec is not None else 0,
+            "resolved_by": "set_name_current",
         }
 
     def _uuid_for_track(self, track_id: int) -> Optional[str]:
