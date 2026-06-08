@@ -149,6 +149,13 @@ class _TrackIdentity:
     # None until the first confident identification.
     session_last_seen_iso: Optional[str] = None
 
+    # The last UUID this track was CONFIDENTLY identified as. Persists across
+    # re-identify resets (unlike `uuid`, which gets cleared when a track goes
+    # unknown), so we can detect when one continuous track flips from one
+    # confident identity to a different one — the trigger for auto-merging
+    # fragmented identities (e.g. a frontal vs a profile enrollment).
+    last_confident_uuid: Optional[str] = None
+
 
 # ---------------------------------------------------------------------------
 # FaceTracker
@@ -243,6 +250,11 @@ class FaceTracker:
         # Used by SampleRefreshManager for continuous-learning sample
         # enrichment. Guard A (sim threshold) is the caller's responsibility.
         self.on_confident_sample = on_confident_sample
+        # Fired when one continuous track's CONFIDENT identity changes from one
+        # UUID to a different one. Signature: (track_id, old_uuid, new_uuid).
+        # Set as a plain attribute (like on_unknown_sample) by run.py, wired to
+        # the auto-merge handler. None = feature off.
+        self.on_identity_flip = None
 
         # Gallery (set via set_gallery). All three arrays are parallel —
         # row i of _gal_feats has name _gal_labels[i] and UUID _gal_uuids[i].
@@ -345,6 +357,14 @@ class FaceTracker:
         stale_count = 0
         renamed_count = 0
         for tid, ident in self._identities.items():
+            # A confidently-remembered UUID that no longer exists (e.g. it was
+            # the loser of an auto-merge) must be forgotten, else it could
+            # spuriously re-trigger a flip. Do this regardless of current uuid.
+            if (
+                ident.last_confident_uuid
+                and ident.last_confident_uuid not in valid_uuids
+            ):
+                ident.last_confident_uuid = None
             if not ident.uuid:
                 continue
             if ident.uuid not in valid_uuids:
@@ -459,7 +479,7 @@ class FaceTracker:
         # Build results + collect tracks that still need recognition
         self._active_ids = set()
         results: List[TrackResult] = []
-        need_recog: List[Tuple[int, np.ndarray, Optional[np.ndarray]]] = []
+        need_recog: List[Tuple[int, np.ndarray, Optional[np.ndarray], float]] = []
 
         for track in tracks:
             x1, y1, x2, y2 = map(int, track[:4])
@@ -507,7 +527,7 @@ class FaceTracker:
 
             if needs_recog:
                 det_kps = track_det_map.get(track_id, {}).get("kps")
-                need_recog.append((track_id, np.array([x1, y1, x2, y2]), det_kps))
+                need_recog.append((track_id, np.array([x1, y1, x2, y2]), det_kps, conf))
 
             # Build display + raw name based on current status/tier
             raw_name, display_name, is_known, sim, tier, uuid = self._build_display(
@@ -843,8 +863,10 @@ class FaceTracker:
         crops: List[np.ndarray] = []
         crop_track_ids: List[int] = []
         crop_bboxes: List[np.ndarray] = []
+        crop_kpss: List[Optional[np.ndarray]] = []
+        crop_confs: List[float] = []
 
-        for track_id, bbox, kps in need_recog:
+        for track_id, bbox, kps, conf in need_recog:
             try:
                 x1, y1, x2, y2 = bbox
                 if kps is not None:
@@ -857,6 +879,8 @@ class FaceTracker:
                 crops.append(crop)
                 crop_track_ids.append(track_id)
                 crop_bboxes.append(bbox)
+                crop_kpss.append(kps)
+                crop_confs.append(conf)
             except Exception:
                 continue
 
@@ -960,6 +984,8 @@ class FaceTracker:
                 feats[idx],
                 tuple(crop_bboxes[idx]),
                 tier,
+                crop_kpss[idx],
+                crop_confs[idx],
             )
 
             # Notify refresh manager on confident identifications. Refresh
@@ -999,6 +1025,8 @@ class FaceTracker:
         embedding: np.ndarray,
         bbox: Tuple[int, int, int, int],
         tier: str,
+        kps: Optional[np.ndarray] = None,
+        conf: float = 1.0,
     ) -> None:
         """Forward a recognition observation to the auto-enroll callback.
 
@@ -1009,7 +1037,7 @@ class FaceTracker:
         if self.on_unknown_sample is None:
             return
         try:
-            self.on_unknown_sample(track_id, crop, embedding, bbox, tier)
+            self.on_unknown_sample(track_id, crop, embedding, bbox, tier, kps, conf)
         except Exception as e:
             log.warning("on_unknown_sample callback raised: %s", e)
 
@@ -1118,6 +1146,21 @@ class FaceTracker:
         ident.unknown_since = (
             0.0 if tier == sl.TIER_CONFIDENT else (ident.unknown_since or now)
         )
+
+        # --- identity-flip detection (auto-merge trigger) ---
+        # If this same continuous track was previously CONFIDENT on a
+        # different UUID, the two UUIDs are very likely the same person whose
+        # poses got separate enrollments (frontal vs profile). Fire the flip
+        # callback so the outer layer can merge them. Only confident->confident
+        # transitions count; we reuse the tier already decided above.
+        if tier == sl.TIER_CONFIDENT and winning_uuid:
+            prev = ident.last_confident_uuid
+            if prev and prev != winning_uuid and self.on_identity_flip is not None:
+                try:
+                    self.on_identity_flip(ident.track_id, prev, winning_uuid)
+                except Exception as e:
+                    log.warning("on_identity_flip callback raised: %s", e)
+            ident.last_confident_uuid = winning_uuid
 
         log.info(
             "Track %d: %s '%s' uuid=%s (votes=%d/%d, sim=%.3f)",

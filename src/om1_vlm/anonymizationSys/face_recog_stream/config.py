@@ -1,54 +1,3 @@
-"""
-Single-source-of-truth configuration for the OM1 face recognition pipeline.
-
-All tunable parameters live here, organized by subsystem. Each parameter has:
-  - A default value (used when no CLI flag or /config override is set)
-  - A type and units
-  - A docstring explaining what it does, how it's used, and (where helpful)
-    an example or calibration guidance
-  - Where to find it at runtime (cfg key name, component constructor arg, etc.)
-
-This file is the ONLY place to look when:
-  - You need to tune a threshold and don't remember which file owns it
-  - You're debugging "why is X happening" and want to see all relevant knobs
-  - You're writing a new component and need to know what's already defined
-
-Architectural conventions
--------------------------
-1. Parameters here are GROUPED by which subsystem reads them.
-2. Many are also exposed as CLI flags in ``run.py`` (override at launch
-   time) and as hot-tunable keys in the ``cfg`` dict (settable via the
-   ``/config`` HTTP endpoint while the system is running).
-3. The ``DEFAULTS`` dict at the bottom is what gets seeded into the runtime
-   ``cfg`` dict at startup. Add new entries there to make them /config-tunable.
-
-How values flow at runtime
---------------------------
-Startup:
-    1. argparse reads CLI flags (--sim-thr=0.55 etc); defaults from this file.
-    2. Components are constructed with those values.
-    3. The DEFAULTS dict gets copied into the runtime ``cfg`` dict.
-
-Per-frame:
-    4. Main loop snapshots ``cfg`` under ``cfg_lock``.
-    5. Hot-tunable params (``sim_thr``, ``strict_margin``, ``loose_margin``,
-       blur mode etc.) are pushed into the relevant component via
-       ``face_tracker.set_thresholds(...)`` and similar.
-    6. Sticky params (auto-enroll thresholds, recog_interval) are NOT
-       re-read each frame — captured at component construction time.
-       Restart needed to change them.
-
-Via HTTP:
-    7. POST /config with {"set": {"sim_thr": 0.5}} updates the cfg dict
-       under cfg_lock. The next frame's snapshot picks up the new value.
-
-To find a parameter
--------------------
-Press Ctrl-F here for the parameter name. Each entry tells you the cfg
-key (if any), which file uses it, whether it's hot-tunable, and how to
-think about its value.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -302,6 +251,14 @@ AUTO_ENROLL_STALE_TRACK_SEC = 5.0
 #   survive the gap between finalize→unknown and re-identify resuming
 #   observations. 5.0 > 1.0, safe.
 
+# Dedicated auto-enroll quality gates (independent of the /selfie gates).
+# A face must clear BOTH before auto-enroll will buffer/commit it, so only
+# clear, frontal faces enter the gallery. These do NOT affect detection/
+# tracking/recognition (the global DETECTION_CONFIDENCE stays low so the
+# robot still SEES profiles/far faces) — they only gate enrollment.
+AUTO_ENROLL_MIN_CONF = 0.65  # min detector confidence to auto-enroll
+AUTO_ENROLL_MIN_FRONTALITY = 0.6  # min frontality (0=off .. 1=dead-on) to auto-enroll
+
 AUTO_ENROLL_MERGE_THR = 0.50
 # Cosine sim threshold for merging an auto-enroll buffer into an existing
 # UUID instead of creating a new one. Solves the 'known person in bad lighting'
@@ -511,7 +468,7 @@ SELFIE_MIN_FACE_PX = 30
 # - cfg key: "selfie_min_face_px"
 # - Hot-tunable: YES
 
-SELFIE_MIN_CONF = 0.4
+SELFIE_MIN_CONF = 0.65
 # Selfie per-frame quality gate: detector confidence.
 # - cfg key: "selfie_min_conf"
 # - Hot-tunable: YES

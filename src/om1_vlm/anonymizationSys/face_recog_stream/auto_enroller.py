@@ -48,6 +48,8 @@ from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from . import selfie_logic as sl
+
 log = logging.getLogger(__name__)
 
 
@@ -197,6 +199,8 @@ class AutoEnroller:
         merge_thr: float = 0.50,
         source_tag: str = "auto_enroll",
         on_committed: Optional[Callable[[str, int, int], None]] = None,
+        min_conf: float = 0.0,
+        min_frontality: float = 0.0,
     ):
         self.gallery = gallery
         self.n_required = int(n_samples_required)
@@ -208,6 +212,10 @@ class AutoEnroller:
         self.merge_thr = float(merge_thr)
         self.source_tag = str(source_tag)
         self.on_committed = on_committed
+        # Dedicated auto-enroll quality gates, independent of the /selfie
+        # thresholds. 0.0 = gate disabled.
+        self.min_conf = float(min_conf)
+        self.min_frontality = float(min_frontality)
 
         # track_id → buffer
         self._buffers: Dict[int, _TrackBuffer] = {}
@@ -228,6 +236,8 @@ class AutoEnroller:
         embedding: np.ndarray,
         bbox: Tuple[int, int, int, int],
         tier: str,
+        kps: Optional[np.ndarray] = None,
+        conf: float = 1.0,
     ) -> Optional[str]:
         """Feed one frame's recognition result for one track.
 
@@ -269,6 +279,17 @@ class AutoEnroller:
         x1, y1, x2, y2 = bbox
         if min(x2 - x1, y2 - y1) < self.min_face_pixels:
             return None
+
+        # Dedicated auto-enroll quality gate (independent of /selfie): require
+        # a confident, frontal detection before buffering, so only clean
+        # frontal faces enter the gallery. Does NOT affect what the robot can
+        # SEE/track — the global DETECTION_CONFIDENCE stays low; this only
+        # gates enrollment. 0.0 thresholds = gate off.
+        if self.min_conf > 0.0 and conf < self.min_conf:
+            return None
+        if self.min_frontality > 0.0 and kps is not None:
+            if sl.frontality(kps) < self.min_frontality:
+                return None
 
         # Get or create buffer
         buf = self._buffers.get(track_id)

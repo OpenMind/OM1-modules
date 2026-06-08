@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Real-time face anonymization + recognition + RTSP + HTTP control.
 
@@ -679,6 +678,58 @@ def main() -> None:
                 gal_state.gal_labels = labels
                 gal_state.gal_uuids = uuids
 
+        # Auto-merge on identity flip (vision side only — gallery + tracker
+        # state; memory is intentionally NOT remapped). When one continuous
+        # track flips from one CONFIDENT uuid to another, the two are very
+        # likely the same person (frontal vs profile). Policy: never merge two
+        # NAMED identities; otherwise merge the unknown into the named, or
+        # (both unknown) keep the larger/older and drop the other. Runs on the
+        # recognition thread, same as auto-enroll commits; merge_into soft-
+        # deletes the loser to _trash (undoable), and _refresh_gal_state +
+        # the per-frame set_gallery reconcile the tracker (drop loser row,
+        # re-recognize its tracks onto the survivor).
+        def _is_named(rec) -> bool:
+            n = getattr(rec, "name", "") or ""
+            return bool(n) and not n.lower().startswith("anon")
+
+        def _on_identity_flip(track_id: int, old_uuid: str, new_uuid: str) -> None:
+            try:
+                old_rec = gallery.get_record(old_uuid)
+                new_rec = gallery.get_record(new_uuid)
+                if old_rec is None or new_rec is None:
+                    return  # one already merged/deleted — idempotent no-op
+                old_named = _is_named(old_rec)
+                new_named = _is_named(new_rec)
+                if old_named and new_named:
+                    logger.info(
+                        "identity flip %s<->%s: both named, NOT merging",
+                        old_uuid[:8],
+                        new_uuid[:8],
+                    )
+                    return
+                if old_named:  # unknown(new) -> known(old)
+                    survivor, loser = old_uuid, new_uuid
+                elif new_named:  # unknown(old) -> known(new)
+                    survivor, loser = new_uuid, old_uuid
+                else:  # both unknown: keep larger/older
+                    if getattr(new_rec, "sample_count", 0) > getattr(
+                        old_rec, "sample_count", 0
+                    ):
+                        survivor, loser = new_uuid, old_uuid
+                    else:
+                        survivor, loser = old_uuid, new_uuid
+                merged = gallery.merge_into(loser, survivor)  # source -> target
+                logger.info(
+                    "identity flip: merged %s into %s (%d samples) [track %d]",
+                    loser[:8],
+                    survivor[:8],
+                    merged,
+                    track_id,
+                )
+                _refresh_gal_state()
+            except Exception as e:
+                logger.warning("identity-flip merge failed: %s", e)
+
         # Auto-enroller fires the refresh callback on commit so face_tracker's
         # gallery snapshot picks up the new identity within one frame.
         auto_enroller = AutoEnroller(
@@ -690,6 +741,8 @@ def main() -> None:
             min_face_pixels=int(args.auto_enroll_min_face_px),
             merge_thr=float(args.auto_enroll_merge_thr),
             on_committed=lambda u, t, n: _refresh_gal_state(),
+            min_conf=float(config.AUTO_ENROLL_MIN_CONF),
+            min_frontality=float(config.AUTO_ENROLL_MIN_FRONTALITY),
         )
         logger.info(
             "AutoEnroller initialized (N=%d, tightness=%.2f, min_unknown=%.1fs, merge_thr=%.2f)",
@@ -704,6 +757,8 @@ def main() -> None:
             # Wire face_tracker's per-track recognition stream into the
             # auto-enroller. Fires once per track per recognition pass.
             face_tracker.on_unknown_sample = auto_enroller.observe
+            # Auto-merge fragmented identities when a track flips confident UUID.
+            face_tracker.on_identity_flip = _on_identity_flip
 
             # Continuous sample refresh: on every confident per-frame
             # match, the refresh manager decides (via 3 guards) whether
