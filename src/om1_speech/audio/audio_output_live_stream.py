@@ -12,6 +12,7 @@ import openai
 import zenoh
 
 from om1_speech.prometheus import om1_tts_latency, om1_tts_latency_last
+from om1_utils import get_httpx_client
 from zenoh_msgs import AudioStatus, String, open_zenoh_session, prepare_header
 
 root_package_name = __name__.split(".")[0] if "." in __name__ else __name__
@@ -70,6 +71,7 @@ class AudioOutputLiveStream:
         self.openai_client = openai.OpenAI(
             base_url=self._url,
             api_key=self._api_key or "no-need-api-key",
+            http_client=get_httpx_client(),
         )
 
         # Callback for TTS state

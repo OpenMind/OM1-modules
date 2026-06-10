@@ -189,8 +189,6 @@ class RTSPVideoStreamWriter:
             "bgr24",
             "-s",
             f"{self.width}x{self.height}",
-            "-r",
-            f"{self.current_fps:.3f}",
             "-use_wallclock_as_timestamps",
             "1",
             "-thread_queue_size",

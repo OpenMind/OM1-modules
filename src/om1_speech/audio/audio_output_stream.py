@@ -58,6 +58,9 @@ class AudioOutputStream:
         # Callback for TTS state
         self._tts_state_callback = tts_state_callback
 
+        # HTTP session
+        self._session = requests.Session()
+
         # Zenoh
         self.topic = "robot/status/audio"
         self.session = None
@@ -166,7 +169,7 @@ class AudioOutputStream:
             try:
                 start_time = time.time()
                 tts_request = self._pending_requests.get()
-                response = requests.post(
+                response = self._session.post(
                     self._url,
                     data=json.dumps(tts_request),
                     headers=self._headers,
@@ -380,6 +383,9 @@ class AudioOutputStream:
         Stop the audio output stream and cleanup resources.
         """
         self.running = False
+
+        if self._session:
+            self._session.close()
 
         if self.session:
             self.session.close()
