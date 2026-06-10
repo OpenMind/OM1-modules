@@ -1,6 +1,7 @@
 import base64
 import json
 import queue
+import struct
 import threading
 from unittest.mock import MagicMock, Mock, patch
 
@@ -146,7 +147,7 @@ def test_generator(audio_stream):
     audio_stream._buff.put(None)
 
     assert len(collected_chunks) > 0
-    assert all(isinstance(data, dict) for data in collected_chunks)
+    assert all(isinstance(data, bytes) for data in collected_chunks)
 
 
 def test_stop(audio_stream, mock_pyaudio):
@@ -182,16 +183,17 @@ def test_audio_callback(mock_pyaudio):
         # Process one chunk through generator
         next(stream.generator())
 
-    # Verify callback was called with correct data
-    assert callback_data == json.dumps(
-        {
-            "audio": base64.b64encode(test_data).decode("utf-8"),
-            "rate": 16000,
-            "language_code": "en-US",
-            "alternative_language_codes": [],
-            "timestamp": fixed_time,
-        }
-    )
+    # Verify callback was called with binary header format
+    assert isinstance(callback_data, bytes)
+    header_len = struct.unpack(">I", callback_data[:4])[0]
+    header = json.loads(callback_data[4 : 4 + header_len])
+    audio = callback_data[4 + header_len :]
+
+    assert header["rate"] == 16000
+    assert header["language_code"] == "en-US"
+    assert header["alternative_language_codes"] == []
+    assert header["timestamp"] == int(fixed_time * 1000)
+    assert audio == test_data
 
     stream.stop()
 
@@ -258,10 +260,15 @@ def test_generator_with_alternative_languages(mock_pyaudio):
 
     generated = next(stream.generator())
 
-    assert generated["language_code"] == "en-GB"
-    assert generated["alternative_language_codes"] == alt_langs
-    assert generated["audio"] == base64.b64encode(test_data).decode("utf-8")
-    assert generated["rate"] == 16000
+    assert isinstance(generated, bytes)
+    header_len = struct.unpack(">I", generated[:4])[0]
+    header = json.loads(generated[4 : 4 + header_len])
+    audio = generated[4 + header_len :]
+
+    assert header["language_code"] == "en-GB"
+    assert header["alternative_language_codes"] == alt_langs
+    assert header["rate"] == 16000
+    assert audio == test_data
 
     stream.stop()
 
@@ -318,15 +325,15 @@ def test_audio_callback_with_alternative_languages(mock_pyaudio):
 
         next(stream.generator())
 
-    expected_data = json.dumps(
-        {
-            "audio": base64.b64encode(test_data).decode("utf-8"),
-            "rate": 16000,
-            "language_code": "es-MX",
-            "alternative_language_codes": alt_langs,
-            "timestamp": fixed_time,
-        }
-    )
-    assert callback_data == expected_data
+    assert isinstance(callback_data, bytes)
+    header_len = struct.unpack(">I", callback_data[:4])[0]
+    header = json.loads(callback_data[4 : 4 + header_len])
+    audio = callback_data[4 + header_len :]
+
+    assert header["rate"] == 16000
+    assert header["language_code"] == "es-MX"
+    assert header["alternative_language_codes"] == alt_langs
+    assert header["timestamp"] == int(fixed_time * 1000)
+    assert audio == test_data
 
     stream.stop()

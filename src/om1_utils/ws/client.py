@@ -141,6 +141,12 @@ class Client:
         if self.connected:
             self.message_queue.put(message)
 
+        qsize = self.message_queue.qsize()
+        if qsize > 20:
+            logger.warning(
+                f"Message queue size is {qsize}, which may indicate a backlog"
+            )
+
     def _run_client(self):
         """
         Internal method to manage the WebSocket client lifecycle.
