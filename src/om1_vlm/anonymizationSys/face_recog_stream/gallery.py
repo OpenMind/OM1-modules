@@ -764,8 +764,7 @@ class UUIDGallery:
 
         # Normalize embeddings input
         emb_list: List[Optional[np.ndarray]] = (
-            list(embeddings) if embeddings is not None
-            else [None] * len(aligned_list)
+            list(embeddings) if embeddings is not None else [None] * len(aligned_list)
         )
         if len(emb_list) != len(aligned_list):
             raise ValueError("embeddings/aligned_list length mismatch")
