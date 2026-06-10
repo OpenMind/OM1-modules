@@ -637,6 +637,7 @@ def main() -> None:
     auto_enroller: Optional[AutoEnroller] = None
 
     if args.recognition:
+        assert arc is not None
         gallery = UUIDGallery(  # type: ignore[arg-type]
             args.gallery_dir,
             arc=arc,
@@ -1141,7 +1142,7 @@ def main() -> None:
             # raw_names already contains plain identity labels (no score suffix)
             # straight from TrackResult.raw_name. Convert None → "unknown" for
             # consumers that expect string entries (fall match, who tracker).
-            names_for_tracking: List[str] = [
+            names_for_tracking: List[Optional[str]] = [
                 (n if n is not None else "unknown") for n in raw_names
             ]
             # tiers parallel-aligned with names_for_tracking. None entries mean

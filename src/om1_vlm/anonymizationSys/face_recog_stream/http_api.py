@@ -132,7 +132,7 @@ class HttpAPI:
         gallery_dir: str,
         gal_state,
         gal_lock: threading.Lock,
-        cfg: Dict[str, object],
+        cfg: Dict[str, Any],
         cfg_lock: threading.Lock,
         frame_state,
         frame_lock: threading.Lock,
@@ -803,6 +803,7 @@ class HttpAPI:
                 # Consistency + novelty against running_mean. running_mean
                 # is guaranteed non-None here because we set it in the
                 # previous iteration before bumping `resolved`.
+                assert running_mean is not None
                 sim = sl.cosine_to_mean(running_mean, v)
                 if sim < consist_thr:
                     _bump("consistency_fail")

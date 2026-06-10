@@ -224,7 +224,7 @@ class FaceTracker:
         det_conf: float = 0.5,
         re_identify_interval: float = 3.0,
         on_unknown_sample: Optional[
-            "Callable[[int, np.ndarray, np.ndarray, Tuple[int,int,int,int], str], None]"
+            "Callable[[int, np.ndarray, np.ndarray, Tuple[int,int,int,int], str, Optional[np.ndarray], float], Optional[str]]"
         ] = None,
         on_confident_sample: Optional[
             "Callable[[int, str, np.ndarray, np.ndarray, float], None]"
@@ -254,7 +254,9 @@ class FaceTracker:
         # UUID to a different one. Signature: (track_id, old_uuid, new_uuid).
         # Set as a plain attribute (like on_unknown_sample) by run.py, wired to
         # the auto-merge handler. None = feature off.
-        self.on_identity_flip = None
+        self.on_identity_flip: Optional[
+            Callable[[int, str, str], None]
+        ] = None
 
         # Gallery (set via set_gallery). All three arrays are parallel —
         # row i of _gal_feats has name _gal_labels[i] and UUID _gal_uuids[i].
@@ -854,7 +856,7 @@ class FaceTracker:
     def _run_recognition_batch(
         self,
         frame: np.ndarray,
-        need_recog: List[Tuple[int, np.ndarray, Optional[np.ndarray]]],
+        need_recog: List[Tuple[int, np.ndarray, Optional[np.ndarray], float]],
         now: float,
     ) -> None:
         """Embed unidentified tracks in one TRT call and update their votes."""

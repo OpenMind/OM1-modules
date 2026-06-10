@@ -315,7 +315,7 @@ class UUIDGallery:
         if osp.exists(centroid_path):
             try:
                 centroid_sum = np.load(centroid_path).astype(np.float32)
-                if centroid_sum.shape != (self._dim,):
+                if centroid_sum is not None and centroid_sum.shape != (self._dim,):
                     log.warning(
                         "UUID %s centroid shape %s, expected (%d,)",
                         uuid,
@@ -763,9 +763,11 @@ class UUIDGallery:
             return []
 
         # Normalize embeddings input
-        if embeddings is None:
-            embeddings = [None] * len(aligned_list)
-        if len(embeddings) != len(aligned_list):
+        emb_list: List[Optional[np.ndarray]] = (
+            list(embeddings) if embeddings is not None
+            else [None] * len(aligned_list)
+        )
+        if len(emb_list) != len(aligned_list):
             raise ValueError("embeddings/aligned_list length mismatch")
 
         uuid_dir = osp.join(self.gallery_dir, uuid)
@@ -773,20 +775,20 @@ class UUIDGallery:
         _ensure_dir(aligned_dir)
 
         # Embed any missing vectors in a single batch
-        to_embed_idx = [i for i, e in enumerate(embeddings) if e is None]
+        to_embed_idx = [i for i, e in enumerate(emb_list) if e is None]
         if to_embed_idx:
             crops_to_embed = [aligned_list[i] for i in to_embed_idx]
             vecs = self.arc.infer(crops_to_embed)
             for k, i in enumerate(to_embed_idx):
-                embeddings[i] = _l2_normalize(vecs[k])
+                emb_list[i] = _l2_normalize(vecs[k])
 
         # Validate / normalize provided embeddings
         clean_embs: List[np.ndarray] = []
-        for e in embeddings:
-            e = np.asarray(e, dtype=np.float32).reshape(-1)
-            if e.shape[0] != self._dim:
-                raise ValueError(f"embedding shape {e.shape}, expected ({self._dim},)")
-            clean_embs.append(_l2_normalize(e))
+        for e in emb_list:
+            v = np.asarray(e, dtype=np.float32).reshape(-1)
+            if v.shape[0] != self._dim:
+                raise ValueError(f"embedding shape {v.shape}, expected ({self._dim},)")
+            clean_embs.append(_l2_normalize(v))
 
         # Write all crops
         saved: List[str] = []
