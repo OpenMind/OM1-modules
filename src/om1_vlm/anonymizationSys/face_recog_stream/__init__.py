@@ -10,6 +10,7 @@ __all__ = [
     "scrfd",
     "gallery",
     "io",
+    "selfie_logic",
     "http_api",
     "who_tracker",
     "yolo_pose",

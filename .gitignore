@@ -10,3 +10,4 @@ __pycache__
 *.engine
 *.onnx
 venv/
+.venv/
