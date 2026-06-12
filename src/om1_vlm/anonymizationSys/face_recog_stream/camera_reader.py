@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 from typing import Optional
 
 import cv2
@@ -78,6 +79,31 @@ class CameraReader:
             self.cap.set(cv2.CAP_PROP_FPS, fps)
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+
+            try:
+                subprocess.run(
+                    [
+                        "v4l2-ctl",
+                        "-d",
+                        device,
+                        "--set-ctrl=exposure_dynamic_framerate=1",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                logging.info("Enabled exposure_dynamic_framerate on %s", device)
+            except FileNotFoundError:
+                logging.warning(
+                    "v4l2-ctl not found; install v4l-utils to enable "
+                    "exposure_dynamic_framerate"
+                )
+            except subprocess.CalledProcessError as e:
+                logging.warning(
+                    "Failed to set exposure_dynamic_framerate on %s: %s",
+                    device,
+                    (e.stderr or e.stdout or "").strip(),
+                )
 
             if not self.cap or not self.cap.isOpened():
                 raise RuntimeError(f"Failed to open camera device {device}")
