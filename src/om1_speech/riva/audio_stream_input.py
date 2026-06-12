@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import struct
 from queue import Empty, Queue
 from typing import Any, Dict, Optional
 
@@ -40,12 +41,9 @@ class AudioStreamInput(AudioStreamInputInterface):
             expected to be binary audio data
         """
         try:
-            # Verify we received binary data
             if isinstance(message, bytes):
-                logging.error("Legacy audio stream input. Set rate to 1600.")
-                self.audio_queue.put(
-                    {"audio": base64.b64encode(message).decode("utf-8"), "rate": 16000}
-                )
+                audio, rate = self._parse_binary(message)
+                self.audio_queue.put({"audio": audio, "rate": rate})
             if isinstance(message, str):
                 try:
                     message = json.loads(message)
@@ -100,3 +98,21 @@ class AudioStreamInput(AudioStreamInputInterface):
         Sets the running flag to False to stop processing.
         """
         self.running = False
+
+    @staticmethod
+    def _parse_binary(data: bytes):
+        """Parse binary format of ASR.
+
+        Falls back to raw PCM at 16 kHz if the header is invalid.
+        """
+        if len(data) > 4:
+            header_len = struct.unpack(">I", data[:4])[0]
+            if 4 + header_len < len(data):
+                try:
+                    header = json.loads(data[4 : 4 + header_len])
+                    pcm = data[4 + header_len :]
+                    rate = header.get("rate", 16000)
+                    return base64.b64encode(pcm).decode("utf-8"), rate
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+        return base64.b64encode(data).decode("utf-8"), 16000
