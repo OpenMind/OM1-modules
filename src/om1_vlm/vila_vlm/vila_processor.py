@@ -211,7 +211,7 @@ class VILAProcessor:
             with self.model_lock:
                 # Set the current CUDA stream
                 if self.cuda_stream:
-                    with torch.cuda.stream(self.cuda_stream):
+                    with torch.cuda.stream(self.cuda_stream):  # type: ignore
                         # Add explicit CUDA synchronization before processing
                         if torch.cuda.is_available():
                             torch.cuda.synchronize()
