@@ -110,7 +110,7 @@ class TRTModule:
 
         Use ``tensor.data_ptr()`` to get the raw pointer for TRT.
         """
-        with torch.cuda.stream(self._torch_stream):
+        with torch.cuda.stream(self._torch_stream):  # type: ignore
             return torch.from_numpy(host_np).cuda(non_blocking=True)
 
     def _empty_gpu(self, shape, dtype=torch.float32) -> torch.Tensor:
