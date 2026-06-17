@@ -261,12 +261,12 @@ def main() -> None:
     logger.info("Starting realtime_stream...")
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    models_dir = os.path.join(script_dir, "..", "engine")
+    models_dir = os.path.join(script_dir, "..", "engines")
 
     platform_prefix = get_platform_prefix()
     scrfd_name = f"{platform_prefix}_scrfd_10g.engine"
     arc_name = f"{platform_prefix}_adaface_ir101.engine"
-    pose_name = "yolo11s-pose.engine"
+    pose_name = f"{platform_prefix}_yolo11s-pose.engine"
 
     default_scrfd_engine = os.path.join(models_dir, scrfd_name)
     default_arc_engine = os.path.join(models_dir, arc_name)
