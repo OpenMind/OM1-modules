@@ -27,6 +27,13 @@ class FallInfo:
 
     identity: Optional[str]  # Matched face name or None
     is_fallen: bool
+    bbox: Tuple[float, float, float, float] = (
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )  # x1, y1, x2, y2 (pose bbox = full body)
+    confidence: float = 0.0  # Fall detection confidence (0-1)
 
 
 def _expand_bbox(bbox, margin: float):
@@ -113,6 +120,8 @@ def match_falls_to_faces(
             FallInfo(
                 identity=matched_identity,
                 is_fallen=status.is_fallen,
+                bbox=tuple(float(x) for x in status.bbox),
+                confidence=float(status.confidence),
             )
         )
 
@@ -312,9 +321,18 @@ class WhoTracker:
 
         # ----- Fall detection (unchanged) -----
         fallen_now: List[str] = []
+        fallen_now_details: List[Dict] = (
+            []
+        )  # name + bbox + confidence per fallen person
         fallen_unknown_now = 0
         for fall in now_falls:
             if fall.is_fallen:
+                detail = {
+                    "name": fall.identity if fall.identity else "unknown",
+                    "bbox": list(fall.bbox),
+                    "confidence": float(fall.confidence),
+                }
+                fallen_now_details.append(detail)
                 if fall.identity and fall.identity != "unknown":
                     if fall.identity not in fallen_now:
                         fallen_now.append(fall.identity)
@@ -360,6 +378,7 @@ class WhoTracker:
             "unknown_recent": int(unknown_recent_peak),
             # Fall detection (unchanged)
             "fallen_now": fallen_now,
+            "fallen_now_details": fallen_now_details,
             "fallen_now_count": len(fallen_now) + fallen_unknown_now,
             "fallen_unknown_now": fallen_unknown_now,
             "fallen_recent": fallen_recent,
