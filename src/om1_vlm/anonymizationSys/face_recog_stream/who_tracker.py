@@ -120,7 +120,7 @@ def match_falls_to_faces(
             FallInfo(
                 identity=matched_identity,
                 is_fallen=status.is_fallen,
-                bbox=tuple(float(x) for x in status.bbox),
+                bbox=tuple(float(x) for x in status.bbox),  # type: ignore
                 confidence=float(status.confidence),
             )
         )
