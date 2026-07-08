@@ -88,14 +88,33 @@ class CameraReader:
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             self.cap.set(cv2.CAP_PROP_FPS, fps)
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            # 3 = aperture-priority AUTO exposure -> keep it, it adapts to sun.
             self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
-
-            self._apply_exposure_controls(device)
-
+            try:
+                subprocess.run(
+                    [
+                        "v4l2-ctl",
+                        "-d",
+                        device,
+                        "--set-ctrl=exposure_dynamic_framerate=1",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                logging.info("Enabled exposure_dynamic_framerate on %s", device)
+            except FileNotFoundError:
+                logging.warning(
+                    "v4l2-ctl not found; install v4l-utils to enable "
+                    "exposure_dynamic_framerate"
+                )
+            except subprocess.CalledProcessError as e:
+                logging.warning(
+                    "Failed to set exposure_dynamic_framerate on %s: %s",
+                    device,
+                    (e.stderr or e.stdout or "").strip(),
+                )
             if not self.cap or not self.cap.isOpened():
                 raise RuntimeError(f"Failed to open camera device {device}")
-
             actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             actual_fps = float(self.cap.get(cv2.CAP_PROP_FPS)) or float(fps)
@@ -107,34 +126,9 @@ class CameraReader:
                 actual_fps,
             )
             self.width, self.height, self.fps = actual_width, actual_height, actual_fps
-
         except Exception as e:
             logging.error("Error opening camera %s: %s", device, e)
             self.cap = None
-
-    def _apply_exposure_controls(self, device: str) -> None:
-        """Enable dynamic-framerate exposure."""
-
-        def _v4l2(ctrl):
-            try:
-                subprocess.run(
-                    ["v4l2-ctl", "-d", device, f"--set-ctrl={ctrl}"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                logging.info("v4l2 set %s on %s", ctrl, device)
-            except FileNotFoundError:
-                logging.warning("v4l2-ctl not found; install v4l-utils")
-            except subprocess.CalledProcessError as e:
-                logging.warning(
-                    "Failed to set %s on %s: %s",
-                    ctrl,
-                    device,
-                    (e.stderr or e.stdout or "").strip(),
-                )
-
-        _v4l2("exposure_dynamic_framerate=1")  # over-exposure fix (Jerin)
 
     def _grab_loop(self):
         """Continuously read the newest frame; keep only the latest."""
@@ -189,7 +183,7 @@ class CameraReader:
         """
         if self.threaded:
             with self._latest_lock:
-                return self._latest
+                return None if self._latest is None else self._latest.copy()
 
         if not self.is_opened():
             logging.warning("Camera is not opened. Reopening...")
