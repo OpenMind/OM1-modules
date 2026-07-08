@@ -151,6 +151,16 @@ class HttpAPI:
         self.cfg_lock = cfg_lock
         self.frame_state = frame_state
         self.frame_lock = frame_lock
+        # Vision-only speaking scorer (set by run.py). None/shadow => existing
+        # largest/most-engaged selection is used for enrollment.
+        self.vvad = None
+        self.vvad_shadow = True
+        # Speaker chosen by the most recent /speaking call (over the ASR
+        # utterance window). Consumed by /selfie so enrollment binds to the
+        # person who actually spoke, not the largest face. Deterministic —
+        # the LLM never picks the face.
+        self._speaking_latch = None  # {track_id, uuid, name, bbox, ts}
+        self.speaking_latch_ttl = 5.0  # seconds a latch stays valid
         self.run_job_sync = run_job_sync
         self.log = logger or logging.getLogger("http_api")
         self.server = None
@@ -202,6 +212,10 @@ class HttpAPI:
             # Presence
             if path == "/who":
                 return self._handle_who(payload)
+
+            # Who is speaking (over an ASR utterance window)
+            if path == "/speaking":
+                return self._handle_speaking(payload)
 
             # Config
             if path == "/config":
@@ -693,6 +707,11 @@ class HttpAPI:
         resolved = False
         last_seen_token = -1
 
+        # Resolve who is speaking ONCE up front. Prefers the speaker latched by
+        # a recent /speaking call (the real utterance window); else resolves now.
+        # None => keep the existing largest/most-engaged selection (fallback).
+        speaking_bbox = self._speaking_bbox_for_selfie()
+
         while len(crops) < max_samples and time.monotonic() < deadline:
             # Snapshot clean frame under lock
             with self.frame_lock:
@@ -731,6 +750,17 @@ class HttpAPI:
             for d_idx in range(dets.shape[0]):
                 k = kpss[d_idx] if kpss is not None and d_idx < len(kpss) else None
                 scores.append(sl.score_face(dets[d_idx], k, float(H * W)))
+            # Bias selection toward the speaking face (if any). The bonus makes
+            # argmax pick it; when speaking_bbox is None nothing changes (the
+            # existing largest/most-engaged fallback).
+            if speaking_bbox is not None:
+                bi, best_iou = -1, 0.0
+                for d_idx in range(dets.shape[0]):
+                    iou = self._iou(dets[d_idx][:4], speaking_bbox)
+                    if iou > best_iou:
+                        bi, best_iou = d_idx, iou
+                if bi >= 0 and best_iou > 0.2:
+                    scores[bi] += 1e6
             top_idx = int(np.argmax(scores))
             top_score = scores[top_idx]
             if top_score < score_floor:
@@ -1551,6 +1581,199 @@ class HttpAPI:
             "uuid": uuid,
             "matches": candidates,
         }
+
+    # /speaking — vision-only "who is speaking" (VVAD)
+    @staticmethod
+    def _iou(a, b) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1, it1 = max(ax1, bx1), max(ay1, by1)
+        ix2, it2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0.0, ix2 - ix1), max(0.0, it2 - it1)
+        inter = iw * ih
+        ua = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+        return float(inter / ua) if ua > 0 else 0.0
+
+    def _handle_speaking(self, payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Resolve who was speaking over an utterance window (DETERMINISTIC).
+
+        payload (all optional):
+          win_start_ms, win_end_ms : epoch-ms span of the utterance (preferred,
+                                     sent by the ASR side). Scored via slide+max.
+          lookback_sec             : if no window given, score the most-recent
+                                     N seconds instead (default 4.0).
+
+        Rule (in code, never the LLM): among faces whose VVAD score over the
+        window is >= threshold, the speaker is the LARGEST bbox. The chosen
+        speaker is LATCHED so the next /selfie binds to that exact face.
+
+        Returns {speaker: {track_id,name,uuid,score}|None, faces:[...], shadow}.
+        """
+        if self.vvad is None:
+            return {"error": "vvad_disabled"}
+        payload = payload or {}
+        with self.frame_lock:
+            faces = list(self.frame_state.current_faces)
+        if not faces:
+            return {"speaker": None, "faces": []}
+        faces.sort(key=lambda f: f.get("area", 0), reverse=True)  # largest first
+        tids = [int(f["track_id"]) for f in faces]
+
+        ws, we = payload.get("win_start_ms"), payload.get("win_end_ms")
+        if ws is not None and we is not None:
+            scores = self.vvad.resolve_window(
+                tids, float(ws) / 1000.0, float(we) / 1000.0
+            )
+            mode = "window"
+        else:
+            lookback = float(payload.get("lookback_sec", 4.0))
+            now = time.time()
+            scores = self.vvad.resolve_window(tids, now - lookback, now)
+            mode = "lookback"
+
+        thr = self.vvad.speaking_thr
+        speaking = [f for f in faces if scores.get(int(f["track_id"]), 0.0) >= thr]
+        chosen = speaking[0] if speaking else None  # largest among speakers
+
+        # on-screen badge: chosen = green, other speakers = amber
+        try:
+            from . import vvad_overlay
+
+            vvad_overlay.flag(
+                [
+                    (
+                        tuple(f["bbox"]),
+                        scores.get(int(f["track_id"]), 0.0) >= thr,
+                        scores.get(int(f["track_id"]), 0.0),
+                    )
+                    for f in faces
+                ],
+                ttl=1.6,
+            )
+        except Exception:
+            pass
+
+        # latch the chosen speaker for the upcoming /selfie
+        if chosen is not None:
+            self._speaking_latch = {
+                "track_id": int(chosen["track_id"]),
+                "uuid": chosen.get("uuid"),
+                "name": chosen.get("name") or "",
+                "bbox": tuple(chosen["bbox"]),
+                "score": round(scores.get(int(chosen["track_id"]), 0.0), 3),
+                "ts": time.time(),
+            }
+
+        logger.info(
+            "VVAD /speaking (%s): scores=%s speaking=%s chosen=%s",
+            mode,
+            {k: round(v, 3) for k, v in scores.items()},
+            [f["track_id"] for f in speaking],
+            chosen["track_id"] if chosen else None,
+        )
+
+        def _face_out(f):
+            sc = scores.get(int(f["track_id"]), 0.0)
+            return {
+                "track_id": int(f["track_id"]),
+                "name": f.get("name") or "",
+                "uuid": f.get("uuid"),
+                "score": round(sc, 3),
+                "speaking": sc >= thr,
+                "area": f.get("area", 0),
+            }
+
+        speaker = None
+        if chosen is not None:
+            speaker = {
+                "track_id": int(chosen["track_id"]),
+                "name": chosen.get("name") or "",
+                "uuid": chosen.get("uuid"),
+                "score": round(scores.get(int(chosen["track_id"]), 0.0), 3),
+            }
+        return {
+            "speaker": speaker,
+            "faces": [_face_out(f) for f in faces],
+            "shadow": self.vvad_shadow,
+        }
+
+    def _speaking_bbox_for_selfie(self):
+        """Speaking bbox to bias /selfie toward, or None (=> largest face).
+
+        Prefers the speaker LATCHED by a recent /speaking call (bound to the
+        real utterance window — the correct moment). Falls back to resolving
+        'now', then to None (largest face). Shadow mode never biases enroll,
+        but still draws badges.
+        """
+        if self.vvad is None or self.vvad_shadow:
+            self._resolve_speaking_bbox()  # badges only
+            return None
+        latch = self._speaking_latch
+        if latch is not None and (time.time() - latch["ts"]) <= self.speaking_latch_ttl:
+            with self.frame_lock:
+                faces = list(self.frame_state.current_faces)
+            for f in faces:  # only trust it if still visible
+                if int(f["track_id"]) == latch["track_id"]:
+                    try:
+                        from . import vvad_overlay
+
+                        vvad_overlay.flag(
+                            [(tuple(f["bbox"]), True, latch.get("score"))], ttl=1.6
+                        )
+                    except Exception:
+                        pass
+                    return tuple(f["bbox"])  # current bbox of the latched track
+            # latched track no longer visible -> fall through
+        return self._resolve_speaking_bbox()  # resolve 'now' (also badges)
+
+    def _resolve_speaking_bbox(self):
+        """Bbox of the chosen speaking face, or None (=> caller uses largest).
+
+        Among visible faces speaking (score >= threshold) pick the LARGEST bbox;
+        if none, return None (fallback to overall largest). Also pushes a brief
+        on-screen "speaking" badge for ALL speakers (chosen = green, others =
+        amber), shown for ~1.6s — even in shadow mode.
+        """
+        if self.vvad is None:
+            return None
+        with self.frame_lock:
+            faces = list(self.frame_state.current_faces)
+        if not faces:
+            return None
+        faces.sort(key=lambda f: f.get("area", 0), reverse=True)  # largest first
+        _, scores = self.vvad.resolve_speaking([int(f["track_id"]) for f in faces])
+        thr = self.vvad.speaking_thr
+        speaking = [f for f in faces if scores.get(int(f["track_id"]), 0.0) >= thr]
+        logger.info(
+            "VVAD: scores=%s speaking=%s largest_tid=%s shadow=%s",
+            {k: round(v, 3) for k, v in scores.items()},
+            [f["track_id"] for f in speaking],
+            faces[0].get("track_id"),
+            self.vvad_shadow,
+        )
+
+        # visualization badge (largest speaker = chosen/green, others = amber)
+        try:
+            from . import vvad_overlay
+
+            chosen_tid = speaking[0]["track_id"] if speaking else None
+            vvad_overlay.flag(
+                [
+                    (
+                        tuple(f["bbox"]),
+                        f["track_id"] == chosen_tid,
+                        scores.get(int(f["track_id"]), 0.0),
+                    )
+                    for f in speaking
+                ],
+                ttl=1.6,
+            )
+        except Exception:
+            pass
+
+        if self.vvad_shadow or not speaking:
+            return None
+        return tuple(speaking[0]["bbox"])  # largest speaker
 
     # ==================================================================
     # /gallery/find_similar_current — no-UUID variant for LLM ergonomics
