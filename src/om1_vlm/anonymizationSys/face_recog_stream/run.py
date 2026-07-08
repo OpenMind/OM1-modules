@@ -262,7 +262,7 @@ def main() -> None:
     logger.info("Starting realtime_stream...")
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    engines_dir = os.path.join(script_dir, "..", "engines")
+    engines_dir = os.path.join(script_dir, "..", "engine")
     models_dir = os.path.join(script_dir, "..", "model")
 
     platform_prefix = get_platform_prefix()
@@ -557,7 +557,7 @@ def main() -> None:
         nargs="?",
         default=None,
         const=default_vvad_model,
-        help="VVAD ONNX model path; bare flag uses engines/vvad_face.onnx",
+        help="VVAD ONNX model path; bare flag uses /vvad_face.onnx",
     )
     ap.add_argument("--vvad-speaking-thr", type=float, default=0.5)
     ap.add_argument(
