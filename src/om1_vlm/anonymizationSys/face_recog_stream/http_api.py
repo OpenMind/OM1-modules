@@ -1582,7 +1582,9 @@ class HttpAPI:
             "matches": candidates,
         }
 
+    # ==================================================================
     # /speaking — vision-only "who is speaking" (VVAD)
+    # ==================================================================
     @staticmethod
     def _iou(a, b) -> float:
         ax1, ay1, ax2, ay2 = a
@@ -1752,11 +1754,15 @@ class HttpAPI:
             self.vvad_shadow,
         )
 
-        # visualization badge (largest speaker = chosen/green, others = amber)
+        # visualization badge (chosen speaker = green, others = amber)
+        chosen_tid = (
+            max(speaking, key=lambda f: scores.get(int(f["track_id"]), 0.0))["track_id"]
+            if speaking
+            else None
+        )
         try:
             from . import vvad_overlay
 
-            chosen_tid = speaking[0]["track_id"] if speaking else None
             vvad_overlay.flag(
                 [
                     (
@@ -1771,9 +1777,14 @@ class HttpAPI:
         except Exception:
             pass
 
-        if self.vvad_shadow or not speaking:
-            return None
-        return tuple(speaking[0]["bbox"])  # largest speaker
+        if self.vvad_shadow:
+            return None  # shadow mode: never bias enroll
+        if speaking:
+            # someone speaking -> the one MOST likely speaking (highest score),
+            # not merely the biggest face
+            best = max(speaking, key=lambda f: scores.get(int(f["track_id"]), 0.0))
+            return tuple(best["bbox"])
+        return tuple(faces[0]["bbox"])  # nobody speaking -> largest face
 
     # ==================================================================
     # /gallery/find_similar_current — no-UUID variant for LLM ergonomics
