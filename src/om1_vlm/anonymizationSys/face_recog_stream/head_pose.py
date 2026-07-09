@@ -78,7 +78,7 @@ def head_pose_angles(
     # SQPNP handles 3+ points (ITERATIVE needs 6); robust for the 5-kp case.
     flag = getattr(cv2, "SOLVEPNP_SQPNP", cv2.SOLVEPNP_EPNP)
     try:
-        ok, rvec, _ = cv2.solveOnP(model, img, cam, np.zeros((4, 1)), flags=flag)
+        ok, rvec, _ = cv2.solvePnP(model, img, cam, np.zeros((4, 1)), flags=flag)
     except cv2.error:
         return None
     if not ok:
