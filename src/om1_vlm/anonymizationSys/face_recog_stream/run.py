@@ -152,6 +152,7 @@ from .http_api import HttpAPI
 from .rtsp_video_writer import RTSPVideoStreamWriter
 from .sample_refresh import SampleRefreshManager
 from .scrfd import TRTSCRFD
+from .vvad_overlay import draw as draw_speaking
 from .who_tracker import WhoTracker, match_falls_to_faces
 from .yolo_pose import TRTYOLOPose
 
@@ -261,17 +262,19 @@ def main() -> None:
     logger.info("Starting realtime_stream...")
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    models_dir = os.path.join(script_dir, "..", "engines")
+    engines_dir = os.path.join(script_dir, "..", "engine")
+    models_dir = os.path.join(script_dir, "..", "model")
 
     platform_prefix = get_platform_prefix()
     scrfd_name = f"{platform_prefix}_scrfd_10g.engine"
     arc_name = f"{platform_prefix}_adaface_ir101.engine"
     pose_name = f"{platform_prefix}_yolo11s-pose.engine"
 
-    default_scrfd_engine = os.path.join(models_dir, scrfd_name)
-    default_arc_engine = os.path.join(models_dir, arc_name)
+    default_scrfd_engine = os.path.join(engines_dir, scrfd_name)
+    default_arc_engine = os.path.join(engines_dir, arc_name)
     default_gallery = os.path.join(script_dir, "..", "gallery")
-    default_pose_engine = os.path.join(models_dir, pose_name)
+    default_pose_engine = os.path.join(engines_dir, pose_name)
+    default_vvad_model = os.path.join(models_dir, "vvad_face.onnx")
 
     ap = argparse.ArgumentParser(
         "Jetson real-time detection + recognition + blur + RTSP + HTTP"
@@ -547,6 +550,26 @@ def main() -> None:
         type=float,
         default=10.0,
         help="Default lookback window for /who.",
+    )
+
+    ap.add_argument(
+        "--vvad-model",
+        nargs="?",
+        default=None,
+        const=default_vvad_model,
+        help="VVAD ONNX model path; bare flag uses /vvad_face.onnx",
+    )
+    ap.add_argument("--vvad-speaking-thr", type=float, default=0.5)
+    ap.add_argument(
+        "--vvad-buffer-sec",
+        type=float,
+        default=6.0,
+        help="seconds of face history to keep for windowed scoring",
+    )
+    ap.add_argument(
+        "--vvad-active",
+        action="store_true",
+        help="enroll by speaking face (omit = shadow mode: log only)",
     )
 
     args = ap.parse_args()
@@ -973,6 +996,26 @@ def main() -> None:
         face_tracker=face_tracker,
     )
 
+    # --- vision-only speaking-face scorer (VVAD) -------------------------
+    vvad = None
+    if getattr(args, "vvad_model", None):
+        try:
+            from .vvad_speaker import VVADScorer
+
+            vvad = VVADScorer(
+                args.vvad_model,
+                speaking_thr=float(args.vvad_speaking_thr),
+                buffer_sec=float(args.vvad_buffer_sec),
+                use_cuda=False,
+            )  # CPU build on Jetson
+            if face_tracker is not None:
+                face_tracker.vvad = vvad
+            http_api.vvad = vvad
+            http_api.vvad_shadow = not bool(args.vvad_active)
+            logger.info("VVAD enabled (shadow=%s)", http_api.vvad_shadow)
+        except Exception as e:
+            logger.warning("VVAD disabled: %s", e)
+
     # Run the server here
     http = Server(host=args.http_host, port=args.http_port, timeout=15)
 
@@ -1257,6 +1300,8 @@ def main() -> None:
                     draw_boxes=args.draw_boxes,
                     draw_names=args.draw_names,
                 )
+
+            frame = draw_speaking(frame)  # brief "speaking" badge (no-op when none)
 
             # Stats
             dt_ms = (time.perf_counter() - t_start) * 1000.0

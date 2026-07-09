@@ -34,7 +34,10 @@ import logging
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from .vvad_speaker import VVADScorer
 
 import cv2
 import numpy as np
@@ -255,6 +258,8 @@ class FaceTracker:
         # Set as a plain attribute (like on_unknown_sample) by run.py, wired to
         # the auto-merge handler. None = feature off.
         self.on_identity_flip: Optional[Callable[[int, str, str], None]] = None
+        # Vision-only "who is speaking" scorer (set by run.py). Optional.
+        self.vvad: Optional["VVADScorer"] = None
 
         # Gallery (set via set_gallery). All three arrays are parallel —
         # row i of _gal_feats has name _gal_labels[i] and UUID _gal_uuids[i].
@@ -493,6 +498,23 @@ class FaceTracker:
 
             self._active_ids.add(track_id)
 
+            # Feed the speaking-detector buffer. Pad the (tight) SCRFD box so the
+            # crop keeps the full mouth/chin context the VVAD model expects;
+            # clipping the mouth squashes the speaking score. Recognition still
+            # uses the original tight box below.
+            if self.vvad is not None:
+                bw, bh = x2 - x1, y2 - y1
+                px = int(bw * 0.20)
+                pyt = int(bh * 0.15)  # a little on top
+                pyb = int(bh * 0.30)  # more on bottom (mouth/chin)
+                cx1, cy1 = max(0, x1 - px), max(0, y1 - pyt)
+                cx2, cy2 = min(W, x2 + px), min(H, y2 + pyb)
+                self.vvad.push(
+                    track_id,
+                    frame[cy1:cy2, cx1:cx2],
+                    kps=track_det_map.get(track_id, {}).get("kps"),
+                )
+
             # Get or create identity state
             if track_id not in self._identities:
                 self._identities[track_id] = _TrackIdentity(
@@ -557,6 +579,9 @@ class FaceTracker:
 
         # Cleanup tracks that BoTSORT stopped reporting
         self._cleanup_stale()
+
+        if self.vvad is not None:
+            self.vvad.evict(self._active_ids)
 
         # Build the by-area sorted face list used by /who and unknown capture
         self._current_faces = self._build_current_faces(results)
