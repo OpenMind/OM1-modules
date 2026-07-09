@@ -290,14 +290,14 @@ class VVADScorer:
 
     def _samples_in(
         self, track_id: int, t0: float, t1: float
-    ) -> List[Tuple[float, float, float, float]]:
+    ) -> List[Tuple[float, ...]]:
         with self._lock:
             dq = self._buf.get(track_id)
             if not dq:
                 return []
             return [s for s in dq if t0 <= s[0] <= t1]
 
-    def _recent(self, track_id: int) -> List[Tuple[float, float, float]]:
+    def _recent(self, track_id: int) -> List[Tuple[float, ...]]:
         now = time.time()
         return self._samples_in(track_id, now - self.window_sec, now)
 
@@ -315,7 +315,7 @@ class VVADScorer:
     # scoring
     def _score_samples(
         self,
-        samples: List[Tuple[float, float, float]],
+        samples: List[Tuple[float, ...]],
         ref_width: float = 0.0,
         tid: Optional[int] = None,
     ) -> Optional[float]:
@@ -443,7 +443,7 @@ class VVADScorer:
                 scores[int(tid)] = s
         if not scores:
             return None, scores
-        best = max(scores, key=scores.get)
+        best = max(scores, key=lambda tid: scores[tid])
         return (best if scores[best] >= self.speaking_thr else None), scores
 
     def resolve_window(

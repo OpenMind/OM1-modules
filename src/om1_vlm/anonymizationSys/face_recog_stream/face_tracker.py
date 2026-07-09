@@ -34,7 +34,10 @@ import logging
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from .vvad_speaker import VVADScorer
 
 import cv2
 import numpy as np
@@ -256,7 +259,7 @@ class FaceTracker:
         # the auto-merge handler. None = feature off.
         self.on_identity_flip: Optional[Callable[[int, str, str], None]] = None
         # Vision-only "who is speaking" scorer (set by run.py). Optional.
-        self.vvad = None
+        self.vvad: Optional["VVADScorer"] = None
 
         # Gallery (set via set_gallery). All three arrays are parallel —
         # row i of _gal_feats has name _gal_labels[i] and UUID _gal_uuids[i].

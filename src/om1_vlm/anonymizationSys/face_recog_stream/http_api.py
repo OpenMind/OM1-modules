@@ -37,7 +37,10 @@ import logging
 import os.path as osp
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from .vvad_speaker import VVADScorer
 
 import cv2
 import numpy as np
@@ -153,7 +156,7 @@ class HttpAPI:
         self.frame_lock = frame_lock
         # Vision-only speaking scorer (set by run.py). None/shadow => existing
         # largest/most-engaged selection is used for enrollment.
-        self.vvad = None
+        self.vvad: Optional["VVADScorer"] = None
         self.vvad_shadow = True
         # Speaker chosen by the most recent /speaking call (over the ASR
         # utterance window). Consumed by /selfie so enrollment binds to the

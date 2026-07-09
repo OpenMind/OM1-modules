@@ -1008,7 +1008,8 @@ def main() -> None:
                 buffer_sec=float(args.vvad_buffer_sec),
                 use_cuda=False,
             )  # CPU build on Jetson
-            face_tracker.vvad = vvad
+            if face_tracker is not None:
+                face_tracker.vvad = vvad
             http_api.vvad = vvad
             http_api.vvad_shadow = not bool(args.vvad_active)
             logger.info("VVAD enabled (shadow=%s)", http_api.vvad_shadow)
