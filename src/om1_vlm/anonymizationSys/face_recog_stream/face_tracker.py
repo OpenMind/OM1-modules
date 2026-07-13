@@ -28,8 +28,6 @@ Usage:
     # results = [TrackResult(track_id=1, raw_name="wendy", tier="confident", ...), ...]
 """
 
-from __future__ import annotations
-
 import logging
 import time
 from collections import Counter
@@ -45,11 +43,6 @@ import numpy as np
 from . import selfie_logic as sl
 
 log = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Public dataclasses
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -94,11 +87,6 @@ class TrackResult:
     tier: str = sl.TIER_UNCERTAIN
     uuid: Optional[str] = None
     is_known: bool = False
-
-
-# ---------------------------------------------------------------------------
-# Internal state
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -158,11 +146,6 @@ class _TrackIdentity:
     # confident identity to a different one — the trigger for auto-merging
     # fragmented identities (e.g. a frontal vs a profile enrollment).
     last_confident_uuid: Optional[str] = None
-
-
-# ---------------------------------------------------------------------------
-# FaceTracker
-# ---------------------------------------------------------------------------
 
 
 class FaceTracker:
@@ -280,10 +263,6 @@ class FaceTracker:
 
         # Current frame faces (for status queries)
         self._current_faces: list = []
-
-    # ------------------------------------------------------------------
-    # Setup / runtime config
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _init_tracker(track_buffer: int, det_conf: float = 0.5):
@@ -446,10 +425,6 @@ class FaceTracker:
         """Back-compat shim — prefer ``set_thresholds(sim_thr=thr)``."""
         self.sim_thr = float(thr)
 
-    # ------------------------------------------------------------------
-    # Main per-frame entry point
-    # ------------------------------------------------------------------
-
     def update(
         self,
         frame: np.ndarray,
@@ -485,6 +460,7 @@ class FaceTracker:
         self._active_ids = set()
         results: List[TrackResult] = []
         need_recog: List[Tuple[int, np.ndarray, Optional[np.ndarray], float]] = []
+        vvad_track_boxes: List[Tuple[int, Tuple[float, float, float, float]]] = []
 
         for track in tracks:
             x1, y1, x2, y2 = map(int, track[:4])
@@ -498,21 +474,9 @@ class FaceTracker:
 
             self._active_ids.add(track_id)
 
-            # Feed the speaking-detector buffer. Pad the (tight) SCRFD box so the
-            # crop keeps the full mouth/chin context the VVAD model expects;
-            # clipping the mouth squashes the speaking score. Recognition still
-            # uses the original tight box below.
             if self.vvad is not None:
-                bw, bh = x2 - x1, y2 - y1
-                px = int(bw * 0.20)
-                pyt = int(bh * 0.15)  # a little on top
-                pyb = int(bh * 0.30)  # more on bottom (mouth/chin)
-                cx1, cy1 = max(0, x1 - px), max(0, y1 - pyt)
-                cx2, cy2 = min(W, x2 + px), min(H, y2 + pyb)
-                self.vvad.push(
-                    track_id,
-                    frame[cy1:cy2, cx1:cx2],
-                    kps=track_det_map.get(track_id, {}).get("kps"),
+                vvad_track_boxes.append(
+                    (track_id, (float(x1), float(y1), float(x2), float(y2)))
                 )
 
             # Get or create identity state
@@ -581,16 +545,13 @@ class FaceTracker:
         self._cleanup_stale()
 
         if self.vvad is not None:
+            self.vvad.push_frame(frame, vvad_track_boxes)
             self.vvad.evict(self._active_ids)
 
         # Build the by-area sorted face list used by /who and unknown capture
         self._current_faces = self._build_current_faces(results)
 
         return results
-
-    # ------------------------------------------------------------------
-    # Re-identify / display
-    # ------------------------------------------------------------------
 
     def _maybe_reset_for_reidentify(self, ident: _TrackIdentity, now: float) -> None:
         """Reset votes if it's been a while since last recognition attempt.
@@ -808,10 +769,6 @@ class FaceTracker:
             )
         return sorted(faces, key=lambda f: f["area"], reverse=True)
 
-    # ------------------------------------------------------------------
-    # BoTSORT plumbing
-    # ------------------------------------------------------------------
-
     def _run_tracker(self, dets: np.ndarray, frame: np.ndarray) -> np.ndarray:
         """Run BoTSORT. Returns (M, 7) [x1,y1,x2,y2,track_id,conf,cls]."""
         if dets is None or len(dets) == 0:
@@ -871,10 +828,6 @@ class FaceTracker:
                 result[track_id] = entry
 
         return result
-
-    # ------------------------------------------------------------------
-    # Recognition
-    # ------------------------------------------------------------------
 
     def _run_recognition_batch(
         self,
@@ -1207,10 +1160,6 @@ class FaceTracker:
         if ident.unknown_since == 0:
             ident.unknown_since = now
         log.debug("Track %d: unknown (%s)", ident.track_id, reason)
-
-    # ------------------------------------------------------------------
-    # Cleanup / introspection
-    # ------------------------------------------------------------------
 
     def _cleanup_stale(self) -> None:
         """Drop identity state for tracks BoTSORT no longer reports."""

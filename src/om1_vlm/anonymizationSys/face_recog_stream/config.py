@@ -120,16 +120,16 @@ MAX_RECOG_ATTEMPTS = 10
 # - Used in: face_tracker.FaceTracker(max_recog_attempts=...)
 # - Hot-tunable: NO
 
-TRACK_BUFFER = 30
+TRACK_BUFFER = 60
 # BoTSORT frames to keep a 'lost' track alive (waiting for re-detection).
 # Higher = better at handling brief occlusions but increases the chance of
 # track-id mixups when two people swap positions.
 # - Used in: face_tracker.FaceTracker(track_buffer=...)
 # - Hot-tunable: NO
-# - Frame-count, scales with FPS: 30 frames @ 15fps = 2 seconds of occlusion
+# - Frame-count, scales with FPS: 60 frames @ 30fps = 2 seconds of occlusion
 #   tolerance. If you change CAMERA_FPS, scale this accordingly to maintain
 #   the same wall-clock duration.
-# - Example: at 15fps, a face occluded for <2s gets the same track_id back
+# - Example: at 30fps, a face occluded for <2s gets the same track_id back
 #   via BoTSORT's Kalman prediction. After 2s, occlusion timeout fires and
 #   a new track_id is assigned on re-detection.
 
@@ -220,18 +220,19 @@ AUTO_ENROLL_MIN_UNKNOWN_SEC = 1.0
 #   walk-throughs enroll: raise to 1.5s. If robot feels slow: lower
 #   to 0.7-0.8s.
 
-AUTO_ENROLL_MIN_FACE_PX = 26
+AUTO_ENROLL_MIN_FACE_PX = 65
 # Minimum bbox short side for an auto-enroll sample. Below this, samples
 # are dropped — too small to produce reliable embeddings.
 
-# Sized for 640×480 camera (Unitree G1 default). 30 px short side ≈ 6.25%
-# of frame height, equivalent to a person ~2-3m from the camera at ~60° field of view.
+# Sized for the current 1920×1080 camera resolution (~87% of
+# SELFIE_MIN_FACE_PX — see the "slightly looser" note below), equivalent to
+# a person ~2-3m from the camera at ~60° field of view.
 
-# At higher camera resolutions, scale up to maintain the same physical
-# distance threshold:
-#   - 640×480  → 30 px
-#   - 1280×720 → 50 px
-#   - 1920×1080 → 75 px
+# At other camera resolutions, scale to maintain the same physical distance
+# threshold:
+#   - 640×480  → 26 px
+#   - 1280×720 → 43 px
+#   - 1920×1080 → 65 px (current)
 
 # - Used in: auto_enroller.AutoEnroller(min_face_pixels=...)
 # - CLI: --auto-enroll-min-face-px
@@ -415,24 +416,24 @@ SELFIE_MAX_SAMPLES = 4
 # - cfg key: "selfie_max_samples"
 # - Hot-tunable: YES
 
-SELFIE_MIN_ENGAGEMENT = 0.0025
+SELFIE_MIN_ENGAGEMENT = 0.0023
 # Engagement score floor below which a face isn't considered a selfie
 # target. score = (bbox_area / frame_area) × frontality, in [0, 1].
 
-# Calibrated for 640×480 camera + SELFIE_MIN_FACE_PX=30
+# Calibrated for 1920×1080 camera + SELFIE_MIN_FACE_PX=75
 # ---------------------------------------------------------
 # The minimum sensible engagement is the score of a barely-passing face:
-# 30 px frontal face → score = (30×30) / (640×480) × 1.0 = 0.00293.
+# 75 px frontal face → score = (75×75) / (1920×1080) × 1.0 = 0.00271.
 
-# 0.0025 sits just below this with a small margin to absorb detection
+# 0.0023 sits just below this with a small margin to absorb detection
 # box wobble (1-2 px jitter can shrink bbox area by ~10%).
 
 # Behavior at this threshold:
-#   - 30 px frontal face         → 0.00293 ✓ pass
-#   - 30 px ¾-profile (f=0.85)   → 0.00249 ✗ borderline
-#   - 25 px frontal face         → 0.00203 ✗ too small
-#   - 40 px slight side (f=0.5)  → 0.00260 ✓ pass
-#   - 70 px frontal at 1m        → 0.0159  ✓ pass (typical close selfie)
+#   - 75 px frontal face         → 0.00271 ✓ pass
+#   - 75 px ¾-profile (f=0.85)   → 0.00231 ✓ borderline
+#   - 62 px frontal face         → 0.00185 ✗ too small
+#   - 100 px slight side (f=0.5) → 0.00241 ✓ pass
+#   - 175 px frontal at 1m       → 0.01477 ✓ pass (typical close selfie)
 
 # If you change CAMERA_WIDTH/HEIGHT or SELFIE_MIN_FACE_PX, recompute:
 #     min_engagement = (min_face_px)² / (W × H) × 0.85
@@ -453,17 +454,18 @@ SELFIE_AMBIGUITY_RATIO = 0.80
 # - Example: 0.80 means if two faces have engagement scores 0.05 and 0.045,
 #   ratio = 0.9 > 0.80 → ambiguous, skip frame.
 
-SELFIE_MIN_FACE_PX = 30
+SELFIE_MIN_FACE_PX = 75
 # Selfie per-frame quality gate: bbox short side in pixels.
 
-# Sized for 640×480 camera (Unitree G1 default). 30 px short side ≈ 6.25%
-# of frame height, equivalent to a person ~2-3m from the camera at ~60° field of view.
+# Sized for the current 1920×1080 camera resolution. 75 px short side ≈
+# 6.9% of frame height, equivalent to a person ~2-3m from the camera at
+# ~60° field of view.
 
-# At higher camera resolutions (e.g. 1280×720) you can raise this to keep
-# the same physical distance threshold:
+# At other camera resolutions, scale to keep the same physical distance
+# threshold:
 #   - 640×480  → 30 px
 #   - 1280×720 → 50 px
-#   - 1920×1080 → 75 px
+#   - 1920×1080 → 75 px (current)
 
 # - cfg key: "selfie_min_face_px"
 # - Hot-tunable: YES
@@ -616,27 +618,26 @@ CROWD_THR = 12
 # ============================================================================
 
 CAMERA_DEVICE = "/dev/video0"
-CAMERA_WIDTH = 640
-CAMERA_HEIGHT = 480
-# Camera resolution. Unitree G1's onboard camera default is 640×480.
+CAMERA_WIDTH = 1920
+CAMERA_HEIGHT = 1080
 
-# All bbox-size thresholds (SELFIE_MIN_FACE_PX=30, AUTO_ENROLL_MIN_FACE_PX=30)
-# are sized for this resolution. If you bump to a higher resolution camera,
-# scale those thresholds proportionally:
-#   640×480  → 30 px (current)
-#   1280×720 → 50 px
-#   1920×1080 → 75 px
-# to keep the same effective "person distance" threshold.
-CAMERA_FPS = 15
-# Capture frame rate. The Unitree G1 onboard camera runs at 15 fps.
+
+# All bbox-size thresholds (SELFIE_MIN_FACE_PX, AUTO_ENROLL_MIN_FACE_PX) are
+# sized for this resolution. If you change CAMERA_WIDTH/HEIGHT, scale those
+# thresholds proportionally to keep the same effective "person distance"
+# threshold:
+#   640×480   → 30 px
+#   1280×720  → 50 px
+#   1920×1080 → 75 px (current)
+CAMERA_FPS = 30
 
 # All wall-clock-based parameters (recog_interval, min_unknown_sec,
 # re_identify_interval, stale_track_sec) are independent of this — they
 # measure seconds, not frames.
 
 # Frame-count parameters that DO scale with fps:
-#   - TRACK_BUFFER (currently 30 = 2s @ 15fps)
-#   - gc_stale modulo in run.py main loop (15 = ~1s @ 15fps)
+#   - TRACK_BUFFER (currently 60 = 2s @ 30fps)
+#   - gc_stale modulo in run.py main loop (30 = ~1s @ 30fps)
 
 LOCAL_RTSP_URL = "rtsp://localhost:8554/top_camera"
 RAW_LOCAL_RTSP_URL = "rtsp://localhost:8554/top_camera_raw"
