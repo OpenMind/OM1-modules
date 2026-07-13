@@ -460,7 +460,7 @@ class FaceTracker:
         self._active_ids = set()
         results: List[TrackResult] = []
         need_recog: List[Tuple[int, np.ndarray, Optional[np.ndarray], float]] = []
-        vvad_track_boxes: List[Tuple[int, Tuple[int, int, int, int]]] = []
+        vvad_track_boxes: List[Tuple[int, Tuple[float, float, float, float]]] = []
 
         for track in tracks:
             x1, y1, x2, y2 = map(int, track[:4])
@@ -475,7 +475,9 @@ class FaceTracker:
             self._active_ids.add(track_id)
 
             if self.vvad is not None:
-                vvad_track_boxes.append((track_id, (x1, y1, x2, y2)))
+                vvad_track_boxes.append(
+                    (track_id, (float(x1), float(y1), float(x2), float(y2)))
+                )
 
             # Get or create identity state
             if track_id not in self._identities:

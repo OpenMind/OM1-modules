@@ -16,7 +16,7 @@ class MediaPipeFaceMesh:
         refine_landmarks: bool = True,
     ) -> None:
         self._mp = mp
-        self._mesh = mp.solutions.face_mesh.FaceMesh(
+        self._mesh = mp.solutions.face_mesh.FaceMesh(  # type: ignore
             max_num_faces=max_num_faces,
             refine_landmarks=refine_landmarks,
             min_detection_confidence=min_detection_confidence,
