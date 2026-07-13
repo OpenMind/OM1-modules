@@ -153,6 +153,7 @@ from .rtsp_video_writer import RTSPVideoStreamWriter
 from .sample_refresh import SampleRefreshManager
 from .scrfd import TRTSCRFD
 from .vvad_overlay import draw as draw_speaking
+from .vvad_overlay import flag as flag_speaking
 from .who_tracker import WhoTracker, match_falls_to_faces
 from .yolo_pose import TRTYOLOPose
 
@@ -263,7 +264,6 @@ def main() -> None:
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     engines_dir = os.path.join(script_dir, "..", "engine")
-    models_dir = os.path.join(script_dir, "..", "model")
 
     platform_prefix = get_platform_prefix()
     scrfd_name = f"{platform_prefix}_scrfd_10g.engine"
@@ -274,7 +274,6 @@ def main() -> None:
     default_arc_engine = os.path.join(engines_dir, arc_name)
     default_gallery = os.path.join(script_dir, "..", "gallery")
     default_pose_engine = os.path.join(engines_dir, pose_name)
-    default_vvad_model = os.path.join(models_dir, "vvad_face.onnx")
 
     ap = argparse.ArgumentParser(
         "Jetson real-time detection + recognition + blur + RTSP + HTTP"
@@ -496,7 +495,7 @@ def main() -> None:
         "--width",
         type=int,
         default=config.CAMERA_WIDTH,
-        help=f"Capture width. Default {config.CAMERA_WIDTH} (Unitree G1 onboard camera).",
+        help=f"Capture width. Default {config.CAMERA_WIDTH} (pass 640 for the Unitree G1 onboard camera).",
     )
     ap.add_argument(
         "--height",
@@ -553,11 +552,9 @@ def main() -> None:
     )
 
     ap.add_argument(
-        "--vvad-model",
-        nargs="?",
-        default=None,
-        const=default_vvad_model,
-        help="VVAD ONNX model path; bare flag uses /vvad_face.onnx",
+        "--vvad",
+        action="store_true",
+        help="Enable visual speaking detection (MediaPipe FaceMesh + mouth-aperture VAD).",
     )
     ap.add_argument("--vvad-speaking-thr", type=float, default=0.5)
     ap.add_argument(
@@ -996,20 +993,20 @@ def main() -> None:
         face_tracker=face_tracker,
     )
 
-    # --- vision-only speaking-face scorer (VVAD) -------------------------
     vvad = None
-    if getattr(args, "vvad_model", None):
+    if getattr(args, "vvad", False):
         try:
             from .vvad_speaker import VVADScorer
 
             vvad = VVADScorer(
-                args.vvad_model,
                 speaking_thr=float(args.vvad_speaking_thr),
                 buffer_sec=float(args.vvad_buffer_sec),
-                use_cuda=False,
-            )  # CPU build on Jetson
+                fps=float(cap.fps or args.fps),
+            )
+
             if face_tracker is not None:
                 face_tracker.vvad = vvad
+
             http_api.vvad = vvad
             http_api.vvad_shadow = not bool(args.vvad_active)
             logger.info("VVAD enabled (shadow=%s)", http_api.vvad_shadow)
@@ -1100,9 +1097,9 @@ def main() -> None:
                 frame_state.kpss = None if kpss is None else kpss.copy()
                 frame_state.last_ts = time.monotonic()
 
-            # ---- Track-based recognition (BoTSORT + low-freq AdaFace) ----
             names: List[Optional[str]] = []
             known_mask: List[bool] = []
+            track_results = []
 
             if face_tracker is not None:
                 with gal_lock:
@@ -1227,7 +1224,7 @@ def main() -> None:
             # Update who tracker WITH tier + fall info
             who.update_now(names_for_tracking, tiers=tiers, fall_infos=fall_infos)
 
-            # AutoEnroller maintenance, every ~1 second (15 frames @ 15fps):
+            # AutoEnroller maintenance, every ~1 second
             #   1. try_commit_pending — proactively commits buffers whose
             #      gates have all passed since the last observe() call.
             #      Without this, a track that went status="unknown" with a
@@ -1236,7 +1233,7 @@ def main() -> None:
             #   2. gc_stale — drops buffers for tracks BoTSORT stopped
             #      reporting.
             # Both ops are cheap (small dict scans).
-            if auto_enroller is not None and total % 15 == 0:
+            if auto_enroller is not None and total % max(1, int(round(cap.fps or args.fps))) == 0:
                 auto_enroller.try_commit_pending()
                 auto_enroller.gc_stale()
 
@@ -1301,7 +1298,18 @@ def main() -> None:
                     draw_names=args.draw_names,
                 )
 
-            frame = draw_speaking(frame)  # brief "speaking" badge (no-op when none)
+            if vvad is not None and track_results:
+                live_status = [
+                    (
+                        tuple(float(v) for v in tr.bbox),
+                        vvad.is_speaking(tr.track_id),
+                        vvad.score_track(tr.track_id),
+                    )
+                    for tr in track_results
+                ]
+                flag_speaking(live_status, ttl=0.5)
+
+            frame = draw_speaking(frame)
 
             # Stats
             dt_ms = (time.perf_counter() - t_start) * 1000.0
