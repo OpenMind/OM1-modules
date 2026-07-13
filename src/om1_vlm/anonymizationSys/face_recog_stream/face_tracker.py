@@ -264,7 +264,6 @@ class FaceTracker:
         # Current frame faces (for status queries)
         self._current_faces: list = []
 
-
     @staticmethod
     def _init_tracker(track_buffer: int, det_conf: float = 0.5):
         """Initialize BoTSORT with thresholds aligned to detection confidence."""
@@ -426,7 +425,6 @@ class FaceTracker:
         """Back-compat shim — prefer ``set_thresholds(sim_thr=thr)``."""
         self.sim_thr = float(thr)
 
-
     def update(
         self,
         frame: np.ndarray,
@@ -552,7 +550,6 @@ class FaceTracker:
         self._current_faces = self._build_current_faces(results)
 
         return results
-
 
     def _maybe_reset_for_reidentify(self, ident: _TrackIdentity, now: float) -> None:
         """Reset votes if it's been a while since last recognition attempt.
@@ -770,7 +767,6 @@ class FaceTracker:
             )
         return sorted(faces, key=lambda f: f["area"], reverse=True)
 
-
     def _run_tracker(self, dets: np.ndarray, frame: np.ndarray) -> np.ndarray:
         """Run BoTSORT. Returns (M, 7) [x1,y1,x2,y2,track_id,conf,cls]."""
         if dets is None or len(dets) == 0:
@@ -830,7 +826,6 @@ class FaceTracker:
                 result[track_id] = entry
 
         return result
-
 
     def _run_recognition_batch(
         self,
@@ -1163,7 +1158,6 @@ class FaceTracker:
         if ident.unknown_since == 0:
             ident.unknown_since = now
         log.debug("Track %d: unknown (%s)", ident.track_id, reason)
-
 
     def _cleanup_stale(self) -> None:
         """Drop identity state for tracks BoTSORT no longer reports."""

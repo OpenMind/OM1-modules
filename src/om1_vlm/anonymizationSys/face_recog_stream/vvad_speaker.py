@@ -217,7 +217,8 @@ class VVADScorer:
         self, candidate_track_ids: List[int]
     ) -> Tuple[Optional[int], Dict[int, float]]:
         """Score each candidate track (current state) and return the top
-        speaker (if above threshold) with all scores."""
+        speaker (if above threshold) with all scores.
+        """
         scores: Dict[int, float] = {}
         for tid in candidate_track_ids:
             s = self.score_track(int(tid))

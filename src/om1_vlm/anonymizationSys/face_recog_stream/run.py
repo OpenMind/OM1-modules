@@ -1233,7 +1233,10 @@ def main() -> None:
             #   2. gc_stale — drops buffers for tracks BoTSORT stopped
             #      reporting.
             # Both ops are cheap (small dict scans).
-            if auto_enroller is not None and total % max(1, int(round(cap.fps or args.fps))) == 0:
+            if (
+                auto_enroller is not None
+                and total % max(1, int(round(cap.fps or args.fps))) == 0
+            ):
                 auto_enroller.try_commit_pending()
                 auto_enroller.gc_stale()
 

@@ -9,6 +9,8 @@ from .mouth_features import MouthFeature
 
 @dataclass
 class DetectorConfig:
+    """Configuration for :class:`SpeakingDetector`."""
+
     fps: float = 30.0
     window_sec: float = 1.0
 
@@ -26,6 +28,8 @@ class DetectorConfig:
 
 @dataclass
 class DetectorState:
+    """State of a :class:`SpeakingDetector`."""
+
     speaking: bool = False
     score: float = 0.0
     _buf: Deque[float] = field(default_factory=deque)
@@ -44,12 +48,14 @@ class SpeakingDetector:
         self.state._buf = deque(maxlen=self._window_n)
 
     def reset(self) -> None:
+        """Reset the detector state to its initial values."""
         self.state = DetectorState()
         self.state._buf = deque(maxlen=self._window_n)
 
     def update(self, feature: Optional[MouthFeature]) -> DetectorState:
         """Advance one frame. Pass ``None`` or an invalid feature when no
-        trustworthy face was found this frame."""
+        trustworthy face was found this frame.
+        """
         st = self.state
         cfg = self.cfg
 
