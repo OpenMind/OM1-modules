@@ -34,7 +34,7 @@ vulture = "^2.14"
 openai= "1.60.1"
 filelock = "3.20.3"
 prometheus-client = "0.25.0"
-urllib3="2.7.0"
+urllib3="2.8.0"
 httpx = {extras = ["http2"], version = "^0.28.1"}
 
 
