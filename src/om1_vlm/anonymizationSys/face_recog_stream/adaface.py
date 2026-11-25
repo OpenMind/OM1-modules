@@ -114,9 +114,14 @@ class TRTFaceRecognition(TRTModule):
             d_out = self._empty_gpu(out_shape)
             self.context.set_tensor_address(self.out_name, d_out.data_ptr())
 
+            # Bind every other output (e.g. AdaFace's feature norm) to a fresh
+            # buffer on every call. Tensor addresses persist on the context
+            # between calls, so skipping outputs that already have one would
+            # leave them pointing at the previous call's buffer, which has been
+            # freed and may now back an unrelated tensor.
             _extra_bufs = []  # keep references alive until execute completes
             for name in self.output_names:
-                if self.context.get_tensor_address(name):
+                if name == self.out_name:
                     continue
                 extra_shape = tuple(self.context.get_tensor_shape(name))
                 # Replace dynamic dims (-1) with actual batch size
